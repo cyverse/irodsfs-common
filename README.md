@@ -1,2 +1,2 @@
-# irodsfs-common
-common module for irodsfs and irodsfs-pool 
+# iRODSFS-Common
+A common module for iRODS FUSE Lite and iRODS FUSE Lite Pool Server
