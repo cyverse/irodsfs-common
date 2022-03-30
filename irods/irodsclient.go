@@ -5,7 +5,7 @@ import (
 
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
-	"github.com/cyverse/irodsfs-common/util"
+	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -25,7 +25,7 @@ func NewIRODSFSClientDirect(account *irodsclient_types.IRODSAccount, config *iro
 		"function": "NewIRODSFSClientDirect",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	goirodsfs, err := irodsclient_fs.NewFileSystem(account, config)
 	if err != nil {
@@ -57,7 +57,7 @@ func (client *IRODSFSClientDirect) Release() {
 		"function": "Release",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	if client.fs != nil {
 		client.fs.Release()
@@ -77,7 +77,7 @@ func (client *IRODSFSClientDirect) List(path string) ([]*irodsclient_fs.Entry, e
 		"function": "List",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return client.fs.List(path)
 }
@@ -94,7 +94,7 @@ func (client *IRODSFSClientDirect) Stat(path string) (*irodsclient_fs.Entry, err
 		"function": "Stat",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return client.fs.Stat(path)
 }
@@ -111,7 +111,7 @@ func (client *IRODSFSClientDirect) ExistsDir(path string) bool {
 		"function": "ExistsDir",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return client.fs.ExistsDir(path)
 }
@@ -128,7 +128,7 @@ func (client *IRODSFSClientDirect) ListUserGroups(user string) ([]*irodsclient_t
 		"function": "ListUserGroups",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return client.fs.ListUserGroups(user)
 }
@@ -145,7 +145,7 @@ func (client *IRODSFSClientDirect) ListDirACLs(path string) ([]*irodsclient_type
 		"function": "ListDirACLs",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return client.fs.ListDirACLs(path)
 }
@@ -162,7 +162,7 @@ func (client *IRODSFSClientDirect) ListFileACLs(path string) ([]*irodsclient_typ
 		"function": "ListFileACLs",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return client.fs.ListFileACLs(path)
 }
@@ -179,7 +179,7 @@ func (client *IRODSFSClientDirect) RemoveFile(path string, force bool) error {
 		"function": "RemoveFile",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return client.fs.RemoveFile(path, force)
 }
@@ -196,7 +196,7 @@ func (client *IRODSFSClientDirect) RemoveDir(path string, recurse bool, force bo
 		"function": "RemoveDir",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return client.fs.RemoveDir(path, recurse, force)
 }
@@ -213,7 +213,7 @@ func (client *IRODSFSClientDirect) MakeDir(path string, recurse bool) error {
 		"function": "MakeDir",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return client.fs.MakeDir(path, recurse)
 }
@@ -230,7 +230,7 @@ func (client *IRODSFSClientDirect) RenameDirToDir(srcPath string, destPath strin
 		"function": "RenameDirToDir",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return client.fs.RenameDirToDir(srcPath, destPath)
 }
@@ -247,7 +247,7 @@ func (client *IRODSFSClientDirect) RenameFileToFile(srcPath string, destPath str
 		"function": "RenameFileToFile",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return client.fs.RenameFileToFile(srcPath, destPath)
 }
@@ -264,7 +264,7 @@ func (client *IRODSFSClientDirect) CreateFile(path string, resource string, mode
 		"function": "CreateFile",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	handle, err := client.fs.CreateFile(path, resource, mode)
 	if err != nil {
@@ -292,7 +292,7 @@ func (client *IRODSFSClientDirect) OpenFile(path string, resource string, mode s
 		"function": "OpenFile",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	handle, err := client.fs.OpenFile(path, resource, mode)
 	if err != nil {
@@ -320,7 +320,7 @@ func (client *IRODSFSClientDirect) TruncateFile(path string, size int64) error {
 		"function": "TruncateFile",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return client.fs.TruncateFile(path, size)
 }
@@ -351,7 +351,7 @@ func (handle *IRODSFSClientDirectFileHandle) GetOffset() int64 {
 		"function": "GetOffset",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return handle.handle.GetOffset()
 }
@@ -363,7 +363,7 @@ func (handle *IRODSFSClientDirectFileHandle) IsReadMode() bool {
 		"function": "IsReadMode",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return handle.handle.IsReadMode()
 }
@@ -375,7 +375,7 @@ func (handle *IRODSFSClientDirectFileHandle) IsWriteMode() bool {
 		"function": "IsWriteMode",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return handle.handle.IsWriteMode()
 }
@@ -387,7 +387,7 @@ func (handle *IRODSFSClientDirectFileHandle) ReadAt(offset int64, length int) ([
 		"function": "ReadAt",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return handle.handle.ReadAt(offset, length)
 }
@@ -399,7 +399,7 @@ func (handle *IRODSFSClientDirectFileHandle) WriteAt(offset int64, data []byte) 
 		"function": "WriteAt",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return handle.handle.WriteAt(offset, data)
 }
@@ -415,7 +415,7 @@ func (handle *IRODSFSClientDirectFileHandle) Close() error {
 		"function": "Close",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	return handle.handle.Close()
 }

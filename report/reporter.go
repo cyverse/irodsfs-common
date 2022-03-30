@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/cyverse/irodsfs-common/irods"
-	"github.com/cyverse/irodsfs-common/util"
+	"github.com/cyverse/irodsfs-common/utils"
 	monitor_client "github.com/cyverse/irodsfs-monitor/client"
 	monitor_types "github.com/cyverse/irodsfs-monitor/types"
 	log "github.com/sirupsen/logrus"
@@ -54,7 +54,7 @@ func (reporter *IRODSFSRestReporter) StartInstance(instance *monitor_types.Repor
 		"function": "StartInstance",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	if reporter.failed {
 		if reporter.ignoreError {
@@ -110,7 +110,7 @@ func (reporter *IRODSFSInstanceRestReporter) Terminate() error {
 		"function": "Terminate",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	if reporter.reporter.failed {
 		if reporter.reporter.ignoreError {
@@ -311,7 +311,7 @@ func (reporter *IRODSFSInstanceRestReporter) DoneFileAccess(fileHandle irods.IRO
 		"function": "DoneFileAccess",
 	})
 
-	defer util.StackTraceFromPanic(logger)
+	defer utils.StackTraceFromPanic(logger)
 
 	fileEntry := fileHandle.GetEntry()
 
