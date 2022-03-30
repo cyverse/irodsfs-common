@@ -1,0 +1,328 @@
+package io
+
+import (
+	"errors"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/cyverse/irodsfs-common/utils"
+	lrucache "github.com/hashicorp/golang-lru"
+	log "github.com/sirupsen/logrus"
+)
+
+// DiskCacheEntry implements CacheEntry
+type DiskCacheEntry struct {
+	key          string
+	group        string
+	size         int
+	creationTime time.Time
+	filePath     string
+}
+
+// NewDiskCacheEntry creates a new DiskCacheEntry
+func NewDiskCacheEntry(cache *DiskCacheStore, key string, group string, data []byte) (*DiskCacheEntry, error) {
+	logger := log.WithFields(log.Fields{
+		"package":  "io",
+		"struct":   "DiskCache",
+		"function": "Release",
+	})
+
+	// write to disk
+	hash := utils.MakeHash(key)
+	filePath := utils.JoinPath(cache.GetRootPath(), hash)
+
+	logger.Infof("Writing data cache to %s", filePath)
+	err := ioutil.WriteFile(filePath, data, 0666)
+	if err != nil {
+		logger.Error(err)
+		return nil, err
+	}
+
+	return &DiskCacheEntry{
+		key:          key,
+		group:        group,
+		size:         len(data),
+		creationTime: time.Now(),
+		filePath:     filePath,
+	}, nil
+}
+
+// GetKey returns key of the entry
+func (entry *DiskCacheEntry) GetKey() string {
+	return entry.key
+}
+
+// GetKey returns group of the entry
+func (entry *DiskCacheEntry) GetGroup() string {
+	return entry.group
+}
+
+// GetKey returns the size of the entry
+func (entry *DiskCacheEntry) GetSize() int {
+	return entry.size
+}
+
+// GetKey returns creation time of the entry
+func (entry *DiskCacheEntry) GetCreationTime() time.Time {
+	return entry.creationTime
+}
+
+// GetKey returns data of the entry
+func (entry *DiskCacheEntry) GetData() ([]byte, error) {
+	data, err := ioutil.ReadFile(entry.filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	return data, nil
+}
+
+func (entry *DiskCacheEntry) deleteDataFile() error {
+	err := os.Remove(entry.filePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// DiskCacheStore implements CacheStore
+type DiskCacheStore struct {
+	entrySizeCap   int
+	sizeCap        int64
+	entryNumberCap int
+	rootPath       string
+	cache          *lrucache.Cache
+	groups         map[string]map[string]bool // key = group name, value = cache keys for a group
+	mutex          sync.Mutex
+}
+
+// NewDiskCacheStore creates a new DiskCacheStore
+func NewDiskCacheStore(sizeCap int64, entrySizeCap int, rootPath string) (*DiskCacheStore, error) {
+	err := os.MkdirAll(rootPath, 0777)
+	if err != nil {
+		return nil, err
+	}
+
+	var maxCacheEntryNum int = int(sizeCap / int64(entrySizeCap))
+
+	diskCache := &DiskCacheStore{
+		entrySizeCap:   entrySizeCap,
+		sizeCap:        sizeCap,
+		entryNumberCap: maxCacheEntryNum,
+		rootPath:       rootPath,
+		cache:          nil,
+		groups:         map[string]map[string]bool{},
+	}
+
+	lruCache, err := lrucache.NewWithEvict(maxCacheEntryNum, diskCache.onEvicted)
+	if err != nil {
+		return nil, err
+	}
+
+	diskCache.cache = lruCache
+	return diskCache, nil
+}
+
+// Release releases resources
+func (store *DiskCacheStore) Release() {
+	logger := log.WithFields(log.Fields{
+		"package":  "io",
+		"struct":   "DiskCache",
+		"function": "Release",
+	})
+
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	// clear
+	logger.Info("Deleting all data cache entries")
+	store.groups = map[string]map[string]bool{}
+	store.cache.Purge()
+
+	logger.Infof("Deleting cache files and directory %s", store.rootPath)
+	os.RemoveAll(store.rootPath)
+}
+
+// GetEntrySizeCap returns entry size cap
+func (store *DiskCacheStore) GetEntrySizeCap() int {
+	return store.entrySizeCap
+}
+
+// GetSizeCap returns size cap
+func (store *DiskCacheStore) GetSizeCap() int64 {
+	return store.sizeCap
+}
+
+// GetRootPath returns root path of disk cache
+func (store *DiskCacheStore) GetRootPath() string {
+	return store.rootPath
+}
+
+// GetTotalEntries returns total number of entries in cache
+func (store *DiskCacheStore) GetTotalEntries() int {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	return store.cache.Len()
+}
+
+// GetTotalEntrySize returns total size of entries in cache
+func (store *DiskCacheStore) GetTotalEntrySize() int64 {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	return int64(store.cache.Len()) * int64(store.entrySizeCap)
+}
+
+// GetAvailableSize returns available disk space
+func (store *DiskCacheStore) GetAvailableSize() int64 {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	availableEntries := store.entryNumberCap - store.cache.Len()
+	return int64(availableEntries) * int64(store.entrySizeCap)
+}
+
+// DeleteAllEntries deletes all entries
+func (store *DiskCacheStore) DeleteAllEntries() {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	// clear
+	store.groups = map[string]map[string]bool{}
+
+	store.cache.Purge()
+}
+
+// DeleteAllEntriesForGroup deletes all entries in the given group
+func (store *DiskCacheStore) DeleteAllEntriesForGroup(group string) {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	if cacheGroup, ok := store.groups[group]; ok {
+		for key := range cacheGroup {
+			store.cache.Remove(key)
+		}
+	}
+}
+
+// GetEntryKeys returns all entry keys
+func (store *DiskCacheStore) GetEntryKeys() []string {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	keys := []string{}
+	for _, key := range store.cache.Keys() {
+		if strkey, ok := key.(string); ok {
+			keys = append(keys, strkey)
+		}
+	}
+	return keys
+}
+
+// GetEntryKeysForGroup returns all entry keys for the given group
+func (store *DiskCacheStore) GetEntryKeysForGroup(group string) []string {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	keys := []string{}
+	if cacheGroup, ok := store.groups[group]; ok {
+		for key := range cacheGroup {
+			if store.cache.Contains(key) {
+				keys = append(keys, key)
+			}
+		}
+	}
+	return keys
+}
+
+// CreateEntry creates a new entry
+func (store *DiskCacheStore) CreateEntry(key string, group string, data []byte) (CacheEntry, error) {
+	logger := log.WithFields(log.Fields{
+		"package":  "io",
+		"struct":   "DiskCache",
+		"function": "CreateEntry",
+	})
+
+	if store.entrySizeCap < len(data) {
+		return nil, fmt.Errorf("requested data %d is larger than entry size cap %d", len(data), store.entrySizeCap)
+	}
+
+	entry, err := NewDiskCacheEntry(store, key, group, data)
+	if err != nil {
+		return nil, err
+	}
+
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	logger.Infof("putting a new cache with a key %s, group %s", key, group)
+	store.cache.Add(key, entry)
+
+	if cacheGroup, ok := store.groups[group]; ok {
+		cacheGroup[key] = true
+	} else {
+		cacheGroup = map[string]bool{}
+		cacheGroup[key] = true
+		store.groups[group] = cacheGroup
+	}
+
+	return entry, nil
+}
+
+// HasEntry checks if the entry for the given key is present
+func (store *DiskCacheStore) HasEntry(key string) bool {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	return store.cache.Contains(key)
+}
+
+// GetEntry returns an entry with the given key
+func (store *DiskCacheStore) GetEntry(key string) CacheEntry {
+	logger := log.WithFields(log.Fields{
+		"package":  "io",
+		"struct":   "DiskCache",
+		"function": "GetEntry",
+	})
+
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	if entry, ok := store.cache.Get(key); ok {
+		if cacheEntry, ok := entry.(*DiskCacheEntry); ok {
+			logger.Infof("getting a cache with a key %s", key)
+			return cacheEntry
+		}
+	}
+
+	return nil
+}
+
+// DeleteEntry deletes an entry with the given key
+func (store *DiskCacheStore) DeleteEntry(key string) {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+
+	store.cache.Remove(key)
+}
+
+func (store *DiskCacheStore) onEvicted(key interface{}, entry interface{}) {
+	if cacheEntry, ok := entry.(*DiskCacheEntry); ok {
+		cacheEntry.deleteDataFile()
+
+		if cacheGroup, ok := store.groups[cacheEntry.group]; ok {
+			delete(cacheGroup, cacheEntry.key)
+
+			if len(cacheGroup) == 0 {
+				delete(store.groups, cacheEntry.group)
+			}
+		}
+	}
+}

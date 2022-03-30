@@ -2,6 +2,7 @@ package io
 
 import (
 	"github.com/cyverse/irodsfs-common/irods"
+	"github.com/cyverse/irodsfs-common/report"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -9,15 +10,19 @@ import (
 type SyncReader struct {
 	path       string
 	fileHandle irods.IRODSFSFileHandle
+
+	reportClient report.IRODSFSInstanceReportClient
 }
 
 // NewSyncReader create a new SyncReader
-func NewSyncReader(fileHandle irods.IRODSFSFileHandle) *SyncReader {
+func NewSyncReader(fileHandle irods.IRODSFSFileHandle, reportClient report.IRODSFSInstanceReportClient) *SyncReader {
 	entry := fileHandle.GetEntry()
 
 	syncReader := &SyncReader{
 		path:       entry.Path,
 		fileHandle: fileHandle,
+
+		reportClient: reportClient,
 	}
 
 	return syncReader
@@ -45,6 +50,11 @@ func (reader *SyncReader) ReadAt(offset int64, length int) ([]byte, error) {
 	if err != nil {
 		logger.WithError(err).Errorf("failed to read data - %s, offset %d, length %d", reader.path, offset, length)
 		return nil, err
+	}
+
+	// Report
+	if reader.reportClient != nil {
+		reader.reportClient.FileAccess(reader.fileHandle, offset, int64(length))
 	}
 
 	return data, nil

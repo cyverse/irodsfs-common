@@ -38,7 +38,7 @@ func NewAsyncWriter(fileHandle irods.IRODSFSFileHandle, writeBuffer Buffer, repo
 		fileHandle: fileHandle,
 
 		buffer:               writeBuffer,
-		bufferEntryGroupName: fmt.Sprintf("write:%s", entry.Path),
+		bufferEntryGroupName: fmt.Sprintf("write:%s:%s", fileHandle.GetID(), entry.Path),
 
 		writeWaitTasks: sync.WaitGroup{},
 		writeQueue:     channels.NewInfiniteChannel(),
