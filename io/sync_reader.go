@@ -32,6 +32,11 @@ func NewSyncReader(fileHandle irods.IRODSFSFileHandle, reportClient report.IRODS
 func (reader *SyncReader) Release() {
 }
 
+// GetPath returns path of the file
+func (reader *SyncReader) GetPath() string {
+	return reader.path
+}
+
 // ReadAt reads data
 func (reader *SyncReader) ReadAt(offset int64, length int) ([]byte, error) {
 	logger := log.WithFields(log.Fields{

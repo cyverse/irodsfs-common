@@ -54,6 +54,11 @@ func (writer *BufferedWriter) Release() {
 	}
 }
 
+// GetPath returns path of the file
+func (writer *BufferedWriter) GetPath() string {
+	return writer.path
+}
+
 // Flush flushes buffered data
 func (writer *BufferedWriter) Flush() error {
 	logger := log.WithFields(log.Fields{

@@ -49,6 +49,11 @@ func (reader *CachedReader) Release() {
 	}
 }
 
+// GetPath returns path of the file
+func (reader *CachedReader) GetPath() string {
+	return reader.path
+}
+
 func (reader *CachedReader) getCacheEntryKey(blockID int64) string {
 	return fmt.Sprintf("%s:%s:%d", reader.path, reader.checksum, blockID)
 }

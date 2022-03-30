@@ -28,6 +28,11 @@ func NewNilReader(fileHandle irods.IRODSFSFileHandle) *NilReader {
 func (reader *NilReader) Release() {
 }
 
+// GetPath returns path of the file
+func (reader *NilReader) GetPath() string {
+	return reader.path
+}
+
 // ReadAt reads data
 func (reader *NilReader) ReadAt(offset int64, length int) ([]byte, error) {
 	return nil, fmt.Errorf("failed to read data using NilReader - %s, offset %d, length %d", reader.path, offset, length)

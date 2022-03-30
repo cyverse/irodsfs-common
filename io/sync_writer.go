@@ -42,6 +42,11 @@ func (writer *SyncWriter) Release() {
 	writer.Flush()
 }
 
+// GetPath returns path of the file
+func (writer *SyncWriter) GetPath() string {
+	return writer.path
+}
+
 // WriteAt writes data
 func (writer *SyncWriter) WriteAt(offset int64, data []byte) error {
 	logger := log.WithFields(log.Fields{

@@ -28,6 +28,11 @@ func NewNilWriter(fileHandle irods.IRODSFSFileHandle) *NilWriter {
 func (writer *NilWriter) Release() {
 }
 
+// GetPath returns path of the file
+func (writer *NilWriter) GetPath() string {
+	return writer.path
+}
+
 // WriteAt writes data
 func (writer *NilWriter) WriteAt(offset int64, data []byte) error {
 	return fmt.Errorf("failed to write data using NilWriter - %s, offset %d, length %d", writer.path, offset, len(data))
