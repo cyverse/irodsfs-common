@@ -22,9 +22,9 @@ const (
 )
 
 // NewCachedReader create a new CachedReader
-func NewCachedReader(path string, checksum string, cacheStore CacheStore, reader Reader) *CachedReader {
+func NewCachedReader(checksum string, cacheStore CacheStore, reader Reader) *CachedReader {
 	cacheReader := &CachedReader{
-		path:     path,
+		path:     reader.GetPath(),
 		checksum: checksum,
 
 		cacheStore:  cacheStore,

@@ -272,8 +272,6 @@ func (client *IRODSFSClientDirect) CreateFile(path string, resource string, mode
 	}
 
 	fileHandle := &IRODSFSClientDirectFileHandle{
-		id:     handle.GetID(),
-		client: client,
 		handle: handle,
 	}
 
@@ -300,8 +298,6 @@ func (client *IRODSFSClientDirect) OpenFile(path string, resource string, mode s
 	}
 
 	fileHandle := &IRODSFSClientDirectFileHandle{
-		id:     handle.GetID(),
-		client: client,
 		handle: handle,
 	}
 
@@ -327,13 +323,11 @@ func (client *IRODSFSClientDirect) TruncateFile(path string, size int64) error {
 
 // IRODSFSClientDirectFileHandle implements IRODSFSFileHandle
 type IRODSFSClientDirectFileHandle struct {
-	id     string
-	client *IRODSFSClientDirect
 	handle *irodsclient_fs.FileHandle
 }
 
 func (handle *IRODSFSClientDirectFileHandle) GetID() string {
-	return handle.id
+	return handle.handle.GetID()
 }
 
 func (handle *IRODSFSClientDirectFileHandle) GetEntry() *irodsclient_fs.Entry {

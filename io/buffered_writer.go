@@ -25,9 +25,9 @@ type BufferedWriter struct {
 }
 
 // NewBufferedWriter creates a BufferedWriter
-func NewBufferedWriter(path string, writer Writer) *BufferedWriter {
+func NewBufferedWriter(writer Writer) *BufferedWriter {
 	return &BufferedWriter{
-		path: path,
+		path: writer.GetPath(),
 
 		buffer:                   bytes.Buffer{},
 		currentBufferStartOffset: 0,
