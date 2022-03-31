@@ -11,6 +11,9 @@ type IRODSFSClient interface {
 	GetAccount() *irodsclient_types.IRODSAccount
 	GetApplicationName() string
 
+	GetConnections() int
+	GetTransferMetrics() irodsclient_types.TransferMetrics
+
 	// API
 	List(path string) ([]*irodsclient_fs.Entry, error)
 	Stat(path string) (*irodsclient_fs.Entry, error)

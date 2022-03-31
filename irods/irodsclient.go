@@ -49,6 +49,16 @@ func (client *IRODSFSClientDirect) GetApplicationName() string {
 	return client.config.ApplicationName
 }
 
+// GetConnections() returns total number of connections
+func (client *IRODSFSClientDirect) GetConnections() int {
+	return client.fs.Connections()
+}
+
+// GetTransferMetrics() returns transfer metrics
+func (client *IRODSFSClientDirect) GetTransferMetrics() irodsclient_types.TransferMetrics {
+	return client.fs.GetTransferMetrics()
+}
+
 // Release releases resources
 func (client *IRODSFSClientDirect) Release() {
 	logger := log.WithFields(log.Fields{
