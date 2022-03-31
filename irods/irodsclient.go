@@ -126,6 +126,23 @@ func (client *IRODSFSClientDirect) ExistsDir(path string) bool {
 	return client.fs.ExistsDir(path)
 }
 
+// ExistsFile checks existance of a file
+func (client *IRODSFSClientDirect) ExistsFile(path string) bool {
+	if client.fs == nil {
+		return false
+	}
+
+	logger := log.WithFields(log.Fields{
+		"package":  "irods",
+		"struct":   "IRODSFSClientDirect",
+		"function": "ExistsFile",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	return client.fs.ExistsFile(path)
+}
+
 // ListUserGroups lists user groups
 func (client *IRODSFSClientDirect) ListUserGroups(user string) ([]*irodsclient_types.IRODSUser, error) {
 	if client.fs == nil {

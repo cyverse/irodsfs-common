@@ -18,6 +18,7 @@ type IRODSFSClient interface {
 	List(path string) ([]*irodsclient_fs.Entry, error)
 	Stat(path string) (*irodsclient_fs.Entry, error)
 	ExistsDir(path string) bool
+	ExistsFile(path string) bool
 	ListUserGroups(user string) ([]*irodsclient_types.IRODSUser, error)
 	ListDirACLs(path string) ([]*irodsclient_types.IRODSAccess, error)
 	ListFileACLs(path string) ([]*irodsclient_types.IRODSAccess, error)
