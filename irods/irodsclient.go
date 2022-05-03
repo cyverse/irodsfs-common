@@ -401,7 +401,7 @@ func (handle *IRODSFSClientDirectFileHandle) IsWriteMode() bool {
 	return handle.handle.IsWriteMode()
 }
 
-func (handle *IRODSFSClientDirectFileHandle) ReadAt(offset int64, length int) ([]byte, error) {
+func (handle *IRODSFSClientDirectFileHandle) ReadAt(buffer []byte, offset int64) (int, error) {
 	logger := log.WithFields(log.Fields{
 		"package":  "irods",
 		"struct":   "IRODSFSClientDirectFileHandle",
@@ -410,10 +410,10 @@ func (handle *IRODSFSClientDirectFileHandle) ReadAt(offset int64, length int) ([
 
 	defer utils.StackTraceFromPanic(logger)
 
-	return handle.handle.ReadAt(offset, length)
+	return handle.handle.ReadAt(buffer, offset)
 }
 
-func (handle *IRODSFSClientDirectFileHandle) WriteAt(offset int64, data []byte) error {
+func (handle *IRODSFSClientDirectFileHandle) WriteAt(data []byte, offset int64) (int, error) {
 	logger := log.WithFields(log.Fields{
 		"package":  "irods",
 		"struct":   "IRODSFSClientDirectFileHandle",
@@ -422,7 +422,7 @@ func (handle *IRODSFSClientDirectFileHandle) WriteAt(offset int64, data []byte) 
 
 	defer utils.StackTraceFromPanic(logger)
 
-	return handle.handle.WriteAt(offset, data)
+	return handle.handle.WriteAt(data, offset)
 }
 
 func (handle *IRODSFSClientDirectFileHandle) Flush() error {

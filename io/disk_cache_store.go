@@ -3,6 +3,7 @@ package io
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"sync"
@@ -71,13 +72,28 @@ func (entry *DiskCacheEntry) GetCreationTime() time.Time {
 }
 
 // GetKey returns data of the entry
-func (entry *DiskCacheEntry) GetData() ([]byte, error) {
-	data, err := ioutil.ReadFile(entry.filePath)
+func (entry *DiskCacheEntry) GetData(buffer []byte) (int, error) {
+	f, err := os.Open(entry.filePath)
 	if err != nil {
-		return nil, err
+		return 0, err
+	}
+	defer f.Close()
+
+	currentOffset := 0
+	toRead := len(buffer)
+	for currentOffset < toRead {
+		readLen, err := f.Read(buffer[currentOffset:])
+		if err != nil && err != io.EOF {
+			return 0, err
+		}
+		currentOffset += readLen
+
+		if err == io.EOF {
+			break
+		}
 	}
 
-	return data, nil
+	return currentOffset, nil
 }
 
 func (entry *DiskCacheEntry) deleteDataFile() error {

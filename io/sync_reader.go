@@ -1,6 +1,8 @@
 package io
 
 import (
+	"io"
+
 	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/report"
 	log "github.com/sirupsen/logrus"
@@ -38,31 +40,32 @@ func (reader *SyncReader) GetPath() string {
 }
 
 // ReadAt reads data
-func (reader *SyncReader) ReadAt(offset int64, length int) ([]byte, error) {
+func (reader *SyncReader) ReadAt(buffer []byte, offset int64) (int, error) {
 	logger := log.WithFields(log.Fields{
 		"package":  "io",
 		"struct":   "SyncReader",
 		"function": "ReadAt",
 	})
 
-	if length <= 0 || offset < 0 {
-		return []byte{}, nil
+	if len(buffer) <= 0 || offset < 0 {
+		return 0, nil
 	}
 
-	logger.Infof("Sync Reading - %s, offset %d, length %d", reader.path, offset, length)
+	logger.Infof("Sync Reading - %s, offset %d, length %d", reader.path, offset, len(buffer))
 
-	data, err := reader.fileHandle.ReadAt(offset, length)
-	if err != nil {
-		logger.WithError(err).Errorf("failed to read data - %s, offset %d, length %d", reader.path, offset, length)
-		return nil, err
+	readLen, err := reader.fileHandle.ReadAt(buffer, offset)
+	if err != nil && err != io.EOF {
+		logger.WithError(err).Errorf("failed to read data - %s, offset %d, length %d", reader.path, offset, len(buffer))
+		return 0, err
 	}
 
 	// Report
 	if reader.reportClient != nil {
-		reader.reportClient.FileAccess(reader.fileHandle, offset, int64(length))
+		reader.reportClient.FileAccess(reader.fileHandle, offset, int64(readLen))
 	}
 
-	return data, nil
+	// may return EOF as well
+	return readLen, err
 }
 
 func (reader *SyncReader) GetPendingError() error {

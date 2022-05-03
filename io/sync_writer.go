@@ -48,7 +48,7 @@ func (writer *SyncWriter) GetPath() string {
 }
 
 // WriteAt writes data
-func (writer *SyncWriter) WriteAt(offset int64, data []byte) error {
+func (writer *SyncWriter) WriteAt(data []byte, offset int64) (int, error) {
 	logger := log.WithFields(log.Fields{
 		"package":  "io",
 		"struct":   "SyncWriter",
@@ -58,23 +58,23 @@ func (writer *SyncWriter) WriteAt(offset int64, data []byte) error {
 	defer utils.StackTraceFromPanic(logger)
 
 	if len(data) == 0 || offset < 0 {
-		return nil
+		return 0, nil
 	}
 
 	logger.Infof("Sync Writing - %s, offset %d, length %d", writer.path, offset, len(data))
 
-	err := writer.fileHandle.WriteAt(offset, data)
+	writeLen, err := writer.fileHandle.WriteAt(data, offset)
 	if err != nil {
 		logger.WithError(err).Errorf("failed to write data - %s, offset %d, length %d", writer.path, offset, len(data))
-		return err
+		return 0, err
 	}
 
 	// Report
 	if writer.reportClient != nil {
-		writer.reportClient.FileAccess(writer.fileHandle, offset, int64(len(data)))
+		writer.reportClient.FileAccess(writer.fileHandle, offset, int64(writeLen))
 	}
 
-	return nil
+	return writeLen, nil
 }
 
 func (writer *SyncWriter) Flush() error {

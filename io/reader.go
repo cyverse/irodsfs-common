@@ -4,7 +4,7 @@ package io
 type Reader interface {
 	GetPath() string
 
-	ReadAt(offset int64, length int) ([]byte, error)
+	ReadAt(buffer []byte, offset int64) (int, error)
 	GetPendingError() error
 	Release()
 }

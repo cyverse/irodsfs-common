@@ -34,8 +34,8 @@ func (reader *NilReader) GetPath() string {
 }
 
 // ReadAt reads data
-func (reader *NilReader) ReadAt(offset int64, length int) ([]byte, error) {
-	return nil, fmt.Errorf("failed to read data using NilReader - %s, offset %d, length %d", reader.path, offset, length)
+func (reader *NilReader) ReadAt(buffer []byte, offset int64) (int, error) {
+	return 0, fmt.Errorf("failed to read data using NilReader - %s, offset %d, length %d", reader.path, offset, len(buffer))
 }
 
 func (reader *NilReader) GetPendingError() error {

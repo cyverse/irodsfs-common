@@ -34,8 +34,8 @@ func (writer *NilWriter) GetPath() string {
 }
 
 // WriteAt writes data
-func (writer *NilWriter) WriteAt(offset int64, data []byte) error {
-	return fmt.Errorf("failed to write data using NilWriter - %s, offset %d, length %d", writer.path, offset, len(data))
+func (writer *NilWriter) WriteAt(data []byte, offset int64) (int, error) {
+	return 0, fmt.Errorf("failed to write data using NilWriter - %s, offset %d, length %d", writer.path, offset, len(data))
 }
 
 func (writer *NilWriter) Flush() error {

@@ -39,8 +39,8 @@ type IRODSFSFileHandle interface {
 	GetOffset() int64
 	IsReadMode() bool
 	IsWriteMode() bool
-	ReadAt(offset int64, length int) ([]byte, error)
-	WriteAt(offset int64, data []byte) error
+	ReadAt(buffer []byte, offset int64) (int, error)
+	WriteAt(data []byte, offset int64) (int, error)
 	Flush() error
 	Close() error
 }

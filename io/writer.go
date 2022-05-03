@@ -4,7 +4,7 @@ package io
 type Writer interface {
 	GetPath() string
 
-	WriteAt(offset int64, data []byte) error
+	WriteAt(data []byte, offset int64) (int, error)
 	Flush() error
 	GetPendingError() error
 	Release()

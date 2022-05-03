@@ -91,7 +91,7 @@ func (writer *AsyncWriter) getBufferEntryOffset(key string) (int64, error) {
 }
 
 // Write writes data
-func (writer *AsyncWriter) WriteAt(offset int64, data []byte) error {
+func (writer *AsyncWriter) WriteAt(data []byte, offset int64) (int, error) {
 	logger := log.WithFields(log.Fields{
 		"package":  "io",
 		"struct":   "AsyncWriter",
@@ -101,7 +101,7 @@ func (writer *AsyncWriter) WriteAt(offset int64, data []byte) error {
 	defer utils.StackTraceFromPanic(logger)
 
 	if len(data) == 0 || offset < 0 {
-		return nil
+		return 0, nil
 	}
 
 	entryKey := writer.getBufferEntryKey(offset)
@@ -110,7 +110,7 @@ func (writer *AsyncWriter) WriteAt(offset int64, data []byte) error {
 	_, err := entryGroup.CreateEntry(entryKey, data)
 	if err != nil {
 		logger.WithError(err).Errorf("failed to put an entry to buffer - %s, %s", writer.bufferEntryGroupName, entryKey)
-		return err
+		return 0, err
 	}
 
 	// schedule background write
@@ -121,10 +121,10 @@ func (writer *AsyncWriter) WriteAt(offset int64, data []byte) error {
 	err = writer.GetPendingError()
 	if err != nil {
 		logger.WithError(err).Errorf("failed to write - %s, %v", writer.bufferEntryGroupName, err)
-		return err
+		return 0, err
 	}
 
-	return nil
+	return len(data), nil
 }
 
 // Flush flushes buffered data
@@ -219,7 +219,7 @@ func (writer *AsyncWriter) backgroundWriteTask() {
 
 			logger.Infof("Async Writing - %s, Offset %d, length %d", writer.path, offset, len(data))
 
-			err = writer.fileHandle.WriteAt(offset, data)
+			_, err = writer.fileHandle.WriteAt(data, offset)
 			if err != nil {
 				logger.WithError(err).Errorf("failed to write data - %s, %d, %d", writer.path, offset, len(data))
 				writer.addAsyncError(err)

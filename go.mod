@@ -3,7 +3,7 @@ module github.com/cyverse/irodsfs-common
 go 1.14
 
 require (
-	github.com/cyverse/go-irodsclient v0.8.0
+	github.com/cyverse/go-irodsclient v0.9.0
 	github.com/cyverse/irodsfs-monitor v0.0.0-20210917223838-2f6d5cbbde0a
 	github.com/eapache/channels v1.1.0
 	github.com/eapache/queue v1.1.0 // indirect
