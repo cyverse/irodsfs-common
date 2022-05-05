@@ -30,7 +30,7 @@ type AsyncWriter struct {
 }
 
 // NewAsyncWriter create a new AsyncWriter
-func NewAsyncWriter(fileHandle irods.IRODSFSFileHandle, writeBuffer Buffer, reportClient report.IRODSFSInstanceReportClient) *AsyncWriter {
+func NewAsyncWriter(fileHandle irods.IRODSFSFileHandle, writeBuffer Buffer, reportClient report.IRODSFSInstanceReportClient) Writer {
 	entry := fileHandle.GetEntry()
 
 	asyncWriter := &AsyncWriter{

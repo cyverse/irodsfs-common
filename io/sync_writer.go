@@ -16,7 +16,7 @@ type SyncWriter struct {
 }
 
 // NewSyncWriter create a new SyncWriter
-func NewSyncWriter(fileHandle irods.IRODSFSFileHandle, reportClient report.IRODSFSInstanceReportClient) *SyncWriter {
+func NewSyncWriter(fileHandle irods.IRODSFSFileHandle, reportClient report.IRODSFSInstanceReportClient) Writer {
 	entry := fileHandle.GetEntry()
 
 	syncWriter := &SyncWriter{

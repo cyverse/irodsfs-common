@@ -270,7 +270,7 @@ type RAMBuffer struct {
 }
 
 // NewRAMBuffer creates a new RAMBuffer
-func NewRAMBuffer(sizeCap int64) *RAMBuffer {
+func NewRAMBuffer(sizeCap int64) Buffer {
 	mutex := sync.Mutex{}
 	return &RAMBuffer{
 		sizeCap:       sizeCap,

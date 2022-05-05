@@ -13,7 +13,7 @@ type NilWriter struct {
 }
 
 // NewNilWriter create a new NilWriter
-func NewNilWriter(fileHandle irods.IRODSFSFileHandle) *NilWriter {
+func NewNilWriter(fileHandle irods.IRODSFSFileHandle) Writer {
 	entry := fileHandle.GetEntry()
 
 	nilWriter := &NilWriter{

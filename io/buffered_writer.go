@@ -25,7 +25,7 @@ type BufferedWriter struct {
 }
 
 // NewBufferedWriter creates a BufferedWriter
-func NewBufferedWriter(writer Writer) *BufferedWriter {
+func NewBufferedWriter(writer Writer) Writer {
 	return &BufferedWriter{
 		path: writer.GetPath(),
 

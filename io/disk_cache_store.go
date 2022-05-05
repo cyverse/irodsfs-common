@@ -72,28 +72,30 @@ func (entry *DiskCacheEntry) GetCreationTime() time.Time {
 }
 
 // GetKey returns data of the entry
-func (entry *DiskCacheEntry) GetData(buffer []byte) (int, error) {
+func (entry *DiskCacheEntry) GetData(buffer []byte, inBlockOffset int) (int, error) {
 	f, err := os.Open(entry.filePath)
 	if err != nil {
 		return 0, err
 	}
 	defer f.Close()
 
-	currentOffset := 0
+	f.Seek(int64(inBlockOffset), io.SeekStart)
+
+	totalRead := 0
 	toRead := len(buffer)
-	for currentOffset < toRead {
-		readLen, err := f.Read(buffer[currentOffset:])
+	for totalRead < toRead {
+		readLen, err := f.Read(buffer[totalRead:])
 		if err != nil && err != io.EOF {
 			return 0, err
 		}
-		currentOffset += readLen
+		totalRead += readLen
 
 		if err == io.EOF {
-			break
+			return totalRead, io.EOF
 		}
 	}
 
-	return currentOffset, nil
+	return totalRead, nil
 }
 
 func (entry *DiskCacheEntry) deleteDataFile() error {
@@ -119,7 +121,7 @@ type DiskCacheStore struct {
 }
 
 // NewDiskCacheStore creates a new DiskCacheStore
-func NewDiskCacheStore(sizeCap int64, entrySizeCap int, rootPath string) (*DiskCacheStore, error) {
+func NewDiskCacheStore(sizeCap int64, entrySizeCap int, rootPath string) (CacheStore, error) {
 	err := os.MkdirAll(rootPath, 0777)
 	if err != nil {
 		return nil, err

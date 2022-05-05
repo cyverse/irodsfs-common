@@ -17,7 +17,7 @@ type SyncReader struct {
 }
 
 // NewSyncReader create a new SyncReader
-func NewSyncReader(fileHandle irods.IRODSFSFileHandle, reportClient report.IRODSFSInstanceReportClient) *SyncReader {
+func NewSyncReader(fileHandle irods.IRODSFSFileHandle, reportClient report.IRODSFSInstanceReportClient) Reader {
 	entry := fileHandle.GetEntry()
 
 	syncReader := &SyncReader{

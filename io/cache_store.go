@@ -11,7 +11,7 @@ type CacheEntry interface {
 	GetSize() int
 	GetCreationTime() time.Time
 
-	GetData([]byte) (int, error)
+	GetData(buffer []byte, inBlockOffset int) (int, error)
 }
 
 // CacheStore is a cache management object

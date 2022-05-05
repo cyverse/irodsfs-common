@@ -13,7 +13,7 @@ type NilReader struct {
 }
 
 // NewNilReader create a new NilReader
-func NewNilReader(fileHandle irods.IRODSFSFileHandle) *NilReader {
+func NewNilReader(fileHandle irods.IRODSFSFileHandle) Reader {
 	entry := fileHandle.GetEntry()
 
 	nilReader := &NilReader{
