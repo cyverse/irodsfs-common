@@ -401,6 +401,30 @@ func (handle *IRODSFSClientDirectFileHandle) IsWriteMode() bool {
 	return handle.handle.IsWriteMode()
 }
 
+func (handle *IRODSFSClientDirectFileHandle) Seek(offset int64, whence int) (int64, error) {
+	logger := log.WithFields(log.Fields{
+		"package":  "irods",
+		"struct":   "IRODSFSClientDirectFileHandle",
+		"function": "Seek",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	return handle.handle.Seek(offset, whence)
+}
+
+func (handle *IRODSFSClientDirectFileHandle) Read(buffer []byte) (int, error) {
+	logger := log.WithFields(log.Fields{
+		"package":  "irods",
+		"struct":   "IRODSFSClientDirectFileHandle",
+		"function": "Read",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	return handle.handle.Read(buffer)
+}
+
 func (handle *IRODSFSClientDirectFileHandle) ReadAt(buffer []byte, offset int64) (int, error) {
 	logger := log.WithFields(log.Fields{
 		"package":  "irods",
@@ -411,6 +435,18 @@ func (handle *IRODSFSClientDirectFileHandle) ReadAt(buffer []byte, offset int64)
 	defer utils.StackTraceFromPanic(logger)
 
 	return handle.handle.ReadAt(buffer, offset)
+}
+
+func (handle *IRODSFSClientDirectFileHandle) Write(data []byte) (int, error) {
+	logger := log.WithFields(log.Fields{
+		"package":  "irods",
+		"struct":   "IRODSFSClientDirectFileHandle",
+		"function": "Write",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	return handle.handle.Write(data)
 }
 
 func (handle *IRODSFSClientDirectFileHandle) WriteAt(data []byte, offset int64) (int, error) {

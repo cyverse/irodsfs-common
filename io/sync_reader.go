@@ -5,6 +5,7 @@ import (
 
 	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/report"
+	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -46,6 +47,8 @@ func (reader *SyncReader) ReadAt(buffer []byte, offset int64) (int, error) {
 		"struct":   "SyncReader",
 		"function": "ReadAt",
 	})
+
+	defer utils.StackTraceFromPanic(logger)
 
 	if len(buffer) <= 0 || offset < 0 {
 		return 0, nil
