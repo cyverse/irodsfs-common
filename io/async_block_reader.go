@@ -232,7 +232,8 @@ func (reader *AsyncBlockReader) loadDataBlock(blockID int64) error {
 
 				pipeWriter.CloseWithError(ioErr)
 
-				logger.Debugf("Fetched a block from cache - %s, block id %d", reader.path, blockID)
+				logger.Infof("Fetched a block from cache - %s, block id %d", reader.path, blockID)
+				//logger.Debugf("Fetched a block from cache - %s, block id %d", reader.path, blockID)
 				waiter.Done()
 				return
 			}
@@ -256,6 +257,11 @@ func (reader *AsyncBlockReader) loadDataBlock(blockID int64) error {
 			readLen, readErr := reader.baseReader.ReadAt(readBuffer[:toCopy], currentOffset)
 			if readLen > 0 {
 				_, writeErr := pipeWriter.Write(readBuffer[:readLen])
+				if useCache {
+					// copy to cacheBuffer
+					copy(cacheBuffer[totalReadLen:], readBuffer[:readLen])
+				}
+
 				totalReadLen += readLen
 
 				if writeErr != nil {
