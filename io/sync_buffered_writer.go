@@ -8,30 +8,28 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const (
-	bufferedWriterBufferSizeMax int = 4 * 1024 * 1024 // 4MB
-)
-
 // SyncBufferedWriter is a writer that buffers data in RAM before write
 type SyncBufferedWriter struct {
 	path string
 
 	buffer                   bytes.Buffer
+	bufferSize               int
 	currentBufferStartOffset int64
 	bufferMutex              sync.Mutex
 
-	writer Writer
+	baseWriter Writer
 }
 
 // NewSyncBufferedWriter creates a SyncBufferedWriter
-func NewSyncBufferedWriter(writer Writer) Writer {
+func NewSyncBufferedWriter(writer Writer, bufferSize int) Writer {
 	return &SyncBufferedWriter{
 		path: writer.GetPath(),
 
 		buffer:                   bytes.Buffer{},
+		bufferSize:               bufferSize,
 		currentBufferStartOffset: 0,
 
-		writer: writer,
+		baseWriter: writer,
 	}
 }
 
@@ -47,9 +45,9 @@ func (writer *SyncBufferedWriter) Release() {
 
 	writer.Flush()
 
-	if writer.writer != nil {
-		writer.writer.Release()
-		writer.writer = nil
+	if writer.baseWriter != nil {
+		writer.baseWriter.Release()
+		writer.baseWriter = nil
 	}
 }
 
@@ -70,7 +68,7 @@ func (writer *SyncBufferedWriter) Flush() error {
 
 	// empty buffer
 	if writer.buffer.Len() > 0 {
-		_, err := writer.writer.WriteAt(writer.buffer.Bytes(), writer.currentBufferStartOffset)
+		_, err := writer.baseWriter.WriteAt(writer.buffer.Bytes(), writer.currentBufferStartOffset)
 		if err != nil {
 			logger.Error(err)
 			return err
@@ -80,7 +78,7 @@ func (writer *SyncBufferedWriter) Flush() error {
 	writer.currentBufferStartOffset = 0
 	writer.buffer.Reset()
 
-	return writer.writer.Flush()
+	return writer.baseWriter.Flush()
 }
 
 // Write writes data
@@ -106,7 +104,7 @@ func (writer *SyncBufferedWriter) WriteAt(data []byte, offset int64) (int, error
 		if writer.currentBufferStartOffset+int64(writer.buffer.Len()) != offset {
 			// not continuous
 			// send out
-			_, err := writer.writer.WriteAt(writer.buffer.Bytes(), writer.currentBufferStartOffset)
+			_, err := writer.baseWriter.WriteAt(writer.buffer.Bytes(), writer.currentBufferStartOffset)
 			if err != nil {
 				logger.Error(err)
 				return 0, err
@@ -143,9 +141,9 @@ func (writer *SyncBufferedWriter) WriteAt(data []byte, offset int64) (int, error
 		writer.currentBufferStartOffset = offset
 	}
 
-	if writer.buffer.Len() >= bufferedWriterBufferSizeMax {
+	if writer.buffer.Len() >= writer.bufferSize {
 		// Spill to disk cache
-		_, err := writer.writer.WriteAt(writer.buffer.Bytes(), writer.currentBufferStartOffset)
+		_, err := writer.baseWriter.WriteAt(writer.buffer.Bytes(), writer.currentBufferStartOffset)
 		if err != nil {
 			logger.Error(err)
 			return 0, err
@@ -160,8 +158,8 @@ func (writer *SyncBufferedWriter) WriteAt(data []byte, offset int64) (int, error
 
 // GetPendingError returns pending errors
 func (writer *SyncBufferedWriter) GetPendingError() error {
-	if writer.writer != nil {
-		return writer.writer.GetPendingError()
+	if writer.baseWriter != nil {
+		return writer.baseWriter.GetPendingError()
 	}
 	return nil
 }
