@@ -78,7 +78,7 @@ func (writer *AsyncWriter) WriteAt(data []byte, offset int64) (int, error) {
 		return 0, nil
 	}
 
-	logger.Infof("Writing data - %s, offset %d, length %d", writer.path, offset, len(data))
+	logger.Debugf("Writing data - %s, offset %d, length %d", writer.path, offset, len(data))
 
 	// any pending
 	err := writer.GetPendingError()
@@ -175,7 +175,7 @@ func (writer *AsyncWriter) newDataBuffer(offset int64) error {
 		}
 	}
 
-	logger.Infof("Creating a new buffer - %s, offset %d", writer.path, offset)
+	logger.Debugf("Creating a new buffer - %s, offset %d", writer.path, offset)
 
 	pipeReader, pipeWriter, err := pipeat.PipeInDir(writer.localPipeDir)
 	if err != nil {
@@ -217,7 +217,7 @@ func (writer *AsyncWriter) newDataBuffer(offset int64) error {
 
 		pipeReader.CloseWithError(ioErr)
 
-		logger.Infof("Wrote a buffer - %s, offset %d", writer.path, writer.currentWriteDataBuffer.startOffset)
+		logger.Debugf("Wrote a buffer - %s, offset %d", writer.path, writer.currentWriteDataBuffer.startOffset)
 
 		waiter.Done()
 	}()

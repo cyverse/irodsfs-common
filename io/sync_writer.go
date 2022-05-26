@@ -61,7 +61,7 @@ func (writer *SyncWriter) WriteAt(data []byte, offset int64) (int, error) {
 		return 0, nil
 	}
 
-	logger.Infof("Sync Writing - %s, offset %d, length %d", writer.path, offset, len(data))
+	logger.Debugf("Sync Writing - %s, offset %d, length %d", writer.path, offset, len(data))
 
 	writeLen, err := writer.fileHandle.WriteAt(data, offset)
 	if err != nil {

@@ -100,7 +100,7 @@ func (reader *AsyncBlockReader) ReadAt(buffer []byte, offset int64) (int, error)
 		return 0, nil
 	}
 
-	logger.Infof("Reading data - %s, offset %d, length %d", reader.path, offset, len(buffer))
+	logger.Debugf("Reading data - %s, offset %d, length %d", reader.path, offset, len(buffer))
 
 	// any pending
 	err := reader.GetPendingError()
@@ -183,11 +183,11 @@ func (reader *AsyncBlockReader) loadDataBlock(blockID int64) error {
 		}
 	}
 
-	logger.Infof("Fetching a block - %s, block id %d", reader.path, blockID)
+	logger.Debugf("Fetching a block - %s, block id %d", reader.path, blockID)
 
 	blockStartOffset := reader.blockHelper.GetBlockStartOffset(blockID)
 
-	pipeReader, pipeWriter, err := pipeat.PipeInDir(reader.localPipeDir)
+	pipeReader, pipeWriter, err := pipeat.AsyncWriterPipeInDir(reader.localPipeDir)
 	if err != nil {
 		logger.WithError(err).Errorf("failed to create a pipe on a dir %s", reader.localPipeDir)
 		return err
@@ -211,7 +211,7 @@ func (reader *AsyncBlockReader) loadDataBlock(blockID int64) error {
 
 			if cacheEntry != nil {
 				// read from cache
-				logger.Infof("Read from cache - %s, block id %d", reader.path, blockID)
+				logger.Debugf("Read from cache - %s, block id %d", reader.path, blockID)
 				cacheBuffer := make([]byte, reader.blockSize)
 
 				readLen, readErr := cacheEntry.GetData(cacheBuffer[:reader.blockSize], 0)
@@ -232,7 +232,7 @@ func (reader *AsyncBlockReader) loadDataBlock(blockID int64) error {
 
 				pipeWriter.CloseWithError(ioErr)
 
-				logger.Infof("Fetched a block from cache - %s, block id %d", reader.path, blockID)
+				logger.Debugf("Fetched a block from cache - %s, block id %d", reader.path, blockID)
 				waiter.Done()
 				return
 			}
@@ -282,7 +282,7 @@ func (reader *AsyncBlockReader) loadDataBlock(blockID int64) error {
 
 		pipeWriter.CloseWithError(ioErr)
 
-		logger.Infof("Fetched a block - %s, block id %d", reader.path, blockID)
+		logger.Debugf("Fetched a block - %s, block id %d", reader.path, blockID)
 
 		// cache
 		if useCache {
