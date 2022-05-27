@@ -186,6 +186,13 @@ func (writer *AsyncWriter) newDataBuffer(offset int64) error {
 	waiter := sync.WaitGroup{}
 	waiter.Add(1)
 
+	writer.currentWriteDataBuffer = &writeData{
+		startOffset: offset,
+		pipeReader:  pipeReader,
+		pipeWriter:  pipeWriter,
+		waiter:      &waiter,
+	}
+
 	go func() {
 		var ioErr error
 
@@ -221,13 +228,6 @@ func (writer *AsyncWriter) newDataBuffer(offset int64) error {
 
 		waiter.Done()
 	}()
-
-	writer.currentWriteDataBuffer = &writeData{
-		startOffset: offset,
-		pipeReader:  pipeReader,
-		pipeWriter:  pipeWriter,
-		waiter:      &waiter,
-	}
 
 	return nil
 }
