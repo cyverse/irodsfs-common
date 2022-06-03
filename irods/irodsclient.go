@@ -425,6 +425,18 @@ func (handle *IRODSFSClientDirectFileHandle) WriteAt(data []byte, offset int64) 
 	return handle.handle.WriteAt(data, offset)
 }
 
+func (handle *IRODSFSClientDirectFileHandle) Truncate(size int64) error {
+	logger := log.WithFields(log.Fields{
+		"package":  "irods",
+		"struct":   "IRODSFSClientDirectFileHandle",
+		"function": "Truncate",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	return handle.handle.Truncate(size)
+}
+
 func (handle *IRODSFSClientDirectFileHandle) Flush() error {
 	return nil
 }
