@@ -1,4 +1,4 @@
-package io
+package cache
 
 import (
 	"errors"
@@ -35,7 +35,7 @@ func NewDiskCacheEntry(cache *DiskCacheStore, key string, group string, data []b
 	hash := utils.MakeHash(key)
 	filePath := utils.JoinPath(cache.GetRootPath(), hash)
 
-	logger.Infof("Writing data cache to %s", filePath)
+	logger.Debugf("Writing data cache to %s", filePath)
 	err := ioutil.WriteFile(filePath, data, 0666)
 	if err != nil {
 		logger.Error(err)
@@ -163,7 +163,7 @@ func (store *DiskCacheStore) Release() {
 	store.groups = map[string]map[string]bool{}
 	store.cache.Purge()
 
-	logger.Infof("Deleting cache files and directory %s", store.rootPath)
+	logger.Debugf("Deleting cache files and directory %s", store.rootPath)
 	os.RemoveAll(store.rootPath)
 }
 
@@ -280,7 +280,7 @@ func (store *DiskCacheStore) CreateEntry(key string, group string, data []byte) 
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
 
-	logger.Infof("putting a new cache with a key %s, group %s", key, group)
+	logger.Debugf("putting a new cache with a key %s, group %s", key, group)
 	store.cache.Add(key, entry)
 
 	if cacheGroup, ok := store.groups[group]; ok {
@@ -315,7 +315,7 @@ func (store *DiskCacheStore) GetEntry(key string) CacheEntry {
 
 	if entry, ok := store.cache.Get(key); ok {
 		if cacheEntry, ok := entry.(*DiskCacheEntry); ok {
-			logger.Infof("getting a cache with a key %s", key)
+			logger.Debugf("getting a cache with a key %s", key)
 			return cacheEntry
 		}
 	}

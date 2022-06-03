@@ -5,6 +5,7 @@ import (
 
 	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/report"
+	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -47,11 +48,13 @@ func (reader *SyncReader) ReadAt(buffer []byte, offset int64) (int, error) {
 		"function": "ReadAt",
 	})
 
+	defer utils.StackTraceFromPanic(logger)
+
 	if len(buffer) <= 0 || offset < 0 {
 		return 0, nil
 	}
 
-	logger.Infof("Sync Reading - %s, offset %d, length %d", reader.path, offset, len(buffer))
+	logger.Debugf("Sync Reading - %s, offset %d, length %d", reader.path, offset, len(buffer))
 
 	readLen, err := reader.fileHandle.ReadAt(buffer, offset)
 	if err != nil && err != io.EOF {
