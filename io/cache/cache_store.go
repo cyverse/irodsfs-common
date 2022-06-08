@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"io"
 	"time"
 )
 
@@ -12,6 +13,7 @@ type CacheEntry interface {
 	GetCreationTime() time.Time
 
 	GetData(buffer []byte, inBlockOffset int) (int, error)
+	ReadData(writer io.Writer, inBlockOffset int) (int, error)
 }
 
 // CacheStore is a cache management object

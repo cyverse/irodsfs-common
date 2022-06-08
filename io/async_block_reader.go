@@ -212,18 +212,8 @@ func (reader *AsyncBlockReader) loadDataBlock(blockID int64) error {
 			if cacheEntry != nil {
 				// read from cache
 				logger.Debugf("Read from cache - %s, block id %d", reader.path, blockID)
-				cacheBuffer := make([]byte, reader.blockSize)
 
-				readLen, readErr := cacheEntry.GetData(cacheBuffer[:reader.blockSize], 0)
-				if readLen > 0 {
-					_, writeErr := pipeWriter.Write(cacheBuffer[:readLen])
-					if writeErr != nil {
-						logger.Error(writeErr)
-						reader.addAsyncError(writeErr)
-						ioErr = writeErr
-					}
-				}
-
+				_, readErr := cacheEntry.ReadData(pipeWriter, 0)
 				if readErr != nil {
 					logger.Error(readErr)
 					reader.addAsyncError(readErr)
