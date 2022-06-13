@@ -44,6 +44,10 @@ func TestIO(t *testing.T) {
 	t.Run("test VerySmallAsyncWriteReadWithCache", testVerySmallAsyncWriteReadWithCache)
 	t.Run("test SmallAsyncWriteReadWithCache", testSmallAsyncWriteReadWithCache)
 	t.Run("test LargeAsyncWriteReadWithCache", testLargeAsyncWriteReadWithCache)
+
+	t.Run("test VerySmallAsyncWriteReadWithPrefetch", testVerySmallAsyncWriteReadWithPrefetch)
+	t.Run("test SmallAsyncWriteReadWithPrefetch", testSmallAsyncWriteReadWithPrefetch)
+	t.Run("test LargeAsyncWriteReadWithPrefetch", testLargeAsyncWriteReadWithPrefetch)
 }
 
 func testVerySmallSyncWriteRead(t *testing.T) {
@@ -150,7 +154,35 @@ func testLargeAsyncWriteReadWithCache(t *testing.T) {
 	asyncWriteReadWithCache(t, 20*mb+100)
 }
 
+func testVerySmallAsyncWriteReadWithPrefetch(t *testing.T) {
+	asyncWriteReadWithPrefetch(t, 1*kb)
+	asyncWriteReadWithPrefetch(t, 16*kb)
+	asyncWriteReadWithPrefetch(t, 16*kb+1)
+	asyncWriteReadWithPrefetch(t, 17*kb)
+	asyncWriteReadWithPrefetch(t, 32*kb)
+	asyncWriteReadWithPrefetch(t, 32*kb+1)
+	asyncWriteReadWithPrefetch(t, 33*kb)
+}
+
+func testSmallAsyncWriteReadWithPrefetch(t *testing.T) {
+	asyncWriteReadWithPrefetch(t, 1*mb)
+	asyncWriteReadWithPrefetch(t, 1*mb+1)
+	asyncWriteReadWithPrefetch(t, 1*mb+100)
+	asyncWriteReadWithPrefetch(t, 2*mb)
+	asyncWriteReadWithPrefetch(t, 2*mb+100)
+}
+
+func testLargeAsyncWriteReadWithPrefetch(t *testing.T) {
+	asyncWriteReadWithPrefetch(t, 10*mb)
+	asyncWriteReadWithPrefetch(t, 10*mb+1)
+	asyncWriteReadWithPrefetch(t, 10*mb+100)
+	asyncWriteReadWithPrefetch(t, 20*mb)
+	asyncWriteReadWithPrefetch(t, 20*mb+100)
+}
+
 func syncWriteRead(t *testing.T, size int64) {
+	t.Logf("Testing size %d", size)
+
 	account := GetTestAccount()
 
 	account.ClientServerNegotiation = false
@@ -246,6 +278,8 @@ func syncWriteRead(t *testing.T, size int64) {
 }
 
 func syncBufferedWriteRead(t *testing.T, size int64) {
+	t.Logf("Testing size %d", size)
+
 	account := GetTestAccount()
 
 	account.ClientServerNegotiation = false
@@ -342,6 +376,8 @@ func syncBufferedWriteRead(t *testing.T, size int64) {
 }
 
 func asyncWriteRead(t *testing.T, size int64) {
+	t.Logf("Testing size %d", size)
+
 	account := GetTestAccount()
 
 	account.ClientServerNegotiation = false
@@ -396,7 +432,7 @@ func asyncWriteRead(t *testing.T, size int64) {
 	assert.NoError(t, err)
 
 	syncReader := common_io.NewSyncReader(readHandle, nil)
-	reader := common_io.NewAsyncBlockReader(syncReader, 16*1024, 16*1024, "/tmp")
+	reader := common_io.NewAsyncBlockReader(syncReader, 512*1024, 16*1024, "/tmp")
 	totalReadBytes := int64(0)
 
 	readHasher := sha1.New()
@@ -439,6 +475,8 @@ func asyncWriteRead(t *testing.T, size int64) {
 }
 
 func asyncWriteReadWithCache(t *testing.T, size int64) {
+	t.Logf("Testing size %d", size)
+
 	account := GetTestAccount()
 
 	account.ClientServerNegotiation = false
@@ -496,7 +534,7 @@ func asyncWriteReadWithCache(t *testing.T, size int64) {
 	assert.NoError(t, err)
 
 	syncReader := common_io.NewSyncReader(readHandle, nil)
-	reader := common_io.NewAsyncBlockReaderWithCache(syncReader, 16*1024, 16*1024, "fake_checksum", cacheStore, "/tmp")
+	reader := common_io.NewAsyncBlockReaderWithCache([]common_io.Reader{syncReader}, 512*1024, 16*1024, "fake_checksum", cacheStore, "/tmp")
 	totalReadBytes := int64(0)
 
 	readHasher := sha1.New()
@@ -551,6 +589,143 @@ func asyncWriteReadWithCache(t *testing.T, size int64) {
 	}
 
 	err = readHandle.Close()
+	assert.NoError(t, err)
+
+	readHashBytes = readHasher.Sum(nil)
+	readHashString = hex.EncodeToString(readHashBytes)
+
+	// compare
+	assert.Equal(t, totalWrittenBytes, totalReadBytes)
+	assert.Equal(t, writeHashString, readHashString)
+
+	// delete
+	err = filesystem.RemoveFile(newDataObjectPath, true)
+	assert.NoError(t, err)
+
+	assert.False(t, filesystem.ExistsFile(newDataObjectPath))
+}
+
+func asyncWriteReadWithPrefetch(t *testing.T, size int64) {
+	t.Logf("Testing size %d", size)
+
+	account := GetTestAccount()
+
+	account.ClientServerNegotiation = false
+
+	fsConfig := fs.NewFileSystemConfigWithDefault("irodsfs-common-test")
+
+	filesystem, err := irods.NewIRODSFSClientDirect(account, fsConfig)
+	assert.NoError(t, err)
+	defer filesystem.Release()
+
+	homedir := getHomeDir(ioTestID)
+
+	newDataObjectFilename := "testobj_async_123"
+	newDataObjectPath := homedir + "/" + newDataObjectFilename
+
+	// write
+	writeHandle, err := filesystem.CreateFile(newDataObjectPath, "", "w")
+	assert.NoError(t, err)
+
+	syncWriter := common_io.NewSyncWriter(writeHandle, nil)
+	writer := common_io.NewAsyncWriter(syncWriter, 16*1024, "/tmp")
+
+	buf := makeTestDataBuf(16 * 1024)
+
+	toWrite := size
+	totalWrittenBytes := int64(0)
+
+	writeHasher := sha1.New()
+	for totalWrittenBytes < toWrite {
+		written, writeErr := writer.WriteAt(buf, totalWrittenBytes)
+		assert.NoError(t, writeErr)
+
+		_, hashErr := writeHasher.Write(buf[:written])
+		assert.NoError(t, hashErr)
+
+		totalWrittenBytes += int64(written)
+	}
+
+	err = writer.Flush()
+	assert.NoError(t, err)
+
+	writer.Release()
+
+	err = writeHandle.Close()
+	assert.NoError(t, err)
+
+	writeHashBytes := writeHasher.Sum(nil)
+	writeHashString := hex.EncodeToString(writeHashBytes)
+
+	// read
+	readHandle1, err := filesystem.OpenFile(newDataObjectPath, "", "r")
+	assert.NoError(t, err)
+
+	readHandle2, err := filesystem.OpenFile(newDataObjectPath, "", "r")
+	assert.NoError(t, err)
+
+	cacheStore, err := common_cache.NewDiskCacheStore(100*mb, int(mb), "/tmp")
+	assert.NoError(t, err)
+
+	syncReader1 := common_io.NewSyncReader(readHandle1, nil)
+	syncReader2 := common_io.NewSyncReader(readHandle2, nil)
+	reader := common_io.NewAsyncBlockReaderWithCache([]common_io.Reader{syncReader1, syncReader2}, 512*1024, 16*1024, "fake_checksum", cacheStore, "/tmp")
+	totalReadBytes := int64(0)
+
+	readHasher := sha1.New()
+	readBuffer := make([]byte, 16*1024)
+	for totalReadBytes < totalWrittenBytes {
+		toRead := totalWrittenBytes - totalReadBytes
+		if toRead > int64(len(readBuffer)) {
+			toRead = int64(len(readBuffer))
+		}
+
+		read, readErr := reader.ReadAt(readBuffer[:int32(toRead)], totalReadBytes)
+		_, hashErr := readHasher.Write(readBuffer[:read])
+		assert.NoError(t, hashErr)
+
+		totalReadBytes += int64(read)
+
+		if readErr != nil && readErr == io.EOF {
+			break
+		}
+		assert.NoError(t, readErr)
+	}
+
+	reader.Release()
+
+	readHashBytes := readHasher.Sum(nil)
+	readHashString := hex.EncodeToString(readHashBytes)
+
+	// compare
+	assert.Equal(t, totalWrittenBytes, totalReadBytes)
+	assert.Equal(t, writeHashString, readHashString)
+
+	// read again. must hit cache
+	totalReadBytes = int64(0)
+
+	readHasher = sha1.New()
+	for totalReadBytes < totalWrittenBytes {
+		toRead := totalWrittenBytes - totalReadBytes
+		if toRead > int64(len(readBuffer)) {
+			toRead = int64(len(readBuffer))
+		}
+
+		read, readErr := reader.ReadAt(readBuffer[:int32(toRead)], totalReadBytes)
+		_, hashErr := readHasher.Write(readBuffer[:read])
+		assert.NoError(t, hashErr)
+
+		totalReadBytes += int64(read)
+
+		if readErr != nil && readErr == io.EOF {
+			break
+		}
+		assert.NoError(t, readErr)
+	}
+
+	err = readHandle1.Close()
+	assert.NoError(t, err)
+	err = readHandle2.Close()
 	assert.NoError(t, err)
 
 	readHashBytes = readHasher.Sum(nil)
