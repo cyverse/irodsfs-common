@@ -39,8 +39,8 @@ func (mapping *VPathMapping) Validate() error {
 	return nil
 }
 
-// ValidatePathMappings validates the path mappings given
-func ValidatePathMappings(mappings []VPathMapping) error {
+// ValidateVPathMappings validates the path mappings given
+func ValidateVPathMappings(mappings []VPathMapping) error {
 	mappingDict := map[string]string{}
 
 	for _, mapping := range mappings {
