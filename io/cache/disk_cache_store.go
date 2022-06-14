@@ -173,7 +173,7 @@ func (store *DiskCacheStore) Release() {
 	defer store.mutex.Unlock()
 
 	// clear
-	logger.Info("Deleting all data cache entries")
+	logger.Infof("Deleting all data cache entries")
 	store.groups = map[string]map[string]bool{}
 	store.cache.Purge()
 
