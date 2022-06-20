@@ -1,6 +1,6 @@
 module github.com/cyverse/irodsfs-common
 
-go 1.17
+go 1.18
 
 require (
 	github.com/cyverse/go-irodsclient v0.9.3
