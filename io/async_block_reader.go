@@ -14,7 +14,7 @@ import (
 
 const (
 	// after this point, you can't stop reading the block
-	allowedBlockReadStopRatio float32 = 0.8
+	allowedBlockReadStopRatio float32 = 0.7
 	farFetchedBlockDistance   int64   = 3
 	prefetchBlockReadRatio    float32 = 0.5
 )
