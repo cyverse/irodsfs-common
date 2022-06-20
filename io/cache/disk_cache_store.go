@@ -98,6 +98,20 @@ func (entry *DiskCacheEntry) GetData(buffer []byte, inBlockOffset int) (int, err
 	return totalRead, nil
 }
 
+// ReadData returns data of the entry
+func (entry *DiskCacheEntry) ReadData(writer io.Writer, inBlockOffset int) (int, error) {
+	f, err := os.Open(entry.filePath)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	f.Seek(int64(inBlockOffset), io.SeekStart)
+
+	copied, err := io.Copy(writer, f)
+	return int(copied), err
+}
+
 func (entry *DiskCacheEntry) deleteDataFile() error {
 	err := os.Remove(entry.filePath)
 	if err != nil {
@@ -159,7 +173,7 @@ func (store *DiskCacheStore) Release() {
 	defer store.mutex.Unlock()
 
 	// clear
-	logger.Info("Deleting all data cache entries")
+	logger.Infof("Deleting all data cache entries")
 	store.groups = map[string]map[string]bool{}
 	store.cache.Purge()
 
