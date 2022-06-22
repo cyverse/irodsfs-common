@@ -4,7 +4,7 @@ go 1.18
 
 require (
 	github.com/cyverse/go-irodsclient v0.9.3
-	github.com/cyverse/irodsfs-monitor v0.0.0-20210917223838-2f6d5cbbde0a
+	github.com/cyverse/irodsfs-monitor v0.0.0-20220622193035-bcdf5ca735ca
 	github.com/eikenb/pipeat v0.0.0-20210730190139-06b3e6902001
 	github.com/hashicorp/golang-lru v0.5.4
 	github.com/rs/xid v1.3.0
