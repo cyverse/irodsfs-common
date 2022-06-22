@@ -3,8 +3,10 @@ package testcases
 import (
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/cyverse/go-irodsclient/irods/fs"
 	"github.com/cyverse/go-irodsclient/irods/session"
@@ -36,6 +38,8 @@ func setup() {
 		logger.Error(err)
 		panic(err)
 	}
+
+	rand.Seed(time.Now().UnixNano())
 }
 
 func setup_existing() {
@@ -73,8 +77,8 @@ func GetTestAccount() *types.IRODSAccount {
 	return &accountCpy
 }
 
-func makeTestDataBuf(size int64) []byte {
-	testval := "abcdefghijklmnop" // 16
+func makeFixedContentTestDataBuf(size int64) []byte {
+	testval := "abcdefghijklmnopqrstuvwxyz"
 
 	// fill
 	dataBuf := make([]byte, size)
@@ -86,9 +90,20 @@ func makeTestDataBuf(size int64) []byte {
 	return dataBuf
 }
 
+func makeRandomContentTestDataBuf(size int64) []byte {
+	letters := []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+	// fill
+	dataBuf := make([]byte, size)
+	for i := range dataBuf {
+		dataBuf[i] = letters[rand.Intn(len(letters))]
+	}
+	return dataBuf
+}
+
 func createLocalTestFile(name string, size int64) (string, error) {
 	// fill
-	dataBuf := makeTestDataBuf(1024)
+	dataBuf := makeFixedContentTestDataBuf(1024)
 
 	f, err := ioutil.TempFile("", name)
 	if err != nil {
