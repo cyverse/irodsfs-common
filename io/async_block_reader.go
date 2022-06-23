@@ -158,6 +158,8 @@ func (reader *AsyncBlockReader) ReadAt(buffer []byte, offset int64) (int, error)
 			totalReadLen += readLen
 		}
 
+		logger.Debugf("current block pipe Written: %d, Read: %d", dataBlock.pipeWriter.GetWrittenBytes(), dataBlock.pipeReader.GetReadedBytes())
+
 		// prefetch
 		if reader.prefetchEnabled && !dataBlock.prefetchTriggered {
 			prefetchStartInBlockOffset := int64(float32(reader.blockSize) * prefetchBlockReadRatio)
