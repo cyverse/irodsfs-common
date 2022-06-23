@@ -99,6 +99,20 @@ func (reader *AsyncBlockReader) Release() {
 	reader.releaseAllDataBlocks()
 }
 
+// AddReadersForPrefetching adds readers for prefetching
+func (reader *AsyncBlockReader) AddReadersForPrefetching(readers []Reader) {
+	reader.blockReaderMutex.Lock()
+	defer reader.blockReaderMutex.Unlock()
+
+	for _, r := range readers {
+		reader.readers.PushBack(r)
+	}
+
+	if reader.readers.Len() > 1 {
+		reader.prefetchEnabled = true
+	}
+}
+
 // GetPath returns path of the file
 func (reader *AsyncBlockReader) GetPath() string {
 	return reader.path
