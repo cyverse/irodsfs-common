@@ -40,6 +40,7 @@ type IRODSFSFileHandle interface {
 	IsReadMode() bool
 	IsWriteMode() bool
 	ReadAt(buffer []byte, offset int64) (int, error)
+	GetAvailable(offset int64) int64
 	WriteAt(data []byte, offset int64) (int, error)
 	Truncate(size int64) error
 	Flush() error

@@ -203,6 +203,29 @@ func (reader *AsyncBlockReader) ReadAt(buffer []byte, offset int64) (int, error)
 	return totalReadLen, nil
 }
 
+func (reader *AsyncBlockReader) GetAvailable(offset int64) int64 {
+	if offset < 0 {
+		return -1
+	}
+
+	reader.blockReaderMutex.Lock()
+	defer reader.blockReaderMutex.Unlock()
+
+	blockID := reader.blockHelper.GetBlockIDForOffset(offset)
+	if dataBlock, ok := reader.dataBlockMap[blockID]; ok {
+		// found!
+		writtenLen := dataBlock.pipeWriter.GetWrittenBytes()
+		inBlockOffset := offset - dataBlock.blockStartOffset
+		avail := writtenLen - inBlockOffset
+		if avail >= 0 {
+			return avail
+		}
+		return -1
+	}
+
+	return -1
+}
+
 func (reader *AsyncBlockReader) GetPendingError() error {
 	reader.pendingErrorsMutex.Lock()
 	defer reader.pendingErrorsMutex.Unlock()
@@ -349,7 +372,10 @@ func (reader *AsyncBlockReader) newDataBlock(baseReader Reader, blockID int64) (
 			}
 		}
 
-		readBuffer := make([]byte, reader.readSize)
+		// can read data up to 4x of reader.readSize
+		readMax := reader.readSize * 4
+
+		readBuffer := make([]byte, readMax)
 		var cacheBuffer []byte
 
 		if useCache {
@@ -368,8 +394,26 @@ func (reader *AsyncBlockReader) newDataBlock(baseReader Reader, blockID int64) (
 
 			currentOffset := blockStartOffset + int64(totalReadLen)
 			toCopy := reader.blockSize - totalReadLen
-			if toCopy > len(readBuffer) {
-				toCopy = len(readBuffer)
+
+			if toCopy > reader.readSize {
+				toCopy = reader.readSize
+			}
+
+			// check available len to adjust read size
+			avail := reader.GetAvailable(currentOffset)
+			if avail > int64(reader.readSize) {
+				// has more data!
+				if avail > int64(reader.blockSize-totalReadLen) {
+					// can't cross the current block
+					toCopy = reader.blockSize - totalReadLen
+				} else {
+					toCopy = int(avail)
+				}
+
+				// can't exceed readMax
+				if toCopy > readMax {
+					toCopy = readMax
+				}
 			}
 
 			readLen, readErr := baseReader.ReadAt(readBuffer[:toCopy], currentOffset)

@@ -413,6 +413,11 @@ func (handle *IRODSFSClientDirectFileHandle) ReadAt(buffer []byte, offset int64)
 	return handle.handle.ReadAt(buffer, offset)
 }
 
+func (handle *IRODSFSClientDirectFileHandle) GetAvailable(offset int64) int64 {
+	// unknown
+	return -1
+}
+
 func (handle *IRODSFSClientDirectFileHandle) WriteAt(data []byte, offset int64) (int, error) {
 	logger := log.WithFields(log.Fields{
 		"package":  "irods",

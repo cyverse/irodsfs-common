@@ -71,6 +71,11 @@ func (reader *SyncReader) ReadAt(buffer []byte, offset int64) (int, error) {
 	return readLen, err
 }
 
+// GetAvailable returns available data len
+func (reader *SyncReader) GetAvailable(offset int64) int64 {
+	return reader.fileHandle.GetAvailable(offset)
+}
+
 func (reader *SyncReader) GetPendingError() error {
 	return nil
 }
