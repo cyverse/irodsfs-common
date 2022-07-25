@@ -194,6 +194,23 @@ func (client *IRODSFSClientDirect) ListFileACLs(path string) ([]*irodsclient_typ
 	return client.fs.ListFileACLs(path)
 }
 
+// ListACLsForEntries lists ACLs for entries in a collection
+func (client *IRODSFSClientDirect) ListACLsForEntries(path string) ([]*irodsclient_types.IRODSAccess, error) {
+	if client.fs == nil {
+		return nil, fmt.Errorf("FSClient is nil")
+	}
+
+	logger := log.WithFields(log.Fields{
+		"package":  "irods",
+		"struct":   "IRODSFSClientDirect",
+		"function": "ListACLsForEntries",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	return client.fs.ListACLsForEntries(path)
+}
+
 // RemoveFile removes a file
 func (client *IRODSFSClientDirect) RemoveFile(path string, force bool) error {
 	if client.fs == nil {

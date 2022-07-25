@@ -22,6 +22,7 @@ type IRODSFSClient interface {
 	ListUserGroups(user string) ([]*irodsclient_types.IRODSUser, error)
 	ListDirACLs(path string) ([]*irodsclient_types.IRODSAccess, error)
 	ListFileACLs(path string) ([]*irodsclient_types.IRODSAccess, error)
+	ListACLsForEntries(path string) ([]*irodsclient_types.IRODSAccess, error)
 	RemoveFile(path string, force bool) error
 	RemoveDir(path string, recurse bool, force bool) error
 	MakeDir(path string, recurse bool) error
