@@ -3,7 +3,7 @@ module github.com/cyverse/irodsfs-common
 go 1.18
 
 require (
-	github.com/cyverse/go-irodsclient v0.9.3
+	github.com/cyverse/go-irodsclient v0.9.4
 	github.com/cyverse/irodsfs-monitor v0.0.0-20220622193035-bcdf5ca735ca
 	github.com/eikenb/pipeat v0.0.0-20210730190139-06b3e6902001
 	github.com/hashicorp/golang-lru v0.5.4
@@ -15,6 +15,7 @@ require (
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/kr/text v0.2.0 // indirect
 	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	golang.org/x/sys v0.0.0-20210823070655-63515b42dcdf // indirect
