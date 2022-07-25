@@ -467,23 +467,26 @@ func (reader *AsyncBlockReader) newDataBlock(baseReader Reader, blockID int64) (
 
 			// cache if it fetched a whole block content
 			if useCache {
-				blockKey := reader.makeCacheEntryKey(blockID)
+				// save cache asynchronously
+				go func() {
+					blockKey := reader.makeCacheEntryKey(blockID)
 
-				_, cacheErr := reader.cacheStore.CreateEntry(blockKey, reader.path, cacheBuffer[:totalReadLen])
-				if cacheErr != nil {
-					logger.Error(cacheErr)
-				} else {
-					if totalReadLen == reader.blockSize && ioErr == io.EOF {
-						// EOF
-						// save another cache block for EOF
-						eofBlockKey := reader.makeCacheEntryKey(blockID + 1)
-						_, cacheErr = reader.cacheStore.CreateEntry(eofBlockKey, reader.path, cacheBuffer[:0])
-						if cacheErr != nil {
-							// just log
-							logger.Error(err)
+					_, cacheErr := reader.cacheStore.CreateEntry(blockKey, reader.path, cacheBuffer[:totalReadLen])
+					if cacheErr != nil {
+						logger.Error(cacheErr)
+					} else {
+						if totalReadLen == reader.blockSize && ioErr == io.EOF {
+							// EOF
+							// save another cache block for EOF
+							eofBlockKey := reader.makeCacheEntryKey(blockID + 1)
+							_, cacheErr = reader.cacheStore.CreateEntry(eofBlockKey, reader.path, cacheBuffer[:0])
+							if cacheErr != nil {
+								// just log
+								logger.Error(err)
+							}
 						}
 					}
-				}
+				}()
 			}
 		}
 
