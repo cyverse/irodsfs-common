@@ -1,7 +1,10 @@
 package io
 
+import "github.com/cyverse/irodsfs-common/irods"
+
 // Reader helps data read
 type Reader interface {
+	GetFSClient() irods.IRODSFSClient
 	GetPath() string
 
 	// io.ReaderAt

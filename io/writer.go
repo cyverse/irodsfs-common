@@ -1,7 +1,10 @@
 package io
 
+import "github.com/cyverse/irodsfs-common/irods"
+
 // Writer helps data write
 type Writer interface {
+	GetFSClient() irods.IRODSFSClient
 	GetPath() string
 
 	// io.WriterAt

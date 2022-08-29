@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
+	irodsclient_metrics "github.com/cyverse/go-irodsclient/irods/metrics"
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
@@ -51,12 +52,12 @@ func (client *IRODSFSClientDirect) GetApplicationName() string {
 
 // GetConnections() returns total number of connections
 func (client *IRODSFSClientDirect) GetConnections() int {
-	return client.fs.Connections()
+	return client.fs.ConnectionTotal()
 }
 
 // GetTransferMetrics() returns transfer metrics
-func (client *IRODSFSClientDirect) GetTransferMetrics() irodsclient_types.TransferMetrics {
-	return client.fs.GetTransferMetrics()
+func (client *IRODSFSClientDirect) GetMetrics() *irodsclient_metrics.IRODSMetrics {
+	return client.fs.GetMetrics()
 }
 
 // Release releases resources

@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/cyverse/irodsfs-common/io/cache"
+	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/utils"
 	"github.com/eikenb/pipeat"
 	log "github.com/sirupsen/logrus"
@@ -32,6 +33,7 @@ type readDataBlock struct {
 
 // AsyncBlockReader helps read in block level
 type AsyncBlockReader struct {
+	fsClient        irods.IRODSFSClient
 	path            string
 	checksum        string // can be empty
 	blockSize       int
@@ -74,6 +76,7 @@ func NewAsyncBlockReaderWithCache(readers []Reader, blockSize int, readSize int,
 	}
 
 	reader := &AsyncBlockReader{
+		fsClient:        readers[0].GetFSClient(),
 		path:            readers[0].GetPath(),
 		checksum:        checksum,
 		blockSize:       blockSize,
@@ -111,6 +114,11 @@ func (reader *AsyncBlockReader) AddReadersForPrefetching(readers []Reader) {
 	if reader.readers.Len() > 1 {
 		reader.prefetchEnabled = true
 	}
+}
+
+// GetFSClient returns fs client
+func (reader *AsyncBlockReader) GetFSClient() irods.IRODSFSClient {
+	return reader.fsClient
 }
 
 // GetPath returns path of the file
@@ -340,6 +348,8 @@ func (reader *AsyncBlockReader) newDataBlock(baseReader Reader, blockID int64) (
 			useCache = true
 		}
 
+		metrics := reader.fsClient.GetMetrics()
+
 		// check cache if enabled
 		if useCache {
 			blockKey := reader.makeCacheEntryKey(blockID)
@@ -347,6 +357,10 @@ func (reader *AsyncBlockReader) newDataBlock(baseReader Reader, blockID int64) (
 			if cacheEntry != nil {
 				// read from cache
 				logger.Debugf("Read from cache - %s, block id %d", reader.path, blockID)
+
+				if metrics != nil {
+					metrics.IncreaseCounterForCacheHit(1)
+				}
 
 				_, readErr := cacheEntry.ReadData(pipeWriter, 0)
 				if readErr != nil {
@@ -370,6 +384,10 @@ func (reader *AsyncBlockReader) newDataBlock(baseReader Reader, blockID int64) (
 				waiter.Done()
 				return
 			}
+		}
+
+		if metrics != nil {
+			metrics.IncreaseCounterForCacheMiss(1)
 		}
 
 		// can read data up to 4x of reader.readSize

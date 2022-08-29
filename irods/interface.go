@@ -2,6 +2,7 @@ package irods
 
 import (
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
+	irodsclient_metrics "github.com/cyverse/go-irodsclient/irods/metrics"
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 )
 
@@ -12,7 +13,7 @@ type IRODSFSClient interface {
 	GetApplicationName() string
 
 	GetConnections() int
-	GetTransferMetrics() irodsclient_types.TransferMetrics
+	GetMetrics() *irodsclient_metrics.IRODSMetrics
 
 	// API
 	List(path string) ([]*irodsclient_fs.Entry, error)

@@ -213,7 +213,7 @@ func syncWriteRead(t *testing.T, size int64) {
 	writeHandle, err := filesystem.CreateFile(newDataObjectPath, "", "w")
 	assert.NoError(t, err)
 
-	writer := common_io.NewSyncWriter(writeHandle, nil)
+	writer := common_io.NewSyncWriter(filesystem, writeHandle, nil)
 
 	toWrite := size
 	totalWrittenBytes := int64(0)
@@ -250,7 +250,7 @@ func syncWriteRead(t *testing.T, size int64) {
 	readHandle, err := filesystem.OpenFile(newDataObjectPath, "", "r")
 	assert.NoError(t, err)
 
-	reader := common_io.NewSyncReader(readHandle, nil)
+	reader := common_io.NewSyncReader(filesystem, readHandle, nil)
 	totalReadBytes := int64(0)
 
 	readHasher := sha1.New()
@@ -309,7 +309,7 @@ func syncBufferedWriteRead(t *testing.T, size int64) {
 	writeHandle, err := filesystem.CreateFile(newDataObjectPath, "", "w")
 	assert.NoError(t, err)
 
-	syncWriter := common_io.NewSyncWriter(writeHandle, nil)
+	syncWriter := common_io.NewSyncWriter(filesystem, writeHandle, nil)
 	writer := common_io.NewSyncBufferedWriter(syncWriter, int(64*kb))
 
 	toWrite := size
@@ -347,7 +347,7 @@ func syncBufferedWriteRead(t *testing.T, size int64) {
 	readHandle, err := filesystem.OpenFile(newDataObjectPath, "", "r")
 	assert.NoError(t, err)
 
-	reader := common_io.NewSyncReader(readHandle, nil)
+	reader := common_io.NewSyncReader(filesystem, readHandle, nil)
 	totalReadBytes := int64(0)
 
 	readHasher := sha1.New()
@@ -406,7 +406,7 @@ func asyncWriteRead(t *testing.T, size int64) {
 	writeHandle, err := filesystem.CreateFile(newDataObjectPath, "", "w")
 	assert.NoError(t, err)
 
-	syncWriter := common_io.NewSyncWriter(writeHandle, nil)
+	syncWriter := common_io.NewSyncWriter(filesystem, writeHandle, nil)
 	writer := common_io.NewAsyncWriter(syncWriter, iRODSReadWriteSize, "/tmp")
 
 	toWrite := size
@@ -444,7 +444,7 @@ func asyncWriteRead(t *testing.T, size int64) {
 	readHandle, err := filesystem.OpenFile(newDataObjectPath, "", "r")
 	assert.NoError(t, err)
 
-	syncReader := common_io.NewSyncReader(readHandle, nil)
+	syncReader := common_io.NewSyncReader(filesystem, readHandle, nil)
 	reader := common_io.NewAsyncBlockReader(syncReader, iRODSIOBlockSize, iRODSReadWriteSize, "/tmp")
 	totalReadBytes := int64(0)
 
@@ -504,7 +504,7 @@ func asyncWriteReadWithCache(t *testing.T, size int64) {
 	writeHandle, err := filesystem.CreateFile(newDataObjectPath, "", "w")
 	assert.NoError(t, err)
 
-	syncWriter := common_io.NewSyncWriter(writeHandle, nil)
+	syncWriter := common_io.NewSyncWriter(filesystem, writeHandle, nil)
 	writer := common_io.NewAsyncWriter(syncWriter, iRODSReadWriteSize, "/tmp")
 
 	toWrite := size
@@ -548,7 +548,7 @@ func asyncWriteReadWithCache(t *testing.T, size int64) {
 	cacheStore, err := common_cache.NewDiskCacheStore(100*mb, int(mb), "/tmp")
 	assert.NoError(t, err)
 
-	syncReader := common_io.NewSyncReader(readHandle, nil)
+	syncReader := common_io.NewSyncReader(filesystem, readHandle, nil)
 	reader := common_io.NewAsyncBlockReaderWithCache([]common_io.Reader{syncReader}, iRODSIOBlockSize, iRODSReadWriteSize, entry.CheckSum, cacheStore, "/tmp")
 	totalReadBytes := int64(0)
 
@@ -632,7 +632,7 @@ func asyncWriteReadWithPrefetch(t *testing.T, size int64) {
 	writeHandle, err := filesystem.CreateFile(newDataObjectPath, "", "w")
 	assert.NoError(t, err)
 
-	syncWriter := common_io.NewSyncWriter(writeHandle, nil)
+	syncWriter := common_io.NewSyncWriter(filesystem, writeHandle, nil)
 	writer := common_io.NewAsyncWriter(syncWriter, iRODSReadWriteSize, "/tmp")
 
 	toWrite := size
@@ -679,8 +679,8 @@ func asyncWriteReadWithPrefetch(t *testing.T, size int64) {
 	cacheStore, err := common_cache.NewDiskCacheStore(100*mb, int(mb), "/tmp")
 	assert.NoError(t, err)
 
-	syncReader1 := common_io.NewSyncReader(readHandle1, nil)
-	syncReader2 := common_io.NewSyncReader(readHandle2, nil)
+	syncReader1 := common_io.NewSyncReader(filesystem, readHandle1, nil)
+	syncReader2 := common_io.NewSyncReader(filesystem, readHandle2, nil)
 	reader := common_io.NewAsyncBlockReaderWithCache([]common_io.Reader{syncReader1, syncReader2}, iRODSIOBlockSize, iRODSReadWriteSize, entry.CheckSum, cacheStore, "/tmp")
 	totalReadBytes := int64(0)
 

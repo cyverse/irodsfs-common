@@ -11,6 +11,7 @@ import (
 
 // SyncReader helps sync read
 type SyncReader struct {
+	fsClient   irods.IRODSFSClient
 	path       string
 	fileHandle irods.IRODSFSFileHandle
 
@@ -18,10 +19,11 @@ type SyncReader struct {
 }
 
 // NewSyncReader create a new SyncReader
-func NewSyncReader(fileHandle irods.IRODSFSFileHandle, reportClient report.IRODSFSInstanceReportClient) Reader {
+func NewSyncReader(fsClient irods.IRODSFSClient, fileHandle irods.IRODSFSFileHandle, reportClient report.IRODSFSInstanceReportClient) Reader {
 	entry := fileHandle.GetEntry()
 
 	syncReader := &SyncReader{
+		fsClient:   fsClient,
 		path:       entry.Path,
 		fileHandle: fileHandle,
 
@@ -33,6 +35,11 @@ func NewSyncReader(fileHandle irods.IRODSFSFileHandle, reportClient report.IRODS
 
 // Release releases all resources
 func (reader *SyncReader) Release() {
+}
+
+// GetFSClient returns fs client
+func (reader *SyncReader) GetFSClient() irods.IRODSFSClient {
+	return reader.fsClient
 }
 
 // GetPath returns path of the file

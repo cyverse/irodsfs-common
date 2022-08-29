@@ -8,15 +8,17 @@ import (
 
 // NilReader does nothing for read
 type NilReader struct {
+	fsClient   irods.IRODSFSClient
 	path       string
 	fileHandle irods.IRODSFSFileHandle
 }
 
 // NewNilReader create a new NilReader
-func NewNilReader(fileHandle irods.IRODSFSFileHandle) Reader {
+func NewNilReader(fsClient irods.IRODSFSClient, fileHandle irods.IRODSFSFileHandle) Reader {
 	entry := fileHandle.GetEntry()
 
 	nilReader := &NilReader{
+		fsClient:   fsClient,
 		path:       entry.Path,
 		fileHandle: fileHandle,
 	}
@@ -26,6 +28,11 @@ func NewNilReader(fileHandle irods.IRODSFSFileHandle) Reader {
 
 // Release releases all resources
 func (reader *NilReader) Release() {
+}
+
+// GetFSClient returns fs client
+func (reader *NilReader) GetFSClient() irods.IRODSFSClient {
+	return reader.fsClient
 }
 
 // GetPath returns path of the file

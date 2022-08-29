@@ -8,15 +8,17 @@ import (
 
 // NilWriter does nothing for write
 type NilWriter struct {
+	fsClient   irods.IRODSFSClient
 	path       string
 	fileHandle irods.IRODSFSFileHandle
 }
 
 // NewNilWriter create a new NilWriter
-func NewNilWriter(fileHandle irods.IRODSFSFileHandle) Writer {
+func NewNilWriter(fsClient irods.IRODSFSClient, fileHandle irods.IRODSFSFileHandle) Writer {
 	entry := fileHandle.GetEntry()
 
 	nilWriter := &NilWriter{
+		fsClient:   fsClient,
 		path:       entry.Path,
 		fileHandle: fileHandle,
 	}
@@ -26,6 +28,11 @@ func NewNilWriter(fileHandle irods.IRODSFSFileHandle) Writer {
 
 // Release releases all resources
 func (writer *NilWriter) Release() {
+}
+
+// GetFSClient returns fs client
+func (writer *NilWriter) GetFSClient() irods.IRODSFSClient {
+	return writer.fsClient
 }
 
 // GetPath returns path of the file

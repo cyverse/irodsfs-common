@@ -9,6 +9,7 @@ import (
 
 // SyncWriter helps sync write
 type SyncWriter struct {
+	fsClient   irods.IRODSFSClient
 	path       string
 	fileHandle irods.IRODSFSFileHandle
 
@@ -16,10 +17,11 @@ type SyncWriter struct {
 }
 
 // NewSyncWriter create a new SyncWriter
-func NewSyncWriter(fileHandle irods.IRODSFSFileHandle, reportClient report.IRODSFSInstanceReportClient) Writer {
+func NewSyncWriter(fsClient irods.IRODSFSClient, fileHandle irods.IRODSFSFileHandle, reportClient report.IRODSFSInstanceReportClient) Writer {
 	entry := fileHandle.GetEntry()
 
 	syncWriter := &SyncWriter{
+		fsClient:   fsClient,
 		path:       entry.Path,
 		fileHandle: fileHandle,
 
@@ -40,6 +42,11 @@ func (writer *SyncWriter) Release() {
 	defer utils.StackTraceFromPanic(logger)
 
 	writer.Flush()
+}
+
+// GetFSClient returns fs client
+func (writer *SyncWriter) GetFSClient() irods.IRODSFSClient {
+	return writer.fsClient
 }
 
 // GetPath returns path of the file

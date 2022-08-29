@@ -4,13 +4,15 @@ import (
 	"bytes"
 	"sync"
 
+	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
 )
 
 // SyncBufferedWriter is a writer that buffers data in RAM before write
 type SyncBufferedWriter struct {
-	path string
+	fsClient irods.IRODSFSClient
+	path     string
 
 	buffer                   bytes.Buffer
 	bufferSize               int
@@ -23,7 +25,8 @@ type SyncBufferedWriter struct {
 // NewSyncBufferedWriter creates a SyncBufferedWriter
 func NewSyncBufferedWriter(writer Writer, bufferSize int) Writer {
 	return &SyncBufferedWriter{
-		path: writer.GetPath(),
+		fsClient: writer.GetFSClient(),
+		path:     writer.GetPath(),
 
 		buffer:                   bytes.Buffer{},
 		bufferSize:               bufferSize,
@@ -49,6 +52,11 @@ func (writer *SyncBufferedWriter) Release() {
 		writer.baseWriter.Release()
 		writer.baseWriter = nil
 	}
+}
+
+// GetFSClient returns fs client
+func (writer *SyncBufferedWriter) GetFSClient() irods.IRODSFSClient {
+	return writer.fsClient
 }
 
 // GetPath returns path of the file

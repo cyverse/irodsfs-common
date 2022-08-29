@@ -4,6 +4,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/utils"
 	"github.com/eikenb/pipeat"
 	log "github.com/sirupsen/logrus"
@@ -18,7 +19,8 @@ type writeData struct {
 
 // AsyncWriter helps async write
 type AsyncWriter struct {
-	path string
+	fsClient irods.IRODSFSClient
+	path     string
 
 	baseWriter   Writer
 	writeSize    int
@@ -36,7 +38,8 @@ type AsyncWriter struct {
 // writeSize = 64KB
 func NewAsyncWriter(writer Writer, writeSize int, localPipeDir string) Writer {
 	return &AsyncWriter{
-		path: writer.GetPath(),
+		fsClient: writer.GetFSClient(),
+		path:     writer.GetPath(),
 
 		baseWriter:   writer,
 		writeSize:    writeSize,
@@ -54,6 +57,11 @@ func (writer *AsyncWriter) Release() {
 	defer writer.mutex.Unlock()
 
 	writer.releaseDataBuffer()
+}
+
+// GetFSClient returns fs client
+func (writer *AsyncWriter) GetFSClient() irods.IRODSFSClient {
+	return writer.fsClient
 }
 
 // GetPath returns path
