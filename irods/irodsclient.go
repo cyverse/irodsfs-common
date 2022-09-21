@@ -110,6 +110,98 @@ func (client *IRODSFSClientDirect) Stat(path string) (*irodsclient_fs.Entry, err
 	return client.fs.Stat(path)
 }
 
+// ListXattr lists xattr
+func (client *IRODSFSClientDirect) ListXattr(path string) ([]*irodsclient_types.IRODSMeta, error) {
+	if client.fs == nil {
+		return nil, fmt.Errorf("FSClient is nil")
+	}
+
+	logger := log.WithFields(log.Fields{
+		"package":  "irods",
+		"struct":   "IRODSFSClientDirect",
+		"function": "ListXattr",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	return client.fs.ListMetadata(path)
+}
+
+// GetXattr returns xattr value
+func (client *IRODSFSClientDirect) GetXattr(path string, name string) (*irodsclient_types.IRODSMeta, error) {
+	if client.fs == nil {
+		return nil, fmt.Errorf("FSClient is nil")
+	}
+
+	logger := log.WithFields(log.Fields{
+		"package":  "irods",
+		"struct":   "IRODSFSClientDirect",
+		"function": "GetXattr",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	metas, err := client.fs.ListMetadata(path)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, meta := range metas {
+		if meta.Name == name {
+			return meta, nil
+		}
+	}
+	return nil, fmt.Errorf("failed to find xattr for key %s", name)
+}
+
+// SetXattr sets xattr
+func (client *IRODSFSClientDirect) SetXattr(path string, name string, value string) error {
+	if client.fs == nil {
+		return fmt.Errorf("FSClient is nil")
+	}
+
+	logger := log.WithFields(log.Fields{
+		"package":  "irods",
+		"struct":   "IRODSFSClientDirect",
+		"function": "SetXattr",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	// remove first if exists, ignore error if raised
+	// this is required as we can have multiple metadata with same name in iRODS
+	client.fs.DeleteMetadata(path, name, "", "")
+
+	err := client.fs.AddMetadata(path, name, value, "")
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// RemoveXattr removes xattr
+func (client *IRODSFSClientDirect) RemoveXattr(path string, name string) error {
+	if client.fs == nil {
+		return fmt.Errorf("FSClient is nil")
+	}
+
+	logger := log.WithFields(log.Fields{
+		"package":  "irods",
+		"struct":   "IRODSFSClientDirect",
+		"function": "RemoveXattr",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	err := client.fs.DeleteMetadata(path, name, "", "")
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // ExistsDir checks existance of a dir
 func (client *IRODSFSClientDirect) ExistsDir(path string) bool {
 	if client.fs == nil {

@@ -18,6 +18,10 @@ type IRODSFSClient interface {
 	// API
 	List(path string) ([]*irodsclient_fs.Entry, error)
 	Stat(path string) (*irodsclient_fs.Entry, error)
+	ListXattr(path string) ([]*irodsclient_types.IRODSMeta, error)
+	GetXattr(path string, name string) (*irodsclient_types.IRODSMeta, error)
+	SetXattr(path string, name string, value string) error
+	RemoveXattr(path string, name string) error
 	ExistsDir(path string) bool
 	ExistsFile(path string) bool
 	ListUserGroups(user string) ([]*irodsclient_types.IRODSUser, error)
