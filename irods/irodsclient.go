@@ -151,7 +151,9 @@ func (client *IRODSFSClientDirect) GetXattr(path string, name string) (*irodscli
 			return meta, nil
 		}
 	}
-	return nil, fmt.Errorf("failed to find xattr for key %s", name)
+
+	// if we don't find any, return nil
+	return nil, nil
 }
 
 // SetXattr sets xattr
