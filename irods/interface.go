@@ -36,6 +36,10 @@ type IRODSFSClient interface {
 	CreateFile(path string, resource string, mode string) (IRODSFSFileHandle, error)
 	OpenFile(path string, resource string, mode string) (IRODSFSFileHandle, error)
 	TruncateFile(path string, size int64) error
+
+	// Cache
+	AddCacheUpdateEventHandler(handler irodsclient_fs.FilesystemCacheUpdateEventHandler) (string, error)
+	RemoveCacheUpdateEventHandler(handlerID string) error
 }
 
 type IRODSFSFileHandle interface {

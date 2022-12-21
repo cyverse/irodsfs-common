@@ -460,6 +460,39 @@ func (client *IRODSFSClientDirect) TruncateFile(path string, size int64) error {
 	return client.fs.TruncateFile(path, size)
 }
 
+func (client *IRODSFSClientDirect) AddCacheUpdateEventHandler(handler irodsclient_fs.FilesystemCacheUpdateEventHandler) (string, error) {
+	if client.fs == nil {
+		return "", fmt.Errorf("FSClient is nil")
+	}
+
+	logger := log.WithFields(log.Fields{
+		"package":  "irods",
+		"struct":   "IRODSFSClientDirect",
+		"function": "AddCacheUpdateEventHandler",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	return client.fs.AddCacheUpdateEventHandler(handler), nil
+}
+
+func (client *IRODSFSClientDirect) RemoveCacheUpdateEventHandler(handlerID string) error {
+	if client.fs == nil {
+		return fmt.Errorf("FSClient is nil")
+	}
+
+	logger := log.WithFields(log.Fields{
+		"package":  "irods",
+		"struct":   "IRODSFSClientDirect",
+		"function": "RemoveCacheUpdateEventHandler",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	client.fs.RemoveCacheUpdateEventHandler(handlerID)
+	return nil
+}
+
 // IRODSFSClientDirectFileHandle implements IRODSFSFileHandle
 type IRODSFSClientDirectFileHandle struct {
 	handle *irodsclient_fs.FileHandle
