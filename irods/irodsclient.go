@@ -460,7 +460,7 @@ func (client *IRODSFSClientDirect) TruncateFile(path string, size int64) error {
 	return client.fs.TruncateFile(path, size)
 }
 
-func (client *IRODSFSClientDirect) AddCacheUpdateEventHandler(handler irodsclient_fs.FilesystemCacheUpdateEventHandler) (string, error) {
+func (client *IRODSFSClientDirect) AddCacheEventHandler(handler irodsclient_fs.FilesystemCacheEventHandler) (string, error) {
 	if client.fs == nil {
 		return "", fmt.Errorf("FSClient is nil")
 	}
@@ -468,15 +468,15 @@ func (client *IRODSFSClientDirect) AddCacheUpdateEventHandler(handler irodsclien
 	logger := log.WithFields(log.Fields{
 		"package":  "irods",
 		"struct":   "IRODSFSClientDirect",
-		"function": "AddCacheUpdateEventHandler",
+		"function": "AddCacheEventHandler",
 	})
 
 	defer utils.StackTraceFromPanic(logger)
 
-	return client.fs.AddCacheUpdateEventHandler(handler), nil
+	return client.fs.AddCacheEventHandler(handler), nil
 }
 
-func (client *IRODSFSClientDirect) RemoveCacheUpdateEventHandler(handlerID string) error {
+func (client *IRODSFSClientDirect) RemoveCacheEventHandler(handlerID string) error {
 	if client.fs == nil {
 		return fmt.Errorf("FSClient is nil")
 	}
@@ -484,12 +484,12 @@ func (client *IRODSFSClientDirect) RemoveCacheUpdateEventHandler(handlerID strin
 	logger := log.WithFields(log.Fields{
 		"package":  "irods",
 		"struct":   "IRODSFSClientDirect",
-		"function": "RemoveCacheUpdateEventHandler",
+		"function": "RemoveCacheEventHandler",
 	})
 
 	defer utils.StackTraceFromPanic(logger)
 
-	client.fs.RemoveCacheUpdateEventHandler(handlerID)
+	client.fs.RemoveCacheEventHandler(handlerID)
 	return nil
 }
 

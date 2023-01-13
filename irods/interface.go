@@ -38,8 +38,8 @@ type IRODSFSClient interface {
 	TruncateFile(path string, size int64) error
 
 	// Cache
-	AddCacheUpdateEventHandler(handler irodsclient_fs.FilesystemCacheUpdateEventHandler) (string, error)
-	RemoveCacheUpdateEventHandler(handlerID string) error
+	AddCacheEventHandler(handler irodsclient_fs.FilesystemCacheEventHandler) (string, error)
+	RemoveCacheEventHandler(handlerID string) error
 }
 
 type IRODSFSFileHandle interface {
