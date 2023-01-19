@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"sync"
 	"time"
@@ -36,7 +35,7 @@ func NewDiskCacheEntry(cache *DiskCacheStore, key string, group string, data []b
 	filePath := utils.JoinPath(cache.GetRootPath(), hash)
 
 	logger.Debugf("Writing data cache to %s", filePath)
-	err := ioutil.WriteFile(filePath, data, 0666)
+	err := os.WriteFile(filePath, data, 0666)
 	if err != nil {
 		logger.Error(err)
 		return nil, err

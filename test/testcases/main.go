@@ -2,7 +2,6 @@ package testcases
 
 import (
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"testing"
@@ -105,7 +104,7 @@ func createLocalTestFile(name string, size int64) (string, error) {
 	// fill
 	dataBuf := makeFixedContentTestDataBuf(1024)
 
-	f, err := ioutil.TempFile("", name)
+	f, err := os.CreateTemp("", name)
 	if err != nil {
 		return "", err
 	}
