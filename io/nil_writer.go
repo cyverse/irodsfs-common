@@ -1,9 +1,8 @@
 package io
 
 import (
-	"fmt"
-
 	"github.com/cyverse/irodsfs-common/irods"
+	"golang.org/x/xerrors"
 )
 
 // NilWriter does nothing for write
@@ -42,13 +41,13 @@ func (writer *NilWriter) GetPath() string {
 
 // WriteAt writes data
 func (writer *NilWriter) WriteAt(data []byte, offset int64) (int, error) {
-	return 0, fmt.Errorf("failed to write data using NilWriter - %s, offset %d, length %d", writer.path, offset, len(data))
+	return 0, xerrors.Errorf("failed to writer data to %s, offset %d, length %d", writer.path, offset, len(data))
 }
 
 func (writer *NilWriter) Flush() error {
 	return nil
 }
 
-func (writer *NilWriter) GetPendingError() error {
+func (writer *NilWriter) GetError() error {
 	return nil
 }

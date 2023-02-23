@@ -1,5 +1,6 @@
-package io
+package old
 
+/*
 import (
 	"container/list"
 	"fmt"
@@ -20,7 +21,7 @@ const (
 	prefetchBlockReadRatio    float32 = 0.5
 )
 
-type readDataBlock struct {
+type readBlock struct {
 	id                int64
 	blockStartOffset  int64
 	baseReader        Reader
@@ -44,13 +45,13 @@ type AsyncBlockReader struct {
 
 	readers          *list.List // Reader
 	readerWaiter     *sync.Cond
-	dataBlockMap     map[int64]*readDataBlock
+	dataBlockMap     map[int64]*readBlock
 	blockReaderMutex sync.Mutex // lock for blocks and readers
 
 	cacheStore cache.CacheStore // can be null
 
-	pendingErrors      []error
-	pendingErrorsMutex sync.Mutex
+	lastError error
+	mutex     sync.Mutex
 }
 
 // NewAsyncBlockReader create a new AsyncBlockReader
@@ -86,11 +87,11 @@ func NewAsyncBlockReaderWithCache(readers []Reader, blockSize int, readSize int,
 		prefetchEnabled: prefetchEnabled,
 
 		readers:      readerList,
-		dataBlockMap: map[int64]*readDataBlock{},
+		dataBlockMap: map[int64]*readBlock{},
 
 		cacheStore: cacheStore,
 
-		pendingErrors: []error{},
+		lastError: nil,
 	}
 
 	reader.readerWaiter = sync.NewCond(&reader.blockReaderMutex)
@@ -142,8 +143,8 @@ func (reader *AsyncBlockReader) ReadAt(buffer []byte, offset int64) (int, error)
 
 	logger.Debugf("Reading data - %s, offset %d, length %d", reader.path, offset, len(buffer))
 
-	// any pending
-	err := reader.GetPendingError()
+	// any err
+	err := reader.GetError()
 	if err != nil {
 		logger.WithError(err).Errorf("failed to read - %v", err)
 		return 0, err
@@ -201,8 +202,8 @@ func (reader *AsyncBlockReader) ReadAt(buffer []byte, offset int64) (int, error)
 		}
 	}
 
-	// any pending
-	err = reader.GetPendingError()
+	// any error
+	err = reader.GetError()
 	if err != nil {
 		logger.WithError(err).Errorf("failed to read - %v", err)
 		return 0, err
@@ -234,24 +235,17 @@ func (reader *AsyncBlockReader) GetAvailable(offset int64) int64 {
 	return -1
 }
 
-func (reader *AsyncBlockReader) GetPendingError() error {
-	reader.pendingErrorsMutex.Lock()
-	defer reader.pendingErrorsMutex.Unlock()
+func (reader *AsyncBlockReader) GetError() error {
+	reader.mutex.Lock()
+	defer reader.mutex.Unlock()
 
-	if len(reader.pendingErrors) > 0 {
-		return reader.pendingErrors[0]
+	if reader.lastError != nil {
+		return reader.lastError
 	}
 	return nil
 }
 
-func (reader *AsyncBlockReader) addAsyncError(err error) {
-	reader.pendingErrorsMutex.Lock()
-	defer reader.pendingErrorsMutex.Unlock()
-
-	reader.pendingErrors = append(reader.pendingErrors, err)
-}
-
-func (reader *AsyncBlockReader) getDataBlock(blockID int64) (*readDataBlock, error) {
+func (reader *AsyncBlockReader) getDataBlock(blockID int64) (*readBlock, error) {
 	logger := log.WithFields(log.Fields{
 		"package":  "io",
 		"struct":   "AsyncBlockReader",
@@ -303,7 +297,7 @@ func (reader *AsyncBlockReader) getDataBlock(blockID int64) (*readDataBlock, err
 	return dataBlock, nil
 }
 
-func (reader *AsyncBlockReader) newDataBlock(baseReader Reader, blockID int64) (*readDataBlock, error) {
+func (reader *AsyncBlockReader) newDataBlock(baseReader Reader, blockID int64) (*readBlock, error) {
 	logger := log.WithFields(log.Fields{
 		"package":  "io",
 		"struct":   "AsyncBlockReader",
@@ -325,7 +319,7 @@ func (reader *AsyncBlockReader) newDataBlock(baseReader Reader, blockID int64) (
 	waiter := sync.WaitGroup{}
 	waiter.Add(1)
 
-	dataBlock := &readDataBlock{
+	dataBlock := &readBlock{
 		id:                blockID,
 		blockStartOffset:  blockStartOffset,
 		baseReader:        baseReader,
@@ -583,3 +577,4 @@ func (reader *AsyncBlockReader) releaseFarFetchedDataBlocks(currentBlockID int64
 func (reader *AsyncBlockReader) makeCacheEntryKey(blockID int64) string {
 	return fmt.Sprintf("%s:%s:%d", reader.path, reader.checksum, blockID)
 }
+*/

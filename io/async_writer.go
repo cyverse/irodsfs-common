@@ -1,62 +1,73 @@
 package io
 
 import (
-	"io"
+	"bytes"
 	"sync"
 
 	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/utils"
-	"github.com/eikenb/pipeat"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/xerrors"
 )
 
-type writeData struct {
-	startOffset int64
-	pipeReader  *pipeat.PipeReaderAt
-	pipeWriter  *pipeat.PipeWriterAt
-	waiter      *sync.WaitGroup
+type writeBlock struct {
+	offset int64
+	buffer *bytes.Buffer
 }
 
 // AsyncWriter helps async write
 type AsyncWriter struct {
-	fsClient irods.IRODSFSClient
-	path     string
+	baseWriter Writer
+	fsClient   irods.IRODSFSClient
+	path       string
 
-	baseWriter   Writer
-	writeSize    int
-	localPipeDir string
+	pendingWriteBlock     chan *writeBlock
+	asyncWriteBlockWaiter sync.WaitGroup
 
-	currentWriteDataBuffer *writeData
-	mutex                  sync.Mutex // lock for current data
-
-	pendingErrors      []error
-	pendingErrorsMutex sync.Mutex
+	lastError error
+	mutex     sync.Mutex
 }
 
 // NewAsyncWriter create a new AsyncWriter
-// example sizes
-// writeSize = 64KB
-func NewAsyncWriter(writer Writer, writeSize int, localPipeDir string) Writer {
-	return &AsyncWriter{
-		fsClient: writer.GetFSClient(),
-		path:     writer.GetPath(),
+func NewAsyncWriter(writer Writer) Writer {
+	asyncWriter := &AsyncWriter{
+		baseWriter: writer,
+		fsClient:   writer.GetFSClient(),
+		path:       writer.GetPath(),
 
-		baseWriter:   writer,
-		writeSize:    writeSize,
-		localPipeDir: localPipeDir,
+		pendingWriteBlock:     make(chan *writeBlock, 10),
+		asyncWriteBlockWaiter: sync.WaitGroup{},
 
-		currentWriteDataBuffer: nil,
-
-		pendingErrors: []error{},
+		lastError: nil,
+		mutex:     sync.Mutex{},
 	}
+
+	asyncWriter.startAsyncWriter()
+
+	return asyncWriter
 }
 
 // Release releases all resources
 func (writer *AsyncWriter) Release() {
+	logger := log.WithFields(log.Fields{
+		"package":  "io",
+		"struct":   "AsyncWriter",
+		"function": "Release",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	writer.Flush()
+
 	writer.mutex.Lock()
 	defer writer.mutex.Unlock()
 
-	writer.releaseDataBuffer()
+	close(writer.pendingWriteBlock)
+
+	if writer.baseWriter != nil {
+		writer.baseWriter.Release()
+		writer.baseWriter = nil
+	}
 }
 
 // GetFSClient returns fs client
@@ -69,50 +80,31 @@ func (writer *AsyncWriter) GetPath() string {
 	return writer.path
 }
 
-// Write writes data
-func (writer *AsyncWriter) WriteAt(data []byte, offset int64) (int, error) {
-	logger := log.WithFields(log.Fields{
-		"package":  "io",
-		"struct":   "AsyncWriter",
-		"function": "WriteAt",
-	})
+func (writer *AsyncWriter) startAsyncWriter() {
+	go func() {
+		for block := range writer.pendingWriteBlock {
+			writer.mutex.Lock()
+			if writer.lastError != nil {
+				// skip
+				writer.mutex.Unlock()
+				writer.asyncWriteBlockWaiter.Done()
+				continue
+			}
+			writer.mutex.Unlock()
 
-	defer utils.StackTraceFromPanic(logger)
+			if block.buffer.Len() > 0 {
+				bufferData := block.buffer.Bytes()
+				_, err := writer.baseWriter.WriteAt(bufferData, block.offset)
+				if err != nil {
+					writer.mutex.Lock()
+					writer.lastError = xerrors.Errorf("failed to write data to %s, offset %d, length %d: %w", writer.path, block.offset, block.buffer.Len(), err)
+					writer.mutex.Unlock()
+				}
+			}
 
-	writer.mutex.Lock()
-	defer writer.mutex.Unlock()
-
-	if len(data) == 0 || offset < 0 {
-		return 0, nil
-	}
-
-	logger.Debugf("Writing data - %s, offset %d, length %d", writer.path, offset, len(data))
-
-	// any pending
-	err := writer.GetPendingError()
-	if err != nil {
-		logger.WithError(err).Errorf("failed to write - %v", err)
-		return 0, err
-	}
-
-	err = writer.newDataBuffer(offset)
-	if err != nil {
-		return 0, err
-	}
-
-	writeLen, err := writer.currentWriteDataBuffer.pipeWriter.Write(data)
-	if err != nil {
-		return writeLen, err
-	}
-
-	// any pending
-	err = writer.GetPendingError()
-	if err != nil {
-		logger.WithError(err).Errorf("failed to write - %v", err)
-		return 0, err
-	}
-
-	return writeLen, nil
+			writer.asyncWriteBlockWaiter.Done()
+		}
+	}()
 }
 
 // Flush flushes buffered data
@@ -125,125 +117,69 @@ func (writer *AsyncWriter) Flush() error {
 
 	defer utils.StackTraceFromPanic(logger)
 
+	// wait until process all pending write blocks
+	writer.asyncWriteBlockWaiter.Wait()
+
 	writer.mutex.Lock()
 	defer writer.mutex.Unlock()
-
-	writer.releaseDataBuffer()
 
 	err := writer.baseWriter.Flush()
 	if err != nil {
 		return err
 	}
 
-	// any pending
-	err = writer.GetPendingError()
-	if err != nil {
-		logger.WithError(err).Errorf("failed to write - %v", err)
-		return err
-	}
-
-	return nil
+	return writer.lastError
 }
 
-// GetPendingError returns pending errors
-func (writer *AsyncWriter) GetPendingError() error {
-	writer.pendingErrorsMutex.Lock()
-	defer writer.pendingErrorsMutex.Unlock()
-
-	if len(writer.pendingErrors) > 0 {
-		return writer.pendingErrors[0]
-	}
-	return nil
-}
-
-func (writer *AsyncWriter) addAsyncError(err error) {
-	writer.pendingErrorsMutex.Lock()
-	defer writer.pendingErrorsMutex.Unlock()
-
-	writer.pendingErrors = append(writer.pendingErrors, err)
-}
-
-func (writer *AsyncWriter) newDataBuffer(offset int64) error {
+// Write writes data
+func (writer *AsyncWriter) WriteAt(data []byte, offset int64) (int, error) {
 	logger := log.WithFields(log.Fields{
 		"package":  "io",
 		"struct":   "AsyncWriter",
-		"function": "newDataBuffer",
+		"function": "WriteAt",
 	})
 
 	defer utils.StackTraceFromPanic(logger)
 
-	// unload first
-	if writer.currentWriteDataBuffer != nil {
-		currentOffset := writer.currentWriteDataBuffer.startOffset + writer.currentWriteDataBuffer.pipeWriter.GetWrittenBytes()
-		if currentOffset != offset {
-			writer.releaseDataBuffer()
-		} else {
-			// it's already loaded
-			return nil
-		}
+	if len(data) == 0 || offset < 0 {
+		return 0, nil
 	}
 
-	logger.Debugf("Creating a new buffer - %s, offset %d", writer.path, offset)
+	writer.mutex.Lock()
 
-	pipeReader, pipeWriter, err := pipeat.PipeInDir(writer.localPipeDir)
-	if err != nil {
-		logger.WithError(err).Errorf("failed to create a pipe on a dir %s", writer.localPipeDir)
-		return err
+	if writer.lastError != nil {
+		writer.mutex.Unlock()
+		return 0, xerrors.Errorf("failed to schedule writing data to %s, offset %d, length %d: %w", writer.path, offset, len(data), writer.lastError)
+	}
+	writer.mutex.Unlock()
+
+	block := writeBlock{
+		offset: offset,
+		buffer: &bytes.Buffer{},
 	}
 
-	waiter := sync.WaitGroup{}
-	waiter.Add(1)
+	block.buffer.Write(data)
 
-	writer.currentWriteDataBuffer = &writeData{
-		startOffset: offset,
-		pipeReader:  pipeReader,
-		pipeWriter:  pipeWriter,
-		waiter:      &waiter,
+	logger.Debugf("adding to write queue, off %d", offset)
+	writer.asyncWriteBlockWaiter.Add(1)
+	writer.pendingWriteBlock <- &block
+	logger.Debugf("added to write queue, off %d", offset)
+
+	// do it again
+	writer.mutex.Lock()
+	if writer.lastError != nil {
+		writer.mutex.Unlock()
+		return 0, xerrors.Errorf("failed to schedule writing data to %s, offset %d, length %d: %w", writer.path, offset, len(data), writer.lastError)
 	}
+	writer.mutex.Unlock()
 
-	go func() {
-		var ioErr error
-
-		readBuffer := make([]byte, writer.writeSize)
-		for {
-			currentOffset := writer.currentWriteDataBuffer.startOffset + writer.currentWriteDataBuffer.pipeReader.GetReadedBytes()
-			readLen, readErr := writer.currentWriteDataBuffer.pipeReader.Read(readBuffer)
-			if readLen > 0 {
-				_, writeErr := writer.baseWriter.WriteAt(readBuffer[:readLen], currentOffset)
-				if writeErr != nil {
-					logger.Error(writeErr)
-					writer.addAsyncError(writeErr)
-					ioErr = writeErr
-					break
-				}
-			}
-
-			if readErr != nil {
-				if readErr == io.EOF {
-					break
-				} else {
-					logger.Error(readErr)
-					writer.addAsyncError(readErr)
-					ioErr = readErr
-					break
-				}
-			}
-		}
-
-		pipeReader.CloseWithError(ioErr)
-
-		logger.Debugf("Wrote a buffer - %s, offset %d", writer.path, writer.currentWriteDataBuffer.startOffset)
-
-		waiter.Done()
-	}()
-
-	return nil
+	return len(data), nil
 }
 
-func (writer *AsyncWriter) releaseDataBuffer() {
-	if writer.currentWriteDataBuffer != nil {
-		writer.currentWriteDataBuffer.pipeWriter.Close()
-		writer.currentWriteDataBuffer.waiter.Wait()
-		writer.currentWriteDataBuffer = nil
-	}
+// GetError returns error
+func (writer *AsyncWriter) GetError() error {
+	writer.mutex.Lock()
+	defer writer.mutex.Unlock()
+
+	return writer.lastError
 }

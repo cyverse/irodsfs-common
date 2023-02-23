@@ -11,6 +11,6 @@ type Writer interface {
 	WriteAt(data []byte, offset int64) (int, error)
 
 	Flush() error
-	GetPendingError() error
+	GetError() error
 	Release()
 }

@@ -7,7 +7,7 @@ import (
 
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
 	"github.com/cyverse/irodsfs-common/utils"
-	log "github.com/sirupsen/logrus"
+	"golang.org/x/xerrors"
 )
 
 // VPathEntryType determins if the vpath entry is an actual iRODS entry (irods) or a virtual directory entry (virtual).
@@ -62,27 +62,18 @@ func (entry *VPathEntry) ToString() string {
 
 // GetIRODSPath returns an iRODS path for the given vpath
 func (entry *VPathEntry) GetIRODSPath(vpath string) (string, error) {
-	logger := log.WithFields(log.Fields{
-		"package":  "vpath",
-		"struct":   "VPathEntry",
-		"function": "GetIRODSPath",
-	})
-
 	if entry.Type != VPathIRODS {
-		err := fmt.Errorf("failed to compute IRODS Path because entry type is not iRODS")
-		logger.Error(err)
+		err := xerrors.Errorf("failed to compute IRODS Path because entry type is not iRODS")
 		return "", err
 	}
 
 	relPath, err := utils.GetRelativePath(entry.Path, vpath)
 	if err != nil {
-		logger.WithError(err).Errorf("failed to compute relative path")
-		return "", err
+		return "", xerrors.Errorf("failed to compute relative path: %w", err)
 	}
 
 	if strings.HasPrefix(relPath, "../") {
-		err := fmt.Errorf("failed to compute relative path - %s to %s", entry.Path, vpath)
-		return "", err
+		return "", xerrors.Errorf("failed to compute relative path from %s to %s", entry.Path, vpath)
 	}
 
 	if relPath == "." {

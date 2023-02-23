@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"golang.org/x/xerrors"
 )
 
 // JoinPath makes the path from dir and file paths
@@ -34,18 +36,18 @@ func GetFileName(p string) string {
 // GetIRODSZone returns the zone of the iRODS path
 func GetIRODSZone(p string) (string, error) {
 	if len(p) < 1 {
-		return "", fmt.Errorf("failed to extract Zone from path - %s", p)
+		return "", xerrors.Errorf("failed to extract Zone from path %s", p)
 	}
 
 	if p[0] != '/' {
-		return "", fmt.Errorf("failed to extract Zone from path - %s", p)
+		return "", xerrors.Errorf("failed to extract Zone from path %s", p)
 	}
 
 	parts := strings.Split(p[1:], "/")
 	if len(parts) >= 1 {
 		return parts[0], nil
 	}
-	return "", fmt.Errorf("failed to extract Zone from path - %s", p)
+	return "", xerrors.Errorf("failed to extract Zone from path %s", p)
 }
 
 // IsAbsolutePath returns true if the path is absolute
@@ -102,5 +104,9 @@ func GetParentDirs(p string) []string {
 
 // GetRelativePath returns relative path
 func GetRelativePath(p1 string, p2 string) (string, error) {
-	return filepath.Rel(p1, p2)
+	rel, err := filepath.Rel(p1, p2)
+	if err != nil {
+		return "", xerrors.Errorf("failed to get relative path from %s to %s: %w", p1, p2, err)
+	}
+	return rel, nil
 }

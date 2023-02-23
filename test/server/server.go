@@ -1,20 +1,19 @@
 package server
 
 import (
-	"bufio"
 	"fmt"
 	"os/exec"
 	"path"
 	"runtime"
-	"strings"
-	"time"
 
 	"github.com/cyverse/go-irodsclient/irods/types"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/xerrors"
 )
 
 const (
-	// must have the same information as in `docker-compose.yml`
+	// must have the same information as in `docker-compose.yml` and `config.inc`
+	testServerContainer     string = "irods_test-irods-1"
 	testServerHost          string = "localhost"
 	testServerPort          int    = 1247
 	testServerAdminUser     string = "rods"
@@ -22,10 +21,10 @@ const (
 	testServerZone          string = "cyverse"
 )
 
-func startServerExec() error {
+func StartServer() error {
 	logger := log.WithFields(log.Fields{
 		"package":  "server",
-		"function": "startServerExec",
+		"function": "StartServer",
 	})
 
 	logger.Info("Running iRODS test server")
@@ -37,48 +36,22 @@ func startServerExec() error {
 	cmd := exec.Command(scriptPath)
 	cmd.Dir = serverDir
 
-	subStdout, err := cmd.StdoutPipe()
+	err := cmd.Start()
 	if err != nil {
-		logger.Error(err)
-		return err
+		startErr := xerrors.Errorf("failed to start iRODS test server: %w", err)
+		logger.Errorf("%+v", startErr)
+		return startErr
 	}
 
-	cmd.Stderr = cmd.Stdout
+	cmd.Wait()
 
-	err = cmd.Start()
-	if err != nil {
-		logger.WithError(err).Errorf("failed to start iRODS test server")
-		return err
-	}
-
-	// receive output from child
-	subOutputScanner := bufio.NewScanner(subStdout)
-	for {
-		if subOutputScanner.Scan() {
-			outputMsg := strings.TrimSpace(subOutputScanner.Text())
-			if strings.Contains(outputMsg, "Creating irods_test_irods_1 ") && strings.Contains(outputMsg, "done") {
-				// wait for 3 sec to be avilable
-				time.Sleep(3 * time.Second)
-				logger.Info("Successfully started iRODS test server")
-				return nil
-			} else {
-				// wait until the server is ready
-				logger.Info(outputMsg)
-			}
-		} else {
-			// check err
-			if subOutputScanner.Err() != nil {
-				logger.Error(subOutputScanner.Err().Error())
-				return subOutputScanner.Err()
-			}
-		}
-	}
+	return nil
 }
 
-func stopServerExec() error {
+func StopServer() error {
 	logger := log.WithFields(log.Fields{
 		"package":  "server",
-		"function": "stopServerExec",
+		"function": "StopServer",
 	})
 
 	logger.Info("Stopping iRODS test server")
@@ -92,29 +65,15 @@ func stopServerExec() error {
 
 	err := cmd.Start()
 	if err != nil {
-		logger.WithError(err).Errorf("failed to stop iRODS test server")
-		return err
+		stopErr := xerrors.Errorf("failed to stop iRODS test server: %w", err)
+		logger.Errorf("%+v", stopErr)
+		return stopErr
 	}
 
 	cmd.Wait()
 	// we don't check it's error because it always return exit code 1
 
 	logger.Info("Successfully stopped iRODS test server")
-	return nil
-}
-
-func StartServer() error {
-	logger := log.WithFields(log.Fields{
-		"package":  "server",
-		"function": "StartServer",
-	})
-
-	err := startServerExec()
-	if err != nil {
-		logger.WithError(err).Error("failed to start iRODS test server")
-		return err
-	}
-
 	return nil
 }
 
@@ -131,20 +90,4 @@ func GetLocalAccount() (*types.IRODSAccount, error) {
 	}
 
 	return account, nil
-}
-
-func StopServer() error {
-	logger := log.WithFields(log.Fields{
-		"package":  "server",
-		"function": "StopServer",
-	})
-
-	err := stopServerExec()
-	if err != nil {
-		logger.WithError(err).Error("failed to stop iRODS test server")
-		return err
-	}
-
-	return nil
-
 }

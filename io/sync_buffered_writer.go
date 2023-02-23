@@ -7,32 +7,32 @@ import (
 	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/xerrors"
 )
 
 // SyncBufferedWriter is a writer that buffers data in RAM before write
 type SyncBufferedWriter struct {
-	fsClient irods.IRODSFSClient
-	path     string
+	baseWriter Writer
+	fsClient   irods.IRODSFSClient
+	path       string
 
-	buffer                   bytes.Buffer
+	buffer                   *bytes.Buffer
 	bufferSize               int
 	currentBufferStartOffset int64
-	bufferMutex              sync.Mutex
-
-	baseWriter Writer
+	mutex                    sync.Mutex
 }
 
 // NewSyncBufferedWriter creates a SyncBufferedWriter
 func NewSyncBufferedWriter(writer Writer, bufferSize int) Writer {
 	return &SyncBufferedWriter{
-		fsClient: writer.GetFSClient(),
-		path:     writer.GetPath(),
+		baseWriter: writer,
+		fsClient:   writer.GetFSClient(),
+		path:       writer.GetPath(),
 
-		buffer:                   bytes.Buffer{},
+		buffer:                   &bytes.Buffer{},
 		bufferSize:               bufferSize,
 		currentBufferStartOffset: 0,
-
-		baseWriter: writer,
+		mutex:                    sync.Mutex{},
 	}
 }
 
@@ -47,6 +47,13 @@ func (writer *SyncBufferedWriter) Release() {
 	defer utils.StackTraceFromPanic(logger)
 
 	writer.Flush()
+
+	writer.mutex.Lock()
+	defer writer.mutex.Unlock()
+
+	if writer.buffer != nil {
+		writer.buffer = nil
+	}
 
 	if writer.baseWriter != nil {
 		writer.baseWriter.Release()
@@ -64,6 +71,31 @@ func (writer *SyncBufferedWriter) GetPath() string {
 	return writer.path
 }
 
+func (writer *SyncBufferedWriter) spillBuffer() error {
+	logger := log.WithFields(log.Fields{
+		"package":  "io",
+		"struct":   "SyncBufferedWriter",
+		"function": "Flush",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	// we don't lock here
+
+	if writer.buffer.Len() > 0 {
+		_, err := writer.baseWriter.WriteAt(writer.buffer.Bytes(), writer.currentBufferStartOffset)
+		if err != nil {
+			return xerrors.Errorf("failed to write data to %s, offset %d, length %d: %w", writer.path, writer.currentBufferStartOffset, writer.buffer.Len(), err)
+		}
+
+		// allocate a new buffer, old buffer will be passed to baseWriter
+		writer.buffer = &bytes.Buffer{}
+	}
+
+	writer.currentBufferStartOffset = 0
+	return nil
+}
+
 // Flush flushes buffered data
 func (writer *SyncBufferedWriter) Flush() error {
 	logger := log.WithFields(log.Fields{
@@ -74,17 +106,14 @@ func (writer *SyncBufferedWriter) Flush() error {
 
 	defer utils.StackTraceFromPanic(logger)
 
-	// empty buffer
-	if writer.buffer.Len() > 0 {
-		_, err := writer.baseWriter.WriteAt(writer.buffer.Bytes(), writer.currentBufferStartOffset)
-		if err != nil {
-			logger.Error(err)
-			return err
-		}
-	}
+	writer.mutex.Lock()
+	defer writer.mutex.Unlock()
 
-	writer.currentBufferStartOffset = 0
-	writer.buffer.Reset()
+	// empty buffer
+	err := writer.spillBuffer()
+	if err != nil {
+		return xerrors.Errorf("failed to spill buffer: %w", err)
+	}
 
 	return writer.baseWriter.Flush()
 }
@@ -103,29 +132,24 @@ func (writer *SyncBufferedWriter) WriteAt(data []byte, offset int64) (int, error
 		return 0, nil
 	}
 
-	writer.bufferMutex.Lock()
-	defer writer.bufferMutex.Unlock()
+	writer.mutex.Lock()
+	defer writer.mutex.Unlock()
 
 	// check if data is continuous from prior write
 	if writer.buffer.Len() > 0 {
 		// has data
 		if writer.currentBufferStartOffset+int64(writer.buffer.Len()) != offset {
-			// not continuous
-			// send out
-			_, err := writer.baseWriter.WriteAt(writer.buffer.Bytes(), writer.currentBufferStartOffset)
+			// offsets are not continuous
+			// empty buffer
+			err := writer.spillBuffer()
 			if err != nil {
-				logger.Error(err)
-				return 0, err
+				return 0, xerrors.Errorf("failed to spill buffer: %w", err)
 			}
-
-			writer.currentBufferStartOffset = 0
-			writer.buffer.Reset()
 
 			// write to buffer
 			_, err = writer.buffer.Write(data)
 			if err != nil {
-				logger.WithError(err).Errorf("failed to buffer data for file %s, offset %d, length %d", writer.path, offset, len(data))
-				return 0, err
+				return 0, xerrors.Errorf("failed to write data to buffer for %s, offset %d, length %d: %w", writer.path, offset, len(data), err)
 			}
 
 			writer.currentBufferStartOffset = offset
@@ -134,40 +158,34 @@ func (writer *SyncBufferedWriter) WriteAt(data []byte, offset int64) (int, error
 			// write to buffer
 			_, err := writer.buffer.Write(data)
 			if err != nil {
-				logger.WithError(err).Errorf("failed to buffer data for file %s, offset %d, length %d", writer.path, offset, len(data))
-				return 0, err
+				return 0, xerrors.Errorf("failed to write data to buffer for %s, offset %d, length %d: %w", writer.path, offset, len(data), err)
 			}
 		}
 	} else {
 		// write to buffer
 		_, err := writer.buffer.Write(data)
 		if err != nil {
-			logger.WithError(err).Errorf("failed to buffer data for file %s, offset %d, length %d", writer.path, offset, len(data))
-			return 0, err
+			return 0, xerrors.Errorf("failed to write data to buffer for %s, offset %d, length %d: %w", writer.path, offset, len(data), err)
 		}
 
 		writer.currentBufferStartOffset = offset
 	}
 
 	if writer.buffer.Len() >= writer.bufferSize {
-		// Spill to disk cache
-		_, err := writer.baseWriter.WriteAt(writer.buffer.Bytes(), writer.currentBufferStartOffset)
+		// empty buffer
+		err := writer.spillBuffer()
 		if err != nil {
-			logger.Error(err)
-			return 0, err
+			return 0, xerrors.Errorf("failed to spill buffer: %w", err)
 		}
-
-		writer.currentBufferStartOffset = 0
-		writer.buffer.Reset()
 	}
 
 	return len(data), nil
 }
 
-// GetPendingError returns pending errors
-func (writer *SyncBufferedWriter) GetPendingError() error {
+// GetError returns error
+func (writer *SyncBufferedWriter) GetError() error {
 	if writer.baseWriter != nil {
-		return writer.baseWriter.GetPendingError()
+		return writer.baseWriter.GetError()
 	}
 	return nil
 }

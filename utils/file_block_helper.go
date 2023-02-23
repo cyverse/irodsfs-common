@@ -85,3 +85,8 @@ func (helper *FileBlockHelper) GetBlockIDs(offset int64, length int) []int64 {
 	}
 	return ids
 }
+
+// GetLastBlockID returns the last block of the file
+func (helper *FileBlockHelper) GetLastBlockID(size int64) int64 {
+	return helper.GetBlockIDForOffset(size - 1)
+}

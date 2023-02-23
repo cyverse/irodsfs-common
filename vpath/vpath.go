@@ -1,12 +1,12 @@
 package vpath
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/xerrors"
 )
 
 // VPathManager is a struct that manages virtual paths.
@@ -35,8 +35,9 @@ func NewVPathManager(fsClient irods.IRODSFSClient, pathMappings []VPathMapping) 
 	logger.Info("Building a hierarchy")
 	err := manager.build()
 	if err != nil {
-		logger.WithError(err).Error("failed to build a hierarchy")
-		return nil, err
+		buildErr := xerrors.Errorf("failed to build a hierarchy: %w", err)
+		logger.Errorf("%+v", buildErr)
+		return nil, buildErr
 	}
 
 	return manager, nil
@@ -44,20 +45,13 @@ func NewVPathManager(fsClient irods.IRODSFSClient, pathMappings []VPathMapping) 
 
 // build builds VPaths from mappings
 func (manager *VPathManager) build() error {
-	logger := log.WithFields(log.Fields{
-		"package":  "vpath",
-		"struct":   "VPathManager",
-		"function": "build",
-	})
-
 	manager.entries = map[string]*VPathEntry{}
 
 	// build
 	for _, mapping := range manager.pathMappings {
 		err := manager.buildOne(&mapping)
 		if err != nil {
-			logger.Error(err)
-			return err
+			return xerrors.Errorf("failed to build vpath mapping: %w", err)
 		}
 	}
 	return nil
@@ -125,9 +119,7 @@ func (manager *VPathManager) buildOne(mapping *VPathMapping) error {
 			if parentDirEntry.Type != VPathVirtualDir {
 				// already exists
 				// can't create a virtual dir entry under an irods entry
-				err := fmt.Errorf("failed to create a virtual dir entry %s, iRODS entry already exists", parentDir)
-				logger.Error(err)
-				return err
+				return xerrors.Errorf("failed to create a virtual dir entry %s, iRODS entry already exists", parentDir)
 			}
 		} else {
 			dirEntry := &VPathEntry{
@@ -161,6 +153,7 @@ func (manager *VPathManager) buildOne(mapping *VPathMapping) error {
 	// if it is an iRODS dir (collection) resource, CreateDir flag is on
 	if mapping.ResourceType == VPathMappingDirectory && mapping.CreateDir {
 		logger.Debugf("Checking if path exists - %s", mapping.IRODSPath)
+
 		if !manager.fsClient.ExistsDir(mapping.IRODSPath) {
 			logger.Debugf("Creating path - %s", mapping.IRODSPath)
 			err := manager.fsClient.MakeDir(mapping.IRODSPath, true)
@@ -180,8 +173,7 @@ func (manager *VPathManager) buildOne(mapping *VPathMapping) error {
 			return nil
 		}
 
-		logger.WithError(err).Errorf("failed to stat - %s", mapping.IRODSPath)
-		return err
+		return xerrors.Errorf("failed to stat %s: %w", mapping.IRODSPath, err)
 	}
 
 	logger.Debugf("Creating VFS entry mapping - irods path %s => vpath %s (%t)", irodsEntry.Path, mapping.MappingPath, mapping.ReadOnly)

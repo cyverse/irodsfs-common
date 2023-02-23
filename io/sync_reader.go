@@ -7,12 +7,15 @@ import (
 	"github.com/cyverse/irodsfs-common/report"
 	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/xerrors"
 )
 
 // SyncReader helps sync read
 type SyncReader struct {
 	fsClient   irods.IRODSFSClient
 	path       string
+	checksum   string
+	size       int64
 	fileHandle irods.IRODSFSFileHandle
 
 	reportClient report.IRODSFSInstanceReportClient
@@ -25,6 +28,8 @@ func NewSyncReader(fsClient irods.IRODSFSClient, fileHandle irods.IRODSFSFileHan
 	syncReader := &SyncReader{
 		fsClient:   fsClient,
 		path:       entry.Path,
+		checksum:   entry.CheckSum,
+		size:       entry.Size,
 		fileHandle: fileHandle,
 
 		reportClient: reportClient,
@@ -47,6 +52,16 @@ func (reader *SyncReader) GetPath() string {
 	return reader.path
 }
 
+// GetChecksum returns checksum of the file
+func (reader *SyncReader) GetChecksum() string {
+	return reader.checksum
+}
+
+// GetSize returns size of the file
+func (reader *SyncReader) GetSize() int64 {
+	return reader.size
+}
+
 // ReadAt reads data
 func (reader *SyncReader) ReadAt(buffer []byte, offset int64) (int, error) {
 	logger := log.WithFields(log.Fields{
@@ -61,12 +76,15 @@ func (reader *SyncReader) ReadAt(buffer []byte, offset int64) (int, error) {
 		return 0, nil
 	}
 
+	if offset >= reader.size {
+		return 0, io.EOF
+	}
+
 	logger.Debugf("Sync Reading - %s, offset %d, length %d", reader.path, offset, len(buffer))
 
 	readLen, err := reader.fileHandle.ReadAt(buffer, offset)
 	if err != nil && err != io.EOF {
-		logger.WithError(err).Errorf("failed to read data - %s, offset %d, length %d", reader.path, offset, len(buffer))
-		return 0, err
+		return 0, xerrors.Errorf("failed to read data from %s, offset %d, length %d: %w", reader.path, offset, len(buffer), err)
 	}
 
 	// Report
@@ -83,6 +101,6 @@ func (reader *SyncReader) GetAvailable(offset int64) int64 {
 	return reader.fileHandle.GetAvailable(offset)
 }
 
-func (reader *SyncReader) GetPendingError() error {
+func (reader *SyncReader) GetError() error {
 	return nil
 }

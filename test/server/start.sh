@@ -22,8 +22,17 @@ main()
 
   . "$baseDir/$cfg"
 
-  docker-compose --file "$baseDir"/docker-compose.yml --project-name "$ENV_NAME" down --remove-orphans
-  docker-compose --file "$baseDir"/docker-compose.yml --project-name "$ENV_NAME" up -d
+  if ! command -v docker-compose > /dev/null; then
+    docker compose --file "$baseDir"/docker-compose.yml --project-name "$ENV_NAME" down --remove-orphans
+    docker compose --file "$baseDir"/docker-compose.yml --project-name "$ENV_NAME" up -d
+
+    timeout 60s grep -q 'ready' <(docker compose -p irods_test logs -f irods)
+  else
+    docker-compose --file "$baseDir"/docker-compose.yml --project-name "$ENV_NAME" down --remove-orphans
+    docker-compose --file "$baseDir"/docker-compose.yml --project-name "$ENV_NAME" up -d
+
+    timeout 60s grep -q 'ready' <(docker-compose -p irods_test logs -f irods)
+  fi
 }
 
 

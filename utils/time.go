@@ -1,10 +1,18 @@
 package utils
 
-import "time"
+import (
+	"time"
+
+	"golang.org/x/xerrors"
+)
 
 // ParseTime returns time.Time from text represented time
 func ParseTime(t string) (time.Time, error) {
-	return time.Parse(time.RFC3339, t)
+	tout, err := time.Parse(time.RFC3339, t)
+	if err != nil {
+		return tout, xerrors.Errorf("failed to parse time '%s' to time.Time: %w", t, err)
+	}
+	return tout, nil
 }
 
 // MakeTimeToString returns text represented time from time.Time

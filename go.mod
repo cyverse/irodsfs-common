@@ -3,13 +3,13 @@ module github.com/cyverse/irodsfs-common
 go 1.18
 
 require (
-	github.com/cyverse/go-irodsclient v0.10.6
+	github.com/cyverse/go-irodsclient v0.10.10
 	github.com/cyverse/irodsfs-monitor v0.0.0-20220809235922-daf13261a2dc
-	github.com/eikenb/pipeat v0.0.0-20210730190139-06b3e6902001
 	github.com/hashicorp/golang-lru v0.5.4
 	github.com/rs/xid v1.3.0
 	github.com/sirupsen/logrus v1.8.1
 	github.com/stretchr/testify v1.7.0
+	golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2
 	gopkg.in/yaml.v2 v2.4.0
 )
 

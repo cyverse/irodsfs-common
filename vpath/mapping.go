@@ -1,9 +1,8 @@
 package vpath
 
 import (
-	"fmt"
-
 	"github.com/cyverse/irodsfs-common/utils"
+	"golang.org/x/xerrors"
 )
 
 // VPathMappingResourceType determines the type of Virtual Path Mapping resource entry
@@ -29,11 +28,11 @@ type VPathMapping struct {
 // Validate validates VPathMapping
 func (mapping *VPathMapping) Validate() error {
 	if !utils.IsAbsolutePath(mapping.IRODSPath) {
-		return fmt.Errorf("IRODSPath given (%s) is not absolute path", mapping.IRODSPath)
+		return xerrors.Errorf("path given (%s) is not absolute path", mapping.IRODSPath)
 	}
 
 	if !utils.IsAbsolutePath(mapping.MappingPath) {
-		return fmt.Errorf("MappingPath given (%s) is not absolute path", mapping.MappingPath)
+		return xerrors.Errorf("path given (%s) is not absolute path", mapping.MappingPath)
 	}
 
 	return nil
@@ -46,20 +45,20 @@ func ValidateVPathMappings(mappings []VPathMapping) error {
 	for _, mapping := range mappings {
 		err := mapping.Validate()
 		if err != nil {
-			return err
+			return xerrors.Errorf("failed to validate vpath mapping: %w", err)
 		}
 
 		// check mapping path is used in another mapping
 		if _, ok := mappingDict[mapping.MappingPath]; ok {
 			// exists
-			return fmt.Errorf("MappingPath given (%s) is already used in another mapping", mapping.MappingPath)
+			return xerrors.Errorf("path given (%s) is already used in another mapping", mapping.MappingPath)
 		}
 
 		mappingDict[mapping.MappingPath] = mapping.IRODSPath
 	}
 
 	if len(mappings) == 0 {
-		return fmt.Errorf("no virtual path mapping is given")
+		return xerrors.Errorf("no virtual path mapping is given")
 	}
 	return nil
 }
