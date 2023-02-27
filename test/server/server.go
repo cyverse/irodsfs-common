@@ -85,8 +85,9 @@ func GetLocalAccount() (*types.IRODSAccount, error) {
 
 	account, err := types.CreateIRODSAccount(testServerHost, testServerPort, testServerAdminUser, testServerZone, types.AuthSchemeNative, testServerAdminPassword, "")
 	if err != nil {
-		logger.WithError(err).Error("failed to create an iRODS Account")
-		return nil, err
+		accountErr := xerrors.Errorf("failed to create irods account: %w", err)
+		logger.Errorf("%+v", accountErr)
+		return nil, accountErr
 	}
 
 	return account, nil
