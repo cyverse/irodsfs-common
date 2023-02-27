@@ -45,7 +45,7 @@ func NewAsyncReader(readers []Reader, blockSize int) (Reader, error) {
 func NewAsyncCacheThroughReader(readers []Reader, blockSize int, cacheStore cache.CacheStore) (Reader, error) {
 	asyncReader := &AsyncCacheThroughReader{
 		baseReaders:          readers,
-		availableBaseReaders: make(chan Reader, len(readers)),
+		availableBaseReaders: make(chan Reader, 10),
 		fsClient:             readers[0].GetFSClient(),
 		path:                 readers[0].GetPath(),
 		checksum:             readers[0].GetChecksum(),
@@ -112,6 +112,19 @@ func (reader *AsyncCacheThroughReader) Release() {
 
 	for _, baseReader := range reader.baseReaders {
 		baseReader.Release()
+	}
+}
+
+// GetFSClient returns fs client
+func (reader *AsyncCacheThroughReader) AddReadersForPrefetching(readers []Reader) {
+	if len(reader.baseReaders) == 1 {
+		reader.prefetcher = NewPrefetcher(reader.blockStore.GetBlockSize())
+	}
+
+	reader.baseReaders = append(reader.baseReaders, readers...)
+
+	for _, r := range readers {
+		reader.availableBaseReaders <- r
 	}
 }
 
