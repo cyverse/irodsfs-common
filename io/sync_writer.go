@@ -5,7 +5,6 @@ import (
 	"github.com/cyverse/irodsfs-common/report"
 	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/xerrors"
 )
 
 // SyncWriter helps sync write
@@ -73,7 +72,7 @@ func (writer *SyncWriter) WriteAt(data []byte, offset int64) (int, error) {
 
 	writeLen, err := writer.fileHandle.WriteAt(data, offset)
 	if err != nil {
-		return 0, xerrors.Errorf("failed to write data to %s, offset %d, length %d: %w", writer.path, offset, len(data), err)
+		return 0, err
 	}
 
 	// Report

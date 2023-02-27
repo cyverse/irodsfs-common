@@ -7,7 +7,6 @@ import (
 	"github.com/cyverse/irodsfs-common/report"
 	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/xerrors"
 )
 
 // SyncReader helps sync read
@@ -84,7 +83,7 @@ func (reader *SyncReader) ReadAt(buffer []byte, offset int64) (int, error) {
 
 	readLen, err := reader.fileHandle.ReadAt(buffer, offset)
 	if err != nil && err != io.EOF {
-		return 0, xerrors.Errorf("failed to read data from %s, offset %d, length %d: %w", reader.path, offset, len(buffer), err)
+		return 0, err
 	}
 
 	// Report

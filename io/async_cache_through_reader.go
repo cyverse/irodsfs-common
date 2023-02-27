@@ -66,7 +66,7 @@ func NewAsyncCacheThroughReader(readers []Reader, blockSize int, cacheStore cach
 
 	blockStore, err := NewFileBlockStore(cacheStore, asyncReader.path, asyncReader.checksum, blockSize)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to create file block store: %w", err)
+		return nil, err
 	}
 
 	asyncReader.blockStore = blockStore
@@ -222,7 +222,7 @@ func (reader *AsyncCacheThroughReader) ReadAt(buffer []byte, offset int64) (int,
 			if err == io.EOF {
 				return int(curOffset - offset), err
 			}
-			return int(curOffset - offset), xerrors.Errorf("failed to read from base: %w", err)
+			return int(curOffset - offset), err
 		}
 	}
 
@@ -274,7 +274,7 @@ func (reader *AsyncCacheThroughReader) readAtBase(buffer []byte, offset int64) (
 	copiedLen, err := transfer.CopyTo(buffer, inBlockOffset)
 	logger.Debugf("read from transfer - block %d, len %d, eof %t", blockID, copiedLen, err == io.EOF)
 	if err != nil && err != io.EOF {
-		return copiedLen, xerrors.Errorf("failed to read from transfer: %w", err)
+		return copiedLen, err
 	}
 
 	// may return io.EOF
@@ -427,7 +427,7 @@ func (reader *AsyncCacheThroughReader) startAsyncTransfer(transfer *FileBlockTra
 
 				t.MarkFailed()
 				r.mutex.Lock()
-				r.lastError = xerrors.Errorf("failed to read block %d: %w", blockID, err)
+				r.lastError = err
 				r.mutex.Unlock()
 				return
 			}
@@ -442,7 +442,7 @@ func (reader *AsyncCacheThroughReader) startAsyncTransfer(transfer *FileBlockTra
 		err := r.blockStore.Put(fileBlock)
 		if err != nil {
 			r.mutex.Lock()
-			r.lastError = xerrors.Errorf("failed to put block %d to block store: %w", blockID, err)
+			r.lastError = err
 			r.mutex.Unlock()
 			return
 		}

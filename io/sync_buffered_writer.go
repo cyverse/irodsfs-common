@@ -85,7 +85,7 @@ func (writer *SyncBufferedWriter) spillBuffer() error {
 	if writer.buffer.Len() > 0 {
 		_, err := writer.baseWriter.WriteAt(writer.buffer.Bytes(), writer.currentBufferStartOffset)
 		if err != nil {
-			return xerrors.Errorf("failed to write data to %s, offset %d, length %d: %w", writer.path, writer.currentBufferStartOffset, writer.buffer.Len(), err)
+			return err
 		}
 
 		// allocate a new buffer, old buffer will be passed to baseWriter
@@ -112,7 +112,7 @@ func (writer *SyncBufferedWriter) Flush() error {
 	// empty buffer
 	err := writer.spillBuffer()
 	if err != nil {
-		return xerrors.Errorf("failed to spill buffer: %w", err)
+		return err
 	}
 
 	return writer.baseWriter.Flush()
@@ -143,7 +143,7 @@ func (writer *SyncBufferedWriter) WriteAt(data []byte, offset int64) (int, error
 			// empty buffer
 			err := writer.spillBuffer()
 			if err != nil {
-				return 0, xerrors.Errorf("failed to spill buffer: %w", err)
+				return 0, err
 			}
 
 			// write to buffer
@@ -175,7 +175,7 @@ func (writer *SyncBufferedWriter) WriteAt(data []byte, offset int64) (int, error
 		// empty buffer
 		err := writer.spillBuffer()
 		if err != nil {
-			return 0, xerrors.Errorf("failed to spill buffer: %w", err)
+			return 0, err
 		}
 	}
 

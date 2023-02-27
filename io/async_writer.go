@@ -7,7 +7,6 @@ import (
 	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/xerrors"
 )
 
 type writeBlock struct {
@@ -97,7 +96,7 @@ func (writer *AsyncWriter) startAsyncWriter() {
 				_, err := writer.baseWriter.WriteAt(bufferData, block.offset)
 				if err != nil {
 					writer.mutex.Lock()
-					writer.lastError = xerrors.Errorf("failed to write data to %s, offset %d, length %d: %w", writer.path, block.offset, block.buffer.Len(), err)
+					writer.lastError = err
 					writer.mutex.Unlock()
 				}
 			}
@@ -149,7 +148,7 @@ func (writer *AsyncWriter) WriteAt(data []byte, offset int64) (int, error) {
 
 	if writer.lastError != nil {
 		writer.mutex.Unlock()
-		return 0, xerrors.Errorf("failed to schedule writing data to %s, offset %d, length %d: %w", writer.path, offset, len(data), writer.lastError)
+		return 0, writer.lastError
 	}
 	writer.mutex.Unlock()
 
@@ -169,7 +168,7 @@ func (writer *AsyncWriter) WriteAt(data []byte, offset int64) (int, error) {
 	writer.mutex.Lock()
 	if writer.lastError != nil {
 		writer.mutex.Unlock()
-		return 0, xerrors.Errorf("failed to schedule writing data to %s, offset %d, length %d: %w", writer.path, offset, len(data), writer.lastError)
+		return 0, writer.lastError
 	}
 	writer.mutex.Unlock()
 

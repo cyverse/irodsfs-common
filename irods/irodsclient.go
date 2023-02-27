@@ -31,7 +31,7 @@ func NewIRODSFSClientDirect(account *irodsclient_types.IRODSAccount, config *iro
 
 	goirodsfs, err := irodsclient_fs.NewFileSystem(account, config)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to create a new filesystem: %w", err)
+		return nil, err
 	}
 
 	return &IRODSFSClientDirect{
@@ -93,7 +93,7 @@ func (client *IRODSFSClientDirect) List(path string) ([]*irodsclient_fs.Entry, e
 
 	entries, err := client.fs.List(path)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to list dir %s: %w", path, err)
+		return nil, err
 	}
 	return entries, nil
 }
@@ -114,7 +114,7 @@ func (client *IRODSFSClientDirect) Stat(path string) (*irodsclient_fs.Entry, err
 
 	entry, err := client.fs.Stat(path)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to stat file %s: %w", path, err)
+		return nil, err
 	}
 	return entry, nil
 }
@@ -135,7 +135,7 @@ func (client *IRODSFSClientDirect) ListXattr(path string) ([]*irodsclient_types.
 
 	metadatas, err := client.fs.ListMetadata(path)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to list metadata for file %s: %w", path, err)
+		return nil, err
 	}
 	return metadatas, nil
 }
@@ -156,7 +156,7 @@ func (client *IRODSFSClientDirect) GetXattr(path string, name string) (*irodscli
 
 	metas, err := client.fs.ListMetadata(path)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to list metadata for file %s: %w", path, err)
+		return nil, err
 	}
 
 	for _, meta := range metas {
@@ -189,7 +189,7 @@ func (client *IRODSFSClientDirect) SetXattr(path string, name string, value stri
 
 	err := client.fs.AddMetadata(path, name, value, "")
 	if err != nil {
-		return xerrors.Errorf("failed to add metadata to %s: %w", path, err)
+		return err
 	}
 
 	return nil
@@ -211,7 +211,7 @@ func (client *IRODSFSClientDirect) RemoveXattr(path string, name string) error {
 
 	err := client.fs.DeleteMetadata(path, name, "", "")
 	if err != nil {
-		return xerrors.Errorf("failed to delete metadata of %s: %w", path, err)
+		return err
 	}
 
 	return nil
@@ -267,7 +267,7 @@ func (client *IRODSFSClientDirect) ListUserGroups(user string) ([]*irodsclient_t
 
 	groups, err := client.fs.ListUserGroups(user)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to list groups of user %s: %w", user, err)
+		return nil, err
 	}
 	return groups, nil
 }
@@ -288,7 +288,7 @@ func (client *IRODSFSClientDirect) ListDirACLs(path string) ([]*irodsclient_type
 
 	accesses, err := client.fs.ListDirACLs(path)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to list acls for dir %s: %w", path, err)
+		return nil, err
 	}
 	return accesses, nil
 }
@@ -309,7 +309,7 @@ func (client *IRODSFSClientDirect) ListFileACLs(path string) ([]*irodsclient_typ
 
 	accesses, err := client.fs.ListFileACLs(path)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to list acls for file %s: %w", path, err)
+		return nil, err
 	}
 	return accesses, nil
 }
@@ -330,7 +330,7 @@ func (client *IRODSFSClientDirect) ListACLsForEntries(path string) ([]*irodsclie
 
 	accesses, err := client.fs.ListACLsForEntries(path)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to list acls for files in dir %s: %w", path, err)
+		return nil, err
 	}
 	return accesses, nil
 }
@@ -351,7 +351,7 @@ func (client *IRODSFSClientDirect) RemoveFile(path string, force bool) error {
 
 	err := client.fs.RemoveFile(path, force)
 	if err != nil {
-		return xerrors.Errorf("failed to remove file %s: %w", path, err)
+		return err
 	}
 	return nil
 }
@@ -372,7 +372,7 @@ func (client *IRODSFSClientDirect) RemoveDir(path string, recurse bool, force bo
 
 	err := client.fs.RemoveDir(path, recurse, force)
 	if err != nil {
-		return xerrors.Errorf("failed to remove dir %s: %w", path, err)
+		return err
 	}
 	return nil
 }
@@ -393,7 +393,7 @@ func (client *IRODSFSClientDirect) MakeDir(path string, recurse bool) error {
 
 	err := client.fs.MakeDir(path, recurse)
 	if err != nil {
-		return xerrors.Errorf("failed to make dir %s: %w", path, err)
+		return err
 	}
 	return nil
 }
@@ -414,7 +414,7 @@ func (client *IRODSFSClientDirect) RenameDirToDir(srcPath string, destPath strin
 
 	err := client.fs.RenameDirToDir(srcPath, destPath)
 	if err != nil {
-		return xerrors.Errorf("failed to rename dir %s to %s: %w", srcPath, destPath, err)
+		return err
 	}
 	return nil
 }
@@ -435,7 +435,7 @@ func (client *IRODSFSClientDirect) RenameFileToFile(srcPath string, destPath str
 
 	err := client.fs.RenameFileToFile(srcPath, destPath)
 	if err != nil {
-		return xerrors.Errorf("failed to rename file %s to %s: %w", srcPath, destPath, err)
+		return err
 	}
 	return nil
 }
@@ -456,7 +456,7 @@ func (client *IRODSFSClientDirect) CreateFile(path string, resource string, mode
 
 	handle, err := client.fs.CreateFile(path, resource, mode)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to create file %s: %w", path, err)
+		return nil, err
 	}
 
 	fileHandle := &IRODSFSClientDirectFileHandle{
@@ -482,7 +482,7 @@ func (client *IRODSFSClientDirect) OpenFile(path string, resource string, mode s
 
 	handle, err := client.fs.OpenFile(path, resource, mode)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to open file %s: %w", path, err)
+		return nil, err
 	}
 
 	fileHandle := &IRODSFSClientDirectFileHandle{
@@ -508,7 +508,7 @@ func (client *IRODSFSClientDirect) TruncateFile(path string, size int64) error {
 
 	err := client.fs.TruncateFile(path, size)
 	if err != nil {
-		return xerrors.Errorf("failed to truncate file %s: %w", path, err)
+		return err
 	}
 	return nil
 }
@@ -610,7 +610,7 @@ func (handle *IRODSFSClientDirectFileHandle) ReadAt(buffer []byte, offset int64)
 
 	readLen, err := handle.handle.ReadAt(buffer, offset)
 	if err != nil && err != io.EOF {
-		return readLen, xerrors.Errorf("failed to read: %w", err)
+		return readLen, err
 	}
 	return readLen, err
 }
@@ -631,7 +631,7 @@ func (handle *IRODSFSClientDirectFileHandle) WriteAt(data []byte, offset int64) 
 
 	writeLen, err := handle.handle.WriteAt(data, offset)
 	if err != nil {
-		return writeLen, xerrors.Errorf("failed to write: %w", err)
+		return writeLen, err
 	}
 	return writeLen, nil
 }
@@ -647,7 +647,7 @@ func (handle *IRODSFSClientDirectFileHandle) Truncate(size int64) error {
 
 	err := handle.handle.Truncate(size)
 	if err != nil {
-		return xerrors.Errorf("failed to truncate file size to %s: %w", size, err)
+		return err
 	}
 	return nil
 }
@@ -667,7 +667,7 @@ func (handle *IRODSFSClientDirectFileHandle) Close() error {
 
 	err := handle.handle.Close()
 	if err != nil {
-		return xerrors.Errorf("failed to close file: %w", err)
+		return err
 	}
 	return nil
 }

@@ -111,8 +111,7 @@ func (store *FileBlockStore) Get(blockID int64) *FileBlock {
 			}
 
 			if err != nil {
-				cacheErr := xerrors.Errorf("failed to read data from cache: %w", err)
-				logger.Error(cacheErr)
+				logger.Error(err)
 				return nil
 			}
 
@@ -141,7 +140,7 @@ func (store *FileBlockStore) Put(block *FileBlock) error {
 
 		_, cacheErr := store.cacheStore.CreateEntry(cacheKey, store.path, block.buffer.Bytes())
 		if cacheErr != nil {
-			return xerrors.Errorf("failed to create cache entry: %w", cacheErr)
+			return cacheErr
 		}
 
 		if block.buffer.Len() == store.blockSize && block.eof {
@@ -150,7 +149,7 @@ func (store *FileBlockStore) Put(block *FileBlock) error {
 
 			_, eofCacheErr := store.cacheStore.CreateEntry(eofBlockKey, store.path, []byte{})
 			if eofCacheErr != nil {
-				return xerrors.Errorf("failed to create cache entry: %w", eofCacheErr)
+				return eofCacheErr
 			}
 		}
 	}

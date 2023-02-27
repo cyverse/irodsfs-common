@@ -272,7 +272,7 @@ func (store *DiskCacheStore) CreateEntry(key string, group string, data []byte) 
 
 	entry, err := NewDiskCacheEntry(store, key, group, data)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to create disk cache entry for key %s: %w", key, err)
+		return nil, err
 	}
 
 	store.mutex.Lock()
