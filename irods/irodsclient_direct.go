@@ -29,7 +29,7 @@ func NewIRODSFSClientDirect(account *irodsclient_types.IRODSAccount, config *iro
 
 	defer utils.StackTraceFromPanic(logger)
 
-	goirodsfs, err := irodsclient_fs.NewFileSystem(account, config)
+	fs, err := irodsclient_fs.NewFileSystem(account, config)
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +37,7 @@ func NewIRODSFSClientDirect(account *irodsclient_types.IRODSAccount, config *iro
 	return &IRODSFSClientDirect{
 		config:  config,
 		account: account,
-		fs:      goirodsfs,
+		fs:      fs,
 	}, nil
 }
 
