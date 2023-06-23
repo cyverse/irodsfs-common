@@ -1,24 +1,24 @@
 package vpath
 
-// INodeManager is a struct that manages inodes.
-type INodeManager struct {
-	entries      map[int64]string // id to path
-	currentInode int64
+// EntryIDManager is a struct that manages entry id.
+type EntryIDManager struct {
+	entries   map[int64]string // id to path
+	currentID int64
 }
 
-// NewINodeManager creates a new INodeManager
-func NewINodeManager(freeInodeStart int64) *INodeManager {
-	return &INodeManager{
-		entries:      map[int64]string{},
-		currentInode: freeInodeStart,
+// NewEntryIDManager creates a new INodeManager
+func NewINodeManager(freeInodeStart int64) *EntryIDManager {
+	return &EntryIDManager{
+		entries:   map[int64]string{},
+		currentID: freeInodeStart,
 	}
 }
 
-// GetNextINode returns next inode
-func (manager *INodeManager) GetNextINode(path string) int64 {
-	inodeID := manager.currentInode
-	manager.currentInode++
+// GetNextINode returns next id
+func (manager *EntryIDManager) GetNextINode(path string) int64 {
+	myID := manager.currentID
+	manager.currentID--
 
-	manager.entries[inodeID] = path
-	return inodeID
+	manager.entries[myID] = path
+	return myID
 }

@@ -10,12 +10,12 @@ import (
 )
 
 const (
-	freeInodeStart int64 = 100
+	freeEntryIDStart int64 = -100
 )
 
 // VPathManager is a struct that manages virtual paths.
 type VPathManager struct {
-	inodeManager *INodeManager
+	entryIDManager *EntryIDManager
 	// path mappings given by user
 	pathMappings []VPathMapping
 	// entries is a map holding vpath entries.
@@ -32,10 +32,10 @@ func NewVPathManager(fsClient irods.IRODSFSClient, pathMappings []VPathMapping) 
 	})
 
 	manager := &VPathManager{
-		inodeManager: NewINodeManager(freeInodeStart),
-		pathMappings: pathMappings,
-		entries:      map[string]*VPathEntry{},
-		fsClient:     fsClient,
+		entryIDManager: NewINodeManager(freeEntryIDStart),
+		pathMappings:   pathMappings,
+		entries:        map[string]*VPathEntry{},
+		fsClient:       fsClient,
 	}
 
 	logger.Info("Building a hierarchy")
@@ -128,7 +128,7 @@ func (manager *VPathManager) buildOne(mapping *VPathMapping) error {
 				return xerrors.Errorf("failed to create a virtual dir entry %s, iRODS entry already exists", parentDir)
 			}
 		} else {
-			inodeID := manager.inodeManager.GetNextINode(parentDir)
+			inodeID := manager.entryIDManager.GetNextINode(parentDir)
 			dirEntry := &VPathEntry{
 				Type:     VPathVirtualDir,
 				Path:     parentDir,
