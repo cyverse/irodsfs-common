@@ -9,8 +9,13 @@ import (
 	"golang.org/x/xerrors"
 )
 
+const (
+	freeInodeStart int64 = 100
+)
+
 // VPathManager is a struct that manages virtual paths.
 type VPathManager struct {
+	inodeManager *INodeManager
 	// path mappings given by user
 	pathMappings []VPathMapping
 	// entries is a map holding vpath entries.
@@ -27,6 +32,7 @@ func NewVPathManager(fsClient irods.IRODSFSClient, pathMappings []VPathMapping) 
 	})
 
 	manager := &VPathManager{
+		inodeManager: NewINodeManager(freeInodeStart),
 		pathMappings: pathMappings,
 		entries:      map[string]*VPathEntry{},
 		fsClient:     fsClient,
@@ -122,12 +128,13 @@ func (manager *VPathManager) buildOne(mapping *VPathMapping) error {
 				return xerrors.Errorf("failed to create a virtual dir entry %s, iRODS entry already exists", parentDir)
 			}
 		} else {
+			inodeID := manager.inodeManager.GetNextINode(parentDir)
 			dirEntry := &VPathEntry{
 				Type:     VPathVirtualDir,
 				Path:     parentDir,
 				ReadOnly: true,
 				VirtualDirEntry: &VPathVirtualDirEntry{
-					ID:         0,
+					ID:         inodeID,
 					Name:       utils.GetFileName(parentDir),
 					Path:       parentDir,
 					Owner:      manager.fsClient.GetAccount().ClientUser,
