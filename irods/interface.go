@@ -52,6 +52,9 @@ type IRODSFSFileHandle interface {
 	ReadAt(buffer []byte, offset int64) (int, error)
 	GetAvailable(offset int64) int64
 	WriteAt(data []byte, offset int64) (int, error)
+	Lock(wait bool) error
+	RLock(wait bool) error
+	Unlock() error
 	Truncate(size int64) error
 	Flush() error
 	Close() error

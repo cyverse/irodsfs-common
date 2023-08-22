@@ -636,6 +636,42 @@ func (handle *IRODSFSClientDirectFileHandle) WriteAt(data []byte, offset int64) 
 	return writeLen, nil
 }
 
+func (handle *IRODSFSClientDirectFileHandle) Lock(wait bool) error {
+	logger := log.WithFields(log.Fields{
+		"package":  "irods",
+		"struct":   "IRODSFSClientDirectFileHandle",
+		"function": "Truncate",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	return handle.handle.LockDataObject(wait)
+}
+
+func (handle *IRODSFSClientDirectFileHandle) RLock(wait bool) error {
+	logger := log.WithFields(log.Fields{
+		"package":  "irods",
+		"struct":   "IRODSFSClientDirectFileHandle",
+		"function": "Truncate",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	return handle.handle.RLockDataObject(wait)
+}
+
+func (handle *IRODSFSClientDirectFileHandle) Unlock() error {
+	logger := log.WithFields(log.Fields{
+		"package":  "irods",
+		"struct":   "IRODSFSClientDirectFileHandle",
+		"function": "Truncate",
+	})
+
+	defer utils.StackTraceFromPanic(logger)
+
+	return handle.handle.UnlockDataObject()
+}
+
 func (handle *IRODSFSClientDirectFileHandle) Truncate(size int64) error {
 	logger := log.WithFields(log.Fields{
 		"package":  "irods",
