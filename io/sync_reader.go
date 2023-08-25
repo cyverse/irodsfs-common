@@ -14,7 +14,6 @@ type SyncReader struct {
 	fsClient   irods.IRODSFSClient
 	path       string
 	checksum   string
-	size       int64
 	fileHandle irods.IRODSFSFileHandle
 
 	reportClient report.IRODSFSInstanceReportClient
@@ -28,7 +27,6 @@ func NewSyncReader(fsClient irods.IRODSFSClient, fileHandle irods.IRODSFSFileHan
 		fsClient:   fsClient,
 		path:       entry.Path,
 		checksum:   entry.CheckSum,
-		size:       entry.Size,
 		fileHandle: fileHandle,
 
 		reportClient: reportClient,
@@ -58,7 +56,7 @@ func (reader *SyncReader) GetChecksum() string {
 
 // GetSize returns size of the file
 func (reader *SyncReader) GetSize() int64 {
-	return reader.size
+	return reader.fileHandle.GetEntry().Size
 }
 
 // ReadAt reads data
@@ -75,7 +73,7 @@ func (reader *SyncReader) ReadAt(buffer []byte, offset int64) (int, error) {
 		return 0, nil
 	}
 
-	if offset >= reader.size {
+	if offset >= reader.fileHandle.GetEntry().Size {
 		return 0, io.EOF
 	}
 
