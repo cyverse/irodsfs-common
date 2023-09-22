@@ -159,10 +159,10 @@ func (manager *VPathManager) buildOne(mapping *VPathMapping) error {
 
 	// if it is an iRODS dir (collection) resource, CreateDir flag is on
 	if mapping.ResourceType == VPathMappingDirectory && mapping.CreateDir {
-		logger.Debugf("Checking if path exists - %s", mapping.IRODSPath)
+		logger.Infof("Checking if path exists - %s", mapping.IRODSPath)
 
 		if !manager.fsClient.ExistsDir(mapping.IRODSPath) {
-			logger.Debugf("Creating path - %s", mapping.IRODSPath)
+			logger.Infof("Creating path - %s", mapping.IRODSPath)
 			err := manager.fsClient.MakeDir(mapping.IRODSPath, true)
 			if err != nil {
 				logger.WithError(err).Errorf("failed to make a dir - %s", mapping.IRODSPath)
