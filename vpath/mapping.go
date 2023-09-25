@@ -1,6 +1,10 @@
 package vpath
 
 import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
 	"github.com/cyverse/irodsfs-common/utils"
 	"golang.org/x/xerrors"
 )
@@ -14,6 +18,38 @@ const (
 	// VPathMappingDirectory is for directory entry
 	VPathMappingDirectory VPathMappingResourceType = "dir"
 )
+
+// String returns the string representation of a VPathMappingResourceType.
+func (t VPathMappingResourceType) String() string {
+	return string(t)
+}
+
+// MarshalJSON returns the JSON representation of a VPathMappingResourceType.
+func (t VPathMappingResourceType) MarshalJSON() ([]byte, error) {
+	return json.Marshal(t.String())
+}
+
+// UnmarshalJSON converts the JSON representation of a VPathMappingResourceType to the appropriate enumeration constant.
+func (t *VPathMappingResourceType) UnmarshalJSON(b []byte) error {
+	// VPathMappingResourceType is represented as strings in JSON.
+	var s string
+	err := json.Unmarshal(b, &s)
+	if err != nil {
+		return err
+	}
+
+	// Validate and convert the value.
+	switch strings.ToLower(s) {
+	case "", string(VPathMappingDirectory):
+		*t = VPathMappingDirectory
+	case string(VPathMappingFile):
+		*t = VPathMappingFile
+	default:
+		return fmt.Errorf("invalid vpath mapping resource type: %s", s)
+	}
+
+	return nil
+}
 
 // VPathMapping defines a path mapping between iRODS DataObject/Collection and local file/directory
 type VPathMapping struct {
