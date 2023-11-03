@@ -40,6 +40,7 @@ type VPathEntry struct {
 	ReadOnly bool
 
 	// Only one of fields below is filled according to the Type
+	// both fields may have nil when iRODS entry is not retrieved successfully due to iRODS fail
 	VirtualDirEntry *VPathVirtualDirEntry
 	IRODSEntry      *irodsclient_fs.Entry
 }
@@ -58,6 +59,17 @@ func NewVPathEntryFromIRODSFSEntry(path string, irodsEntry *irodsclient_fs.Entry
 // ToString stringifies the object
 func (entry *VPathEntry) ToString() string {
 	return fmt.Sprintf("<VPathEntry %s %s %t %p %p>", entry.Type, entry.Path, entry.ReadOnly, entry.VirtualDirEntry, entry.IRODSEntry)
+}
+
+// RequireIRODSEntryUpdate returns true if it requires to update IRODSEntry field
+func (entry *VPathEntry) RequireIRODSEntryUpdate() bool {
+	if entry.Type == VPathIRODS {
+		if entry.IRODSEntry == nil {
+			return true
+		}
+	}
+
+	return false
 }
 
 // GetIRODSPath returns an iRODS path for the given vpath

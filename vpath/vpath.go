@@ -3,6 +3,7 @@ package vpath
 import (
 	"time"
 
+	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
@@ -125,7 +126,7 @@ func (manager *VPathManager) buildOne(mapping *VPathMapping) error {
 			if parentDirEntry.Type != VPathVirtualDir {
 				// already exists
 				// can't create a virtual dir entry under an irods entry
-				return xerrors.Errorf("failed to create a virtual dir entry %s, iRODS entry already exists", parentDir)
+				return xerrors.Errorf("failed to create a virtual dir entry %s, entry already exists", parentDir)
 			}
 		} else {
 			inodeID := manager.entryIDManager.GetNextINode(parentDir)
@@ -157,42 +158,104 @@ func (manager *VPathManager) buildOne(mapping *VPathMapping) error {
 		}
 	}
 
-	// if it is an iRODS dir (collection) resource, CreateDir flag is on
-	if mapping.ResourceType == VPathMappingDirectory && mapping.CreateDir {
-		logger.Infof("Checking if path exists - %s", mapping.IRODSPath)
+	pathExist := false
+	errored := false
+	makeDir := false
 
-		if !manager.fsClient.ExistsDir(mapping.IRODSPath) {
-			logger.Infof("Creating path - %s", mapping.IRODSPath)
-			err := manager.fsClient.MakeDir(mapping.IRODSPath, true)
+	logger.Debugf("Checking path - %s", mapping.IRODSPath)
+	irodsEntry, err := manager.fsClient.Stat(mapping.IRODSPath)
+	if err != nil {
+		if irodsclient_types.IsFileNotFoundError(err) {
+			if mapping.ResourceType == VPathMappingDirectory {
+				// dir not found
+				if mapping.CreateDir {
+					// create dir
+					makeDir = true
+					// fall below
+				} else {
+					if mapping.IgnoreNotExistError {
+						// skip
+						logger.WithError(err).Debugf("ignoring non-existing dir %s for mounting", mapping.IRODSPath)
+						return nil
+					}
+
+					logger.WithError(err).Errorf("failed to find dir %s for mounting", mapping.IRODSPath)
+					return xerrors.Errorf("failed to find dir %s for mounting: %w", mapping.IRODSPath, err)
+				}
+			} else {
+				// file not found
+				if mapping.IgnoreNotExistError {
+					// skip
+					logger.WithError(err).Debugf("ignoring non-existing file %s for mounting", mapping.IRODSPath)
+					return nil
+				}
+
+				logger.WithError(err).Errorf("failed to find file %s for mounting", mapping.IRODSPath)
+				return xerrors.Errorf("failed to find file %s for mounting: %w", mapping.IRODSPath, err)
+			}
+		} else {
+			// server error
+			logger.WithError(err).Errorf("failed to check path - %s", mapping.IRODSPath)
+			errored = true
+		}
+	} else {
+		pathExist = true
+	}
+
+	// make dir
+	if makeDir {
+		err := manager.fsClient.MakeDir(mapping.IRODSPath, true)
+		if err != nil {
+			logger.WithError(err).Errorf("failed to make a dir %s for mounting", mapping.IRODSPath)
+
+			if mapping.IgnoreNotExistError {
+				// skip
+				logger.WithError(err).Debugf("ignoring non-existing dir %s for mounting", mapping.IRODSPath)
+				return nil
+			}
+
+			return xerrors.Errorf("failed to make dir %s for mounting: %w", mapping.IRODSPath, err)
+		} else {
+			// make dir ok
+			irodsEntry, err = manager.fsClient.Stat(mapping.IRODSPath)
 			if err != nil {
-				logger.WithError(err).Errorf("failed to make a dir - %s", mapping.IRODSPath)
-				// fall below
+				logger.WithError(err).Errorf("failed to find dir %s for mounting", mapping.IRODSPath)
+				errored = true
+			} else {
+				pathExist = true
 			}
 		}
 	}
 
-	// add leaf
-	logger.Debugf("Checking path - %s", mapping.IRODSPath)
-	irodsEntry, err := manager.fsClient.Stat(mapping.IRODSPath)
-	if err != nil {
-		if mapping.IgnoreNotExistError {
-			// ignore
-			return nil
+	if pathExist {
+		// add entry
+		logger.Debugf("Creating VFS entry mapping - irods path %s => vpath %s (%t)", irodsEntry.Path, mapping.MappingPath, mapping.ReadOnly)
+		entry := NewVPathEntryFromIRODSFSEntry(mapping.MappingPath, irodsEntry, mapping.ReadOnly)
+		manager.entries[mapping.MappingPath] = entry
+
+		// add to parent
+		if len(parentDirs) > 0 {
+			parentPath := parentDirs[len(parentDirs)-1]
+			if parentEntry, ok := manager.entries[parentPath]; ok {
+				parentEntry.VirtualDirEntry.DirEntries = append(parentEntry.VirtualDirEntry.DirEntries, entry)
+			}
 		}
+	} else if errored {
+		// add empty entry
+		logger.Debugf("Creating VFS entry mapping - irods path %s => vpath %s (%t), empty entry", mapping.IRODSPath, mapping.MappingPath, mapping.ReadOnly)
+		entry := NewVPathEntryFromIRODSFSEntry(mapping.MappingPath, nil, mapping.ReadOnly)
+		manager.entries[mapping.MappingPath] = entry
 
-		return xerrors.Errorf("failed to stat %s: %w", mapping.IRODSPath, err)
-	}
-
-	logger.Debugf("Creating VFS entry mapping - irods path %s => vpath %s (%t)", irodsEntry.Path, mapping.MappingPath, mapping.ReadOnly)
-	entry := NewVPathEntryFromIRODSFSEntry(mapping.MappingPath, irodsEntry, mapping.ReadOnly)
-	manager.entries[mapping.MappingPath] = entry
-
-	// add to parent
-	if len(parentDirs) > 0 {
-		parentPath := parentDirs[len(parentDirs)-1]
-		if parentEntry, ok := manager.entries[parentPath]; ok {
-			parentEntry.VirtualDirEntry.DirEntries = append(parentEntry.VirtualDirEntry.DirEntries, entry)
+		// add to parent
+		if len(parentDirs) > 0 {
+			parentPath := parentDirs[len(parentDirs)-1]
+			if parentEntry, ok := manager.entries[parentPath]; ok {
+				parentEntry.VirtualDirEntry.DirEntries = append(parentEntry.VirtualDirEntry.DirEntries, entry)
+			}
 		}
+	} else {
+		logger.Errorf("failed to build a mapping for path - %s", mapping.IRODSPath)
+		return xerrors.Errorf("failed to build a mapping for path - %s", mapping.IRODSPath)
 	}
 
 	return nil
