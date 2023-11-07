@@ -230,7 +230,7 @@ func (manager *VPathManager) buildOne(mapping *VPathMapping) error {
 	if pathExist {
 		// add entry
 		logger.Debugf("Creating VFS entry mapping - irods path %s => vpath %s (%t)", irodsEntry.Path, mapping.MappingPath, mapping.ReadOnly)
-		entry := NewVPathEntryFromIRODSFSEntry(mapping.MappingPath, irodsEntry, mapping.ReadOnly)
+		entry := NewVPathEntryFromIRODSFSEntry(mapping.MappingPath, mapping.IRODSPath, irodsEntry, mapping.ReadOnly)
 		manager.entries[mapping.MappingPath] = entry
 
 		// add to parent
@@ -243,7 +243,7 @@ func (manager *VPathManager) buildOne(mapping *VPathMapping) error {
 	} else if errored {
 		// add empty entry
 		logger.Debugf("Creating VFS entry mapping - irods path %s => vpath %s (%t), empty entry", mapping.IRODSPath, mapping.MappingPath, mapping.ReadOnly)
-		entry := NewVPathEntryFromIRODSFSEntry(mapping.MappingPath, nil, mapping.ReadOnly)
+		entry := NewVPathEntryFromIRODSFSEntry(mapping.MappingPath, mapping.IRODSPath, nil, mapping.ReadOnly)
 		manager.entries[mapping.MappingPath] = entry
 
 		// add to parent

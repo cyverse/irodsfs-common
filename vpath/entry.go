@@ -6,6 +6,8 @@ import (
 	"time"
 
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
+	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
+	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/utils"
 	"golang.org/x/xerrors"
 )
@@ -35,9 +37,10 @@ type VPathVirtualDirEntry struct {
 
 // VPathEntry is a virtual path entry struct
 type VPathEntry struct {
-	Type     VPathEntryType
-	Path     string
-	ReadOnly bool
+	Type      VPathEntryType
+	Path      string
+	IRODSPath string // maybe empty if type is VPathVirtualDir
+	ReadOnly  bool
 
 	// Only one of fields below is filled according to the Type
 	// both fields may have nil when iRODS entry is not retrieved successfully due to iRODS fail
@@ -46,10 +49,11 @@ type VPathEntry struct {
 }
 
 // NewVPathEntryFromIRODSFSEntry creates a new VPathEntry from IRODSEntry
-func NewVPathEntryFromIRODSFSEntry(path string, irodsEntry *irodsclient_fs.Entry, readonly bool) *VPathEntry {
+func NewVPathEntryFromIRODSFSEntry(path string, irodsPath string, irodsEntry *irodsclient_fs.Entry, readonly bool) *VPathEntry {
 	return &VPathEntry{
 		Type:            VPathIRODS,
 		Path:            path,
+		IRODSPath:       irodsPath,
 		ReadOnly:        readonly,
 		VirtualDirEntry: nil,
 		IRODSEntry:      irodsEntry,
@@ -58,7 +62,7 @@ func NewVPathEntryFromIRODSFSEntry(path string, irodsEntry *irodsclient_fs.Entry
 
 // ToString stringifies the object
 func (entry *VPathEntry) ToString() string {
-	return fmt.Sprintf("<VPathEntry %s %s %t %p %p>", entry.Type, entry.Path, entry.ReadOnly, entry.VirtualDirEntry, entry.IRODSEntry)
+	return fmt.Sprintf("<VPathEntry %s %s %s %t %p %p>", entry.Type, entry.Path, entry.IRODSPath, entry.ReadOnly, entry.VirtualDirEntry, entry.IRODSEntry)
 }
 
 // RequireIRODSEntryUpdate returns true if it requires to update IRODSEntry field
@@ -70,6 +74,26 @@ func (entry *VPathEntry) RequireIRODSEntryUpdate() bool {
 	}
 
 	return false
+}
+
+// UpdateIRODSEntry updates IRODSEntry field
+func (entry *VPathEntry) UpdateIRODSEntry(fsClient irods.IRODSFSClient) error {
+	if entry.Type == VPathIRODS {
+		irodsEntry, err := fsClient.Stat(entry.IRODSPath)
+		if err != nil {
+			if irodsclient_types.IsFileNotFoundError(err) {
+				return xerrors.Errorf("failed to find path %s: %w", entry.IRODSPath, err)
+			}
+
+			return xerrors.Errorf("failed to update IRODSEntry for path %s: %w", entry.IRODSPath, err)
+		}
+
+		entry.IRODSEntry = irodsEntry
+		return nil
+	}
+
+	// do nothing
+	return nil
 }
 
 // GetIRODSPath returns an iRODS path for the given vpath
@@ -89,8 +113,8 @@ func (entry *VPathEntry) GetIRODSPath(vpath string) (string, error) {
 	}
 
 	if relPath == "." {
-		return entry.IRODSEntry.Path, nil
+		return entry.IRODSPath, nil
 	}
 
-	return utils.JoinPath(entry.IRODSEntry.Path, relPath), nil
+	return utils.JoinPath(entry.IRODSPath, relPath), nil
 }
