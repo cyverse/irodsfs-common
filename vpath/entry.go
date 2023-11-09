@@ -65,6 +65,16 @@ func (entry *VPathEntry) ToString() string {
 	return fmt.Sprintf("<VPathEntry %s %s %s %t %p %p>", entry.Type, entry.Path, entry.IRODSPath, entry.ReadOnly, entry.VirtualDirEntry, entry.IRODSEntry)
 }
 
+// IsIRODSEntry returns true if the entry is for iRODS entry
+func (entry *VPathEntry) IsIRODSEntry() bool {
+	return entry.Type == VPathIRODS
+}
+
+// IsVirtualDirEntry returns true if the entry is for virtual dir
+func (entry *VPathEntry) IsVirtualDirEntry() bool {
+	return entry.Type == VPathVirtualDir
+}
+
 // RequireIRODSEntryUpdate returns true if it requires to update IRODSEntry field
 func (entry *VPathEntry) RequireIRODSEntryUpdate() bool {
 	if entry.Type == VPathIRODS {
@@ -117,4 +127,15 @@ func (entry *VPathEntry) GetIRODSPath(vpath string) (string, error) {
 	}
 
 	return utils.JoinPath(entry.IRODSPath, relPath), nil
+}
+
+// StatIRODSEntry returns an iRODS stat for the given vpath
+func (entry *VPathEntry) StatIRODSEntry(fsClient irods.IRODSFSClient, vpath string) (string, *irodsclient_fs.Entry, error) {
+	irodsPath, err := entry.GetIRODSPath(vpath)
+	if err != nil {
+		return "", nil, xerrors.Errorf("failed to stat iRODS entry for vpath %s: %w", vpath, err)
+	}
+
+	irodsEntry, err := fsClient.Stat(irodsPath)
+	return irodsPath, irodsEntry, err
 }
