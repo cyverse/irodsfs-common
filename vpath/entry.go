@@ -128,14 +128,3 @@ func (entry *VPathEntry) GetIRODSPath(vpath string) (string, error) {
 
 	return utils.JoinPath(entry.IRODSPath, relPath), nil
 }
-
-// StatIRODSEntry returns an iRODS stat for the given vpath
-func (entry *VPathEntry) StatIRODSEntry(fsClient irods.IRODSFSClient, vpath string) (string, *irodsclient_fs.Entry, error) {
-	irodsPath, err := entry.GetIRODSPath(vpath)
-	if err != nil {
-		return "", nil, xerrors.Errorf("failed to stat iRODS entry for vpath %s: %w", vpath, err)
-	}
-
-	irodsEntry, err := fsClient.Stat(irodsPath)
-	return irodsPath, irodsEntry, err
-}
