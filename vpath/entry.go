@@ -25,7 +25,7 @@ const (
 
 // VPathVirtualDirEntry is a virtual directory entry struct
 type VPathVirtualDirEntry struct {
-	ID         int64
+	ID         uint64
 	Name       string
 	Path       string
 	Owner      string

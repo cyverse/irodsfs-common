@@ -3,10 +3,14 @@ package irods
 import (
 	"io"
 	"os"
+	"path"
+	"strings"
+	"time"
 
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
 	irodsclient_metrics "github.com/cyverse/go-irodsclient/irods/metrics"
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
+	"github.com/cyverse/irodsfs-common/inode"
 	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/xerrors"
@@ -18,11 +22,15 @@ import (
 // implements interfaces defined in interface.go
 type IRODSFSClientOverlay struct {
 	clientDirect   *IRODSFSClientDirect
+	account        *irodsclient_types.IRODSAccount
+	config         *irodsclient_fs.FileSystemConfig
+	fs             *irodsclient_fs.FileSystem
+	inodeManager   *inode.InodeManager
 	overlayDirPath string
 }
 
 // NewIRODSFSClientOverlay creates IRODSFSClient using IRODSFSClientOverlay
-func NewIRODSFSClientOverlay(account *irodsclient_types.IRODSAccount, config *irodsclient_fs.FileSystemConfig, overlayDirPath string) (IRODSFSClient, error) {
+func NewIRODSFSClientOverlay(account *irodsclient_types.IRODSAccount, config *irodsclient_fs.FileSystemConfig, inodeManager *inode.InodeManager, overlayDirPath string) (IRODSFSClient, error) {
 	logger := log.WithFields(log.Fields{
 		"package":  "irods",
 		"function": "NewIRODSFSClientOverlay",
@@ -43,6 +51,10 @@ func NewIRODSFSClientOverlay(account *irodsclient_types.IRODSAccount, config *ir
 
 	return &IRODSFSClientOverlay{
 		clientDirect:   clientDirect,
+		config:         config,
+		account:        account,
+		fs:             fs,
+		inodeManager:   inodeManager,
 		overlayDirPath: overlayDirPath,
 	}, nil
 }
@@ -80,8 +92,17 @@ func (client *IRODSFSClientOverlay) Release() {
 	client.clientDirect.Release()
 }
 
+func (client *IRODSFSClientOverlay) makeLocalPath(irodsPath string) string {
+	subPath := strings.TrimLeft(irodsPath, "/")
+	return path.Join(client.overlayDirPath, subPath)
+}
+
+func (client *IRODSFSClientOverlay) getLocalEntryID(irodsPath string) int64 {
+	return int64(client.inodeManager.GetInodeIDForOverlayEntry(irodsPath))
+}
+
 // List lists directory entries
-func (client *IRODSFSClientOverlay) List(path string) ([]*irodsclient_fs.Entry, error) {
+func (client *IRODSFSClientOverlay) List(irodsPath string) ([]*irodsclient_fs.Entry, error) {
 	if client.clientDirect.fs == nil {
 		return nil, xerrors.Errorf("FSClient is nil")
 	}
@@ -94,12 +115,56 @@ func (client *IRODSFSClientOverlay) List(path string) ([]*irodsclient_fs.Entry, 
 
 	defer utils.StackTraceFromPanic(logger)
 
-	// TODO: Add
-	return client.clientDirect.List(path)
+	entries := []*irodsclient_fs.Entry{}
+
+	remoteEntries, err := client.clientDirect.List(irodsPath)
+	if err != nil {
+		return remoteEntries, err
+	}
+
+	entries = append(entries, remoteEntries...)
+
+	localPath := client.makeLocalPath(irodsPath)
+	localEntries, err := os.ReadDir(localPath)
+	if err == nil {
+		for _, localEntry := range localEntries {
+			localEntryPath := path.Join(irodsPath, localEntry.Name())
+
+			localEntryType := irodsclient_fs.FileEntry
+			if localEntry.IsDir() {
+				localEntryType = irodsclient_fs.DirectoryEntry
+			}
+
+			newIrodsEntry := &irodsclient_fs.Entry{
+				ID:                client.getLocalEntryID(localEntryPath),
+				Type:              localEntryType,
+				Name:              localEntry.Name(),
+				Path:              localEntryPath,
+				Owner:             client.account.ClientUser,
+				Size:              0,
+				DataType:          "",
+				CreateTime:        time.Now(),
+				ModifyTime:        time.Now(),
+				CheckSumAlgorithm: "",
+				CheckSum:          "",
+			}
+
+			localEntryInfo, err := localEntry.Info()
+			if err == nil {
+				newIrodsEntry.Size = localEntryInfo.Size()
+				newIrodsEntry.CreateTime = localEntryInfo.ModTime()
+				newIrodsEntry.ModifyTime = localEntryInfo.ModTime()
+			}
+
+			entries = append(entries, newIrodsEntry)
+		}
+	}
+
+	return entries, nil
 }
 
 // Stat stats fs entry
-func (client *IRODSFSClientOverlay) Stat(path string) (*irodsclient_fs.Entry, error) {
+func (client *IRODSFSClientOverlay) Stat(irodsPath string) (*irodsclient_fs.Entry, error) {
 	if client.clientDirect.fs == nil {
 		return nil, xerrors.Errorf("FSClient is nil")
 	}
@@ -113,11 +178,11 @@ func (client *IRODSFSClientOverlay) Stat(path string) (*irodsclient_fs.Entry, er
 	defer utils.StackTraceFromPanic(logger)
 
 	// TODO: Add
-	return client.clientDirect.Stat(path)
+	return client.clientDirect.Stat(irodsPath)
 }
 
 // ListXattr lists xattr
-func (client *IRODSFSClientOverlay) ListXattr(path string) ([]*irodsclient_types.IRODSMeta, error) {
+func (client *IRODSFSClientOverlay) ListXattr(irodsPath string) ([]*irodsclient_types.IRODSMeta, error) {
 	if client.clientDirect.fs == nil {
 		return nil, xerrors.Errorf("FSClient is nil")
 	}
@@ -131,11 +196,11 @@ func (client *IRODSFSClientOverlay) ListXattr(path string) ([]*irodsclient_types
 	defer utils.StackTraceFromPanic(logger)
 
 	// TODO: Add
-	return client.clientDirect.ListXattr(path)
+	return client.clientDirect.ListXattr(irodsPath)
 }
 
 // GetXattr returns xattr value
-func (client *IRODSFSClientOverlay) GetXattr(path string, name string) (*irodsclient_types.IRODSMeta, error) {
+func (client *IRODSFSClientOverlay) GetXattr(irodsPath string, name string) (*irodsclient_types.IRODSMeta, error) {
 	if client.clientDirect.fs == nil {
 		return nil, xerrors.Errorf("FSClient is nil")
 	}
@@ -149,11 +214,11 @@ func (client *IRODSFSClientOverlay) GetXattr(path string, name string) (*irodscl
 	defer utils.StackTraceFromPanic(logger)
 
 	// TODO: Add
-	return client.clientDirect.GetXattr(path, name)
+	return client.clientDirect.GetXattr(irodsPath, name)
 }
 
 // SetXattr sets xattr
-func (client *IRODSFSClientOverlay) SetXattr(path string, name string, value string) error {
+func (client *IRODSFSClientOverlay) SetXattr(irodsPath string, name string, value string) error {
 	if client.clientDirect.fs == nil {
 		return xerrors.Errorf("FSClient is nil")
 	}
@@ -167,11 +232,11 @@ func (client *IRODSFSClientOverlay) SetXattr(path string, name string, value str
 	defer utils.StackTraceFromPanic(logger)
 
 	// TODO: Add
-	return client.clientDirect.SetXattr(path, name, value)
+	return client.clientDirect.SetXattr(irodsPath, name, value)
 }
 
 // RemoveXattr removes xattr
-func (client *IRODSFSClientOverlay) RemoveXattr(path string, name string) error {
+func (client *IRODSFSClientOverlay) RemoveXattr(irodsPath string, name string) error {
 	if client.clientDirect.fs == nil {
 		return xerrors.Errorf("FSClient is nil")
 	}
@@ -185,11 +250,11 @@ func (client *IRODSFSClientOverlay) RemoveXattr(path string, name string) error 
 	defer utils.StackTraceFromPanic(logger)
 
 	// TODO: Add
-	return client.clientDirect.RemoveXattr(path, name)
+	return client.clientDirect.RemoveXattr(irodsPath, name)
 }
 
 // ExistsDir checks existance of a dir
-func (client *IRODSFSClientOverlay) ExistsDir(path string) bool {
+func (client *IRODSFSClientOverlay) ExistsDir(irodsPath string) bool {
 	if client.clientDirect.fs == nil {
 		return false
 	}
@@ -203,11 +268,11 @@ func (client *IRODSFSClientOverlay) ExistsDir(path string) bool {
 	defer utils.StackTraceFromPanic(logger)
 
 	// TODO: Add
-	return client.clientDirect.ExistsDir(path)
+	return client.clientDirect.ExistsDir(irodsPath)
 }
 
 // ExistsFile checks existance of a file
-func (client *IRODSFSClientOverlay) ExistsFile(path string) bool {
+func (client *IRODSFSClientOverlay) ExistsFile(irodsPath string) bool {
 	if client.clientDirect.fs == nil {
 		return false
 	}
@@ -221,7 +286,7 @@ func (client *IRODSFSClientOverlay) ExistsFile(path string) bool {
 	defer utils.StackTraceFromPanic(logger)
 
 	// TODO: Add
-	return client.clientDirect.ExistsFile(path)
+	return client.clientDirect.ExistsFile(irodsPath)
 }
 
 // ListUserGroups lists user groups
@@ -242,7 +307,7 @@ func (client *IRODSFSClientOverlay) ListUserGroups(user string) ([]*irodsclient_
 }
 
 // ListDirACLs lists directory ACLs
-func (client *IRODSFSClientOverlay) ListDirACLs(path string) ([]*irodsclient_types.IRODSAccess, error) {
+func (client *IRODSFSClientOverlay) ListDirACLs(irodsPath string) ([]*irodsclient_types.IRODSAccess, error) {
 	if client.clientDirect.fs == nil {
 		return nil, xerrors.Errorf("FSClient is nil")
 	}
@@ -256,11 +321,11 @@ func (client *IRODSFSClientOverlay) ListDirACLs(path string) ([]*irodsclient_typ
 	defer utils.StackTraceFromPanic(logger)
 
 	// TODO: Add
-	return client.clientDirect.ListDirACLs(path)
+	return client.clientDirect.ListDirACLs(irodsPath)
 }
 
 // ListFileACLs lists file ACLs
-func (client *IRODSFSClientOverlay) ListFileACLs(path string) ([]*irodsclient_types.IRODSAccess, error) {
+func (client *IRODSFSClientOverlay) ListFileACLs(irodsPath string) ([]*irodsclient_types.IRODSAccess, error) {
 	if client.clientDirect.fs == nil {
 		return nil, xerrors.Errorf("FSClient is nil")
 	}
@@ -274,11 +339,11 @@ func (client *IRODSFSClientOverlay) ListFileACLs(path string) ([]*irodsclient_ty
 	defer utils.StackTraceFromPanic(logger)
 
 	// TODO: Add
-	return client.clientDirect.ListFileACLs(path)
+	return client.clientDirect.ListFileACLs(irodsPath)
 }
 
 // ListACLsForEntries lists ACLs for entries in a collection
-func (client *IRODSFSClientOverlay) ListACLsForEntries(path string) ([]*irodsclient_types.IRODSAccess, error) {
+func (client *IRODSFSClientOverlay) ListACLsForEntries(irodsPath string) ([]*irodsclient_types.IRODSAccess, error) {
 	if client.clientDirect.fs == nil {
 		return nil, xerrors.Errorf("FSClient is nil")
 	}
@@ -292,11 +357,11 @@ func (client *IRODSFSClientOverlay) ListACLsForEntries(path string) ([]*irodscli
 	defer utils.StackTraceFromPanic(logger)
 
 	// TODO: Add
-	return client.clientDirect.ListACLsForEntries(path)
+	return client.clientDirect.ListACLsForEntries(irodsPath)
 }
 
 // RemoveFile removes a file
-func (client *IRODSFSClientOverlay) RemoveFile(path string, force bool) error {
+func (client *IRODSFSClientOverlay) RemoveFile(irodsPath string, force bool) error {
 	if client.clientDirect.fs == nil {
 		return xerrors.Errorf("FSClient is nil")
 	}
@@ -310,11 +375,11 @@ func (client *IRODSFSClientOverlay) RemoveFile(path string, force bool) error {
 	defer utils.StackTraceFromPanic(logger)
 
 	// TODO: Add
-	return client.clientDirect.RemoveFile(path, force)
+	return client.clientDirect.RemoveFile(irodsPath, force)
 }
 
 // RemoveDir removes a directory
-func (client *IRODSFSClientOverlay) RemoveDir(path string, recurse bool, force bool) error {
+func (client *IRODSFSClientOverlay) RemoveDir(irodsPath string, recurse bool, force bool) error {
 	if client.clientDirect.fs == nil {
 		return xerrors.Errorf("FSClient is nil")
 	}
@@ -328,11 +393,11 @@ func (client *IRODSFSClientOverlay) RemoveDir(path string, recurse bool, force b
 	defer utils.StackTraceFromPanic(logger)
 
 	// TODO: Add
-	return client.clientDirect.RemoveDir(path, recurse, force)
+	return client.clientDirect.RemoveDir(irodsPath, recurse, force)
 }
 
 // MakeDir makes a new directory
-func (client *IRODSFSClientOverlay) MakeDir(path string, recurse bool) error {
+func (client *IRODSFSClientOverlay) MakeDir(irodsPath string, recurse bool) error {
 	if client.clientDirect.fs == nil {
 		return xerrors.Errorf("FSClient is nil")
 	}
@@ -346,7 +411,7 @@ func (client *IRODSFSClientOverlay) MakeDir(path string, recurse bool) error {
 	defer utils.StackTraceFromPanic(logger)
 
 	// TODO: Add
-	return client.clientDirect.MakeDir(path, recurse)
+	return client.clientDirect.MakeDir(irodsPath, recurse)
 }
 
 // RenameDirToDir renames a directory, dest path is also a non-existing path for dir
@@ -386,7 +451,7 @@ func (client *IRODSFSClientOverlay) RenameFileToFile(srcPath string, destPath st
 }
 
 // CreateFile creates a file
-func (client *IRODSFSClientOverlay) CreateFile(path string, resource string, mode string) (IRODSFSFileHandle, error) {
+func (client *IRODSFSClientOverlay) CreateFile(irodsPath string, resource string, mode string) (IRODSFSFileHandle, error) {
 	if client.clientDirect.fs == nil {
 		return nil, xerrors.Errorf("FSClient is nil")
 	}
@@ -400,11 +465,11 @@ func (client *IRODSFSClientOverlay) CreateFile(path string, resource string, mod
 	defer utils.StackTraceFromPanic(logger)
 
 	// TODO: Add
-	return client.clientDirect.CreateFile(path, resource, mode)
+	return client.clientDirect.CreateFile(irodsPath, resource, mode)
 }
 
 // OpenFile opens a file
-func (client *IRODSFSClientOverlay) OpenFile(path string, resource string, mode string) (IRODSFSFileHandle, error) {
+func (client *IRODSFSClientOverlay) OpenFile(irodsPath string, resource string, mode string) (IRODSFSFileHandle, error) {
 	if client.clientDirect.fs == nil {
 		return nil, xerrors.Errorf("FSClient is nil")
 	}
@@ -418,11 +483,11 @@ func (client *IRODSFSClientOverlay) OpenFile(path string, resource string, mode 
 	defer utils.StackTraceFromPanic(logger)
 
 	// TODO: Add
-	return client.clientDirect.OpenFile(path, resource, mode)
+	return client.clientDirect.OpenFile(irodsPath, resource, mode)
 }
 
 // TruncateFile truncates a file
-func (client *IRODSFSClientOverlay) TruncateFile(path string, size int64) error {
+func (client *IRODSFSClientOverlay) TruncateFile(irodsPath string, size int64) error {
 	if client.clientDirect.fs == nil {
 		return xerrors.Errorf("FSClient is nil")
 	}
@@ -436,7 +501,7 @@ func (client *IRODSFSClientOverlay) TruncateFile(path string, size int64) error 
 	defer utils.StackTraceFromPanic(logger)
 
 	// TODO: Add
-	return client.clientDirect.TruncateFile(path, size)
+	return client.clientDirect.TruncateFile(irodsPath, size)
 }
 
 func (client *IRODSFSClientOverlay) AddCacheEventHandler(handler irodsclient_fs.FilesystemCacheEventHandler) (string, error) {

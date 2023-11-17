@@ -4,19 +4,16 @@ import (
 	"time"
 
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
+	"github.com/cyverse/irodsfs-common/inode"
 	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/xerrors"
 )
 
-const (
-	freeEntryIDStart int64 = -100
-)
-
 // VPathManager is a struct that manages virtual paths.
 type VPathManager struct {
-	entryIDManager *EntryIDManager
+	inodeManager *inode.InodeManager
 	// path mappings given by user
 	pathMappings []VPathMapping
 	// entries is a map holding vpath entries.
@@ -26,17 +23,17 @@ type VPathManager struct {
 }
 
 // NewVPathManager creates a new VPathManager
-func NewVPathManager(fsClient irods.IRODSFSClient, pathMappings []VPathMapping) (*VPathManager, error) {
+func NewVPathManager(fsClient irods.IRODSFSClient, inodeManager *inode.InodeManager, pathMappings []VPathMapping) (*VPathManager, error) {
 	logger := log.WithFields(log.Fields{
 		"package":  "vpath",
 		"function": "NewVPathManager",
 	})
 
 	manager := &VPathManager{
-		entryIDManager: NewINodeManager(freeEntryIDStart),
-		pathMappings:   pathMappings,
-		entries:        map[string]*VPathEntry{},
-		fsClient:       fsClient,
+		inodeManager: inodeManager,
+		pathMappings: pathMappings,
+		entries:      map[string]*VPathEntry{},
+		fsClient:     fsClient,
 	}
 
 	logger.Info("Building a hierarchy")
@@ -129,7 +126,7 @@ func (manager *VPathManager) buildOne(mapping *VPathMapping) error {
 				return xerrors.Errorf("failed to create a virtual dir entry %s, entry already exists", parentDir)
 			}
 		} else {
-			inodeID := manager.entryIDManager.GetNextINode(parentDir)
+			inodeID := manager.inodeManager.GetInodeIDForVPathEntry(parentDir)
 			dirEntry := &VPathEntry{
 				Type:     VPathVirtualDir,
 				Path:     parentDir,
