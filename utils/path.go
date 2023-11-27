@@ -45,7 +45,9 @@ func GetIRODSZone(p string) (string, error) {
 
 	parts := strings.Split(p[1:], "/")
 	if len(parts) >= 1 {
-		return parts[0], nil
+		if len(parts[0]) > 0 {
+			return parts[0], nil
+		}
 	}
 	return "", xerrors.Errorf("failed to extract Zone from path %s", p)
 }
