@@ -51,6 +51,11 @@ func (client *IRODSFSClientDirect) GetApplicationName() string {
 	return client.config.ApplicationName
 }
 
+// GetFSClient returns iRODS fs client
+func (client *IRODSFSClientDirect) GetFSClient() *irodsclient_fs.FileSystem {
+	return client.fs
+}
+
 // GetConnections() returns total number of connections
 func (client *IRODSFSClientDirect) GetConnections() int {
 	return client.fs.ConnectionTotal()
