@@ -5,6 +5,7 @@ import "sync"
 const (
 	vpathEntryIDStart   = uint64(9000000000000000000)
 	overlayEntryIDStart = uint64(9000100000000000000)
+	irodsEntryIDStart   = uint64(1000000000000000000)
 )
 
 // InodeManager is a struct that manages inode.
@@ -27,10 +28,13 @@ func NewInodeManager() *InodeManager {
 
 // GetInodeIDForIRODSEntryID returns inode id for iRODS entry id
 func (manager *InodeManager) GetInodeIDForIRODSEntryID(entryID int64) uint64 {
-	//manager.mutex.Lock()
-	//defer manager.mutex.Unlock()
+	return irodsEntryIDStart + uint64(entryID)
+}
 
-	return uint64(entryID)
+// GetInodeIDForVPathEntryID returns inode id for vpath entry id
+func (manager *InodeManager) GetInodeIDForVPathEntryID(entryID uint64) uint64 {
+	// the same
+	return entryID
 }
 
 // GetInodeIDForVPathEntry returns inode id for vpath entry path
