@@ -2,6 +2,7 @@ package io
 
 import (
 	"github.com/cyverse/irodsfs-common/irods"
+	"github.com/cyverse/irodsfs-common/utils"
 	"golang.org/x/xerrors"
 )
 
@@ -21,7 +22,7 @@ func NewNilReader(fsClient irods.IRODSFSClient, fileHandle irods.IRODSFSFileHand
 	nilReader := &NilReader{
 		fsClient:   fsClient,
 		path:       entry.Path,
-		checksum:   entry.CheckSum,
+		checksum:   utils.GetChecksumString(entry.CheckSum),
 		size:       entry.Size,
 		fileHandle: fileHandle,
 	}

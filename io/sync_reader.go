@@ -26,7 +26,7 @@ func NewSyncReader(fsClient irods.IRODSFSClient, fileHandle irods.IRODSFSFileHan
 	syncReader := &SyncReader{
 		fsClient:   fsClient,
 		path:       entry.Path,
-		checksum:   entry.CheckSum,
+		checksum:   utils.GetChecksumString(entry.CheckSum),
 		fileHandle: fileHandle,
 
 		reportClient: reportClient,

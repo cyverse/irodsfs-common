@@ -24,7 +24,7 @@ type DiskCacheEntry struct {
 // NewDiskCacheEntry creates a new DiskCacheEntry
 func NewDiskCacheEntry(cache *DiskCacheStore, key string, group string, data []byte) (*DiskCacheEntry, error) {
 	// write to disk
-	hash := utils.MakeHash(key)
+	hash := utils.GetSHA1Sum(key)
 	filePath := utils.JoinPath(cache.GetRootPath(), hash)
 
 	err := os.WriteFile(filePath, data, 0666)

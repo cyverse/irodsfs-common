@@ -146,7 +146,7 @@ func (client *IRODSFSClientOverlay) List(irodsPath string) ([]*irodsclient_fs.En
 				CreateTime:        time.Now(),
 				ModifyTime:        time.Now(),
 				CheckSumAlgorithm: "",
-				CheckSum:          "",
+				CheckSum:          nil,
 			}
 
 			localEntryInfo, err := localEntry.Info()
