@@ -1,6 +1,6 @@
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
-github.com/cyverse/go-irodsclient v0.14.3 h1:B6BI3H2nUoh6pu76EB0eKBPdFY9lq1qppuHfDbz9UB0=
-github.com/cyverse/go-irodsclient v0.14.3/go.mod h1:eBXha3cwfrM0p1ijYVqsrLJQHpRwTfpA4c5dKCQsQFc=
+github.com/cyverse/go-irodsclient v0.14.6 h1:otPfQIZ7JVIU8liWkwKfUpds/tu9a35weliIrNzB/Tc=
+github.com/cyverse/go-irodsclient v0.14.6/go.mod h1:eBXha3cwfrM0p1ijYVqsrLJQHpRwTfpA4c5dKCQsQFc=
 github.com/cyverse/irodsfs-monitor v0.0.0-20220809235922-daf13261a2dc h1:gIpG0ETQOEZloFwB5iU2zljVsoUDTpUEl/3WF19gLNk=
 github.com/cyverse/irodsfs-monitor v0.0.0-20220809235922-daf13261a2dc/go.mod h1:8UE1mT26+0vAsqS9UJ6Q/vlKq3da6FLdt5p6Tt1AIC4=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
