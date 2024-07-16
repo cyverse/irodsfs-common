@@ -190,7 +190,7 @@ func (client *IRODSFSClientDirect) SetXattr(path string, name string, value stri
 
 	// remove first if exists, ignore error if raised
 	// this is required as we can have multiple metadata with same name in iRODS
-	client.fs.DeleteMetadata(path, name, "", "")
+	client.fs.DeleteMetadataByName(path, name)
 
 	err := client.fs.AddMetadata(path, name, value, "")
 	if err != nil {
@@ -214,7 +214,7 @@ func (client *IRODSFSClientDirect) RemoveXattr(path string, name string) error {
 
 	defer utils.StackTraceFromPanic(logger)
 
-	err := client.fs.DeleteMetadata(path, name, "", "")
+	err := client.fs.DeleteMetadataByName(path, name)
 	if err != nil {
 		return err
 	}
