@@ -202,7 +202,7 @@ func syncWriteRead(t *testing.T, size int64) {
 
 	account.ClientServerNegotiation = false
 
-	fsConfig := fs.NewFileSystemConfigWithDefault("irodsfs-common-test")
+	fsConfig := fs.NewFileSystemConfig("irodsfs-common-test")
 
 	filesystem, err := irods.NewIRODSFSClientDirect(account, fsConfig)
 	assert.NoError(t, err)
@@ -311,7 +311,7 @@ func syncBufferedWriteRead(t *testing.T, size int64) {
 
 	account.ClientServerNegotiation = false
 
-	fsConfig := fs.NewFileSystemConfigWithDefault("irodsfs-common-test")
+	fsConfig := fs.NewFileSystemConfig("irodsfs-common-test")
 
 	filesystem, err := irods.NewIRODSFSClientDirect(account, fsConfig)
 	assert.NoError(t, err)
@@ -421,7 +421,7 @@ func asyncWriteRead(t *testing.T, size int64) {
 
 	account.ClientServerNegotiation = false
 
-	fsConfig := fs.NewFileSystemConfigWithDefault("irodsfs-common-test")
+	fsConfig := fs.NewFileSystemConfig("irodsfs-common-test")
 
 	filesystem, err := irods.NewIRODSFSClientDirect(account, fsConfig)
 	assert.NoError(t, err)
@@ -534,7 +534,7 @@ func asyncWriteReadWithCache(t *testing.T, size int64) {
 
 	account.ClientServerNegotiation = false
 
-	fsConfig := fs.NewFileSystemConfigWithDefault("irodsfs-common-test")
+	fsConfig := fs.NewFileSystemConfig("irodsfs-common-test")
 
 	filesystem, err := irods.NewIRODSFSClientDirect(account, fsConfig)
 	assert.NoError(t, err)
@@ -697,7 +697,7 @@ func asyncWriteReadWithPrefetch(t *testing.T, size int64) {
 
 	account.ClientServerNegotiation = false
 
-	fsConfig := fs.NewFileSystemConfigWithDefault("irodsfs-common-test")
+	fsConfig := fs.NewFileSystemConfig("irodsfs-common-test")
 
 	filesystem, err := irods.NewIRODSFSClientDirect(account, fsConfig)
 	assert.NoError(t, err)

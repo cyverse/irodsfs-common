@@ -136,7 +136,7 @@ func makeHomeDir(t *testing.T, testID string) {
 	account := GetTestAccount()
 	account.ClientServerNegotiation = false
 
-	sessionConfig := session.NewIRODSSessionConfigWithDefault("go-irodsclient-test")
+	sessionConfig := session.NewIRODSSessionConfig("go-irodsclient-test")
 
 	sess, err := session.NewIRODSSession(account, sessionConfig)
 	assert.NoError(t, err)
