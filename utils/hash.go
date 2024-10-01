@@ -14,7 +14,7 @@ func GetChecksumString(checksum []byte) string {
 
 // GetSHA1Sum returns sha1 check sum string
 func GetSHA1Sum(str string) string {
-	hash, err := irods_util.GetHashStrings([]string{str}, sha1.New())
+	hash, err := irods_util.HashStringsWithAlgorithm([]string{str}, sha1.New())
 	if err != nil {
 		return ""
 	}
