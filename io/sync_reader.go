@@ -4,7 +4,6 @@ import (
 	"io"
 
 	"github.com/cyverse/irodsfs-common/irods"
-	"github.com/cyverse/irodsfs-common/report"
 	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
 )
@@ -15,12 +14,10 @@ type SyncReader struct {
 	path       string
 	checksum   string
 	fileHandle irods.IRODSFSFileHandle
-
-	reportClient report.IRODSFSInstanceReportClient
 }
 
 // NewSyncReader create a new SyncReader
-func NewSyncReader(fsClient irods.IRODSFSClient, fileHandle irods.IRODSFSFileHandle, reportClient report.IRODSFSInstanceReportClient) Reader {
+func NewSyncReader(fsClient irods.IRODSFSClient, fileHandle irods.IRODSFSFileHandle) Reader {
 	entry := fileHandle.GetEntry()
 
 	syncReader := &SyncReader{
@@ -28,8 +25,6 @@ func NewSyncReader(fsClient irods.IRODSFSClient, fileHandle irods.IRODSFSFileHan
 		path:       entry.Path,
 		checksum:   utils.GetChecksumString(entry.CheckSum),
 		fileHandle: fileHandle,
-
-		reportClient: reportClient,
 	}
 
 	return syncReader
@@ -82,11 +77,6 @@ func (reader *SyncReader) ReadAt(buffer []byte, offset int64) (int, error) {
 	readLen, err := reader.fileHandle.ReadAt(buffer, offset)
 	if err != nil && err != io.EOF {
 		return 0, err
-	}
-
-	// Report
-	if reader.reportClient != nil {
-		reader.reportClient.FileAccess(reader.fileHandle, offset, int64(readLen))
 	}
 
 	// may return EOF as well

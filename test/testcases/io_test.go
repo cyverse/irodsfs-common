@@ -217,7 +217,7 @@ func syncWriteRead(t *testing.T, size int64) {
 	writeHandle, err := filesystem.CreateFile(newDataObjectPath, "", "w")
 	assert.NoError(t, err)
 
-	writer := common_io.NewSyncWriter(filesystem, writeHandle, nil)
+	writer := common_io.NewSyncWriter(filesystem, writeHandle)
 
 	toWrite := size
 	totalWrittenBytes := int64(0)
@@ -260,7 +260,7 @@ func syncWriteRead(t *testing.T, size int64) {
 	readHandle, err := filesystem.OpenFile(newDataObjectPath, "", "r")
 	assert.NoError(t, err)
 
-	reader := common_io.NewSyncReader(filesystem, readHandle, nil)
+	reader := common_io.NewSyncReader(filesystem, readHandle)
 	totalReadBytes := int64(0)
 
 	readHasher := sha1.New()
@@ -326,7 +326,7 @@ func syncBufferedWriteRead(t *testing.T, size int64) {
 	writeHandle, err := filesystem.CreateFile(newDataObjectPath, "", "w")
 	assert.NoError(t, err)
 
-	syncWriter := common_io.NewSyncWriter(filesystem, writeHandle, nil)
+	syncWriter := common_io.NewSyncWriter(filesystem, writeHandle)
 	writer := common_io.NewSyncBufferedWriter(syncWriter, int(64*kb))
 
 	toWrite := size
@@ -370,7 +370,7 @@ func syncBufferedWriteRead(t *testing.T, size int64) {
 	readHandle, err := filesystem.OpenFile(newDataObjectPath, "", "r")
 	assert.NoError(t, err)
 
-	reader := common_io.NewSyncReader(filesystem, readHandle, nil)
+	reader := common_io.NewSyncReader(filesystem, readHandle)
 	totalReadBytes := int64(0)
 
 	readHasher := sha1.New()
@@ -436,7 +436,7 @@ func asyncWriteRead(t *testing.T, size int64) {
 	writeHandle, err := filesystem.CreateFile(newDataObjectPath, "", "w")
 	assert.NoError(t, err)
 
-	syncWriter := common_io.NewSyncWriter(filesystem, writeHandle, nil)
+	syncWriter := common_io.NewSyncWriter(filesystem, writeHandle)
 	writer := common_io.NewAsyncWriter(syncWriter)
 
 	toWrite := size
@@ -480,7 +480,7 @@ func asyncWriteRead(t *testing.T, size int64) {
 	readHandle, err := filesystem.OpenFile(newDataObjectPath, "", "r")
 	assert.NoError(t, err)
 
-	syncReader := common_io.NewSyncReader(filesystem, readHandle, nil)
+	syncReader := common_io.NewSyncReader(filesystem, readHandle)
 	reader, err := common_io.NewAsyncReader([]common_io.Reader{syncReader}, iRODSIOBlockSize)
 	assert.NoError(t, err)
 
@@ -549,7 +549,7 @@ func asyncWriteReadWithCache(t *testing.T, size int64) {
 	writeHandle, err := filesystem.CreateFile(newDataObjectPath, "", "w")
 	assert.NoError(t, err)
 
-	syncWriter := common_io.NewSyncWriter(filesystem, writeHandle, nil)
+	syncWriter := common_io.NewSyncWriter(filesystem, writeHandle)
 	writer := common_io.NewAsyncWriter(syncWriter)
 
 	toWrite := size
@@ -596,7 +596,7 @@ func asyncWriteReadWithCache(t *testing.T, size int64) {
 	readHandle, err := filesystem.OpenFile(newDataObjectPath, "", "r")
 	assert.NoError(t, err)
 
-	syncReader := common_io.NewSyncReader(filesystem, readHandle, nil)
+	syncReader := common_io.NewSyncReader(filesystem, readHandle)
 	reader, err := common_io.NewAsyncCacheThroughReader([]common_io.Reader{syncReader}, iRODSIOBlockSize, cacheStore)
 	assert.NoError(t, err)
 
@@ -642,7 +642,7 @@ func asyncWriteReadWithCache(t *testing.T, size int64) {
 	readHandle, err = filesystem.OpenFile(newDataObjectPath, "", "r")
 	assert.NoError(t, err)
 
-	syncReader = common_io.NewSyncReader(filesystem, readHandle, nil)
+	syncReader = common_io.NewSyncReader(filesystem, readHandle)
 	reader, err = common_io.NewAsyncCacheThroughReader([]common_io.Reader{syncReader}, iRODSIOBlockSize, cacheStore)
 	assert.NoError(t, err)
 
@@ -712,7 +712,7 @@ func asyncWriteReadWithPrefetch(t *testing.T, size int64) {
 	writeHandle, err := filesystem.CreateFile(newDataObjectPath, "", "w")
 	assert.NoError(t, err)
 
-	syncWriter := common_io.NewSyncWriter(filesystem, writeHandle, nil)
+	syncWriter := common_io.NewSyncWriter(filesystem, writeHandle)
 	writer := common_io.NewAsyncWriter(syncWriter)
 
 	toWrite := size
@@ -762,8 +762,8 @@ func asyncWriteReadWithPrefetch(t *testing.T, size int64) {
 	readHandle2, err := filesystem.OpenFile(newDataObjectPath, "", "r")
 	assert.NoError(t, err)
 
-	syncReader1 := common_io.NewSyncReader(filesystem, readHandle1, nil)
-	syncReader2 := common_io.NewSyncReader(filesystem, readHandle2, nil)
+	syncReader1 := common_io.NewSyncReader(filesystem, readHandle1)
+	syncReader2 := common_io.NewSyncReader(filesystem, readHandle2)
 	reader, err := common_io.NewAsyncCacheThroughReader([]common_io.Reader{syncReader1, syncReader2}, iRODSIOBlockSize, cacheStore)
 	assert.NoError(t, err)
 	totalReadBytes := int64(0)
@@ -812,8 +812,8 @@ func asyncWriteReadWithPrefetch(t *testing.T, size int64) {
 	readHandle2, err = filesystem.OpenFile(newDataObjectPath, "", "r")
 	assert.NoError(t, err)
 
-	syncReader1 = common_io.NewSyncReader(filesystem, readHandle1, nil)
-	syncReader2 = common_io.NewSyncReader(filesystem, readHandle2, nil)
+	syncReader1 = common_io.NewSyncReader(filesystem, readHandle1)
+	syncReader2 = common_io.NewSyncReader(filesystem, readHandle2)
 	reader, err = common_io.NewAsyncCacheThroughReader([]common_io.Reader{syncReader1, syncReader2}, iRODSIOBlockSize, cacheStore)
 	assert.NoError(t, err)
 	totalReadBytes = int64(0)

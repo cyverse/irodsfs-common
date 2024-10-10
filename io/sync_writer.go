@@ -2,7 +2,6 @@ package io
 
 import (
 	"github.com/cyverse/irodsfs-common/irods"
-	"github.com/cyverse/irodsfs-common/report"
 	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
 )
@@ -12,20 +11,16 @@ type SyncWriter struct {
 	fsClient   irods.IRODSFSClient
 	path       string
 	fileHandle irods.IRODSFSFileHandle
-
-	reportClient report.IRODSFSInstanceReportClient
 }
 
 // NewSyncWriter create a new SyncWriter
-func NewSyncWriter(fsClient irods.IRODSFSClient, fileHandle irods.IRODSFSFileHandle, reportClient report.IRODSFSInstanceReportClient) Writer {
+func NewSyncWriter(fsClient irods.IRODSFSClient, fileHandle irods.IRODSFSFileHandle) Writer {
 	entry := fileHandle.GetEntry()
 
 	syncWriter := &SyncWriter{
 		fsClient:   fsClient,
 		path:       entry.Path,
 		fileHandle: fileHandle,
-
-		reportClient: reportClient,
 	}
 
 	return syncWriter
@@ -73,11 +68,6 @@ func (writer *SyncWriter) WriteAt(data []byte, offset int64) (int, error) {
 	writeLen, err := writer.fileHandle.WriteAt(data, offset)
 	if err != nil {
 		return 0, err
-	}
-
-	// Report
-	if writer.reportClient != nil {
-		writer.reportClient.FileAccess(writer.fileHandle, offset, int64(writeLen))
 	}
 
 	return writeLen, nil
