@@ -170,6 +170,7 @@ func (reader *AsyncCacheThroughReader) ReadAt(buffer []byte, offset int64) (int,
 	totalReadLen := 0
 	curOffset := offset
 	blockSize := reader.blockHelper.GetBlockSize()
+	eof := false
 
 	for totalReadLen < bufferLen {
 		blockID := reader.blockHelper.GetBlockIDForOffset(curOffset)
@@ -177,56 +178,62 @@ func (reader *AsyncCacheThroughReader) ReadAt(buffer []byte, offset int64) (int,
 		inBlockOffset := curOffset - blockStartOffset
 
 		logger.Debugf("Async reading through cache - block %d", blockID)
-		if reader.blockStore != nil {
-			logger.Debugf("check block %d in block store", blockID)
-			block := reader.blockStore.Get(blockID)
-			if block != nil {
-				logger.Debugf("read block %d from block store", blockID)
-				// read from cache
-				blockData := block.buffer.Bytes()
-				copiedLen := copy(buffer[totalReadLen:], blockData[inBlockOffset:])
-				if copiedLen > 0 {
-					curOffset += int64(copiedLen)
-					totalReadLen += copiedLen
-				}
-
-				if inBlockOffset+int64(copiedLen) == int64(block.buffer.Len()) {
-					// read block fully
-					if block.eof {
-						return totalReadLen, io.EOF
-					}
-				}
-
-				continue
+		logger.Debugf("check block %d in block store", blockID)
+		block := reader.blockStore.Get(blockID)
+		if block != nil {
+			logger.Debugf("read block %d from block store", blockID)
+			// read from cache
+			blockData := block.buffer.Bytes()
+			copiedLen := 0
+			if inBlockOffset < int64(len(blockData)) {
+				// copy only if there is data in the block
+				copiedLen = copy(buffer[totalReadLen:], blockData[inBlockOffset:])
 			}
-		}
 
-		// failed to read from block store
-		// read from base
-		blockReadLen := blockSize - int(inBlockOffset)
-		bufferLeftLen := bufferLen - totalReadLen
-
-		readLenFromBase := blockReadLen
-		if readLenFromBase > bufferLeftLen {
-			readLenFromBase = bufferLeftLen
-		}
-
-		readLen, err := reader.readAtBase(buffer[totalReadLen:totalReadLen+readLenFromBase], curOffset)
-		if readLen > 0 {
-			curOffset += int64(readLen)
-			totalReadLen += readLen
-		}
-
-		if err != nil {
-			// err may be EOF
-			if err == io.EOF {
-				return int(curOffset - offset), err
+			if copiedLen > 0 {
+				curOffset += int64(copiedLen)
+				totalReadLen += copiedLen
 			}
-			return int(curOffset - offset), err
+
+			if inBlockOffset+int64(copiedLen) >= int64(block.buffer.Len()) {
+				// read block fully
+				if block.eof {
+					eof = true
+					break
+				}
+			}
+		} else {
+			// we dont have the block in cache
+			// read from base
+			blockReadLen := blockSize - int(inBlockOffset)
+			bufferLeftLen := bufferLen - totalReadLen
+
+			readLenFromBase := blockReadLen
+			if readLenFromBase > bufferLeftLen {
+				readLenFromBase = bufferLeftLen
+			}
+
+			readLen, err := reader.readAtBase(buffer[totalReadLen:totalReadLen+readLenFromBase], curOffset)
+			if readLen > 0 {
+				curOffset += int64(readLen)
+				totalReadLen += readLen
+			}
+
+			if err != nil {
+				// err may be EOF
+				if err == io.EOF {
+					return totalReadLen, io.EOF
+				}
+				return totalReadLen, err
+			}
 		}
 	}
 
-	return int(curOffset - offset), nil
+	if eof {
+		return totalReadLen, io.EOF
+	}
+
+	return totalReadLen, nil
 }
 
 // aligns to the block boundary
