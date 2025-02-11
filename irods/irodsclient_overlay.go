@@ -290,7 +290,7 @@ func (client *IRODSFSClientOverlay) ExistsFile(irodsPath string) bool {
 }
 
 // ListUserGroups lists user groups
-func (client *IRODSFSClientOverlay) ListUserGroups(user string) ([]*irodsclient_types.IRODSUser, error) {
+func (client *IRODSFSClientOverlay) ListUserGroups(zoneName string, username string) ([]*irodsclient_types.IRODSUser, error) {
 	if client.clientDirect.fs == nil {
 		return nil, xerrors.Errorf("FSClient is nil")
 	}
@@ -303,7 +303,7 @@ func (client *IRODSFSClientOverlay) ListUserGroups(user string) ([]*irodsclient_
 
 	defer utils.StackTraceFromPanic(logger)
 
-	return client.clientDirect.ListUserGroups(user)
+	return client.clientDirect.ListUserGroups(zoneName, username)
 }
 
 // ListDirACLs lists directory ACLs

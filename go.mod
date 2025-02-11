@@ -3,7 +3,7 @@ module github.com/cyverse/irodsfs-common
 go 1.21
 
 require (
-	github.com/cyverse/go-irodsclient v0.15.8
+	github.com/cyverse/go-irodsclient v0.16.0
 	github.com/hashicorp/golang-lru v0.5.4
 	github.com/rs/xid v1.3.0
 	github.com/sirupsen/logrus v1.8.1

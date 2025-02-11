@@ -24,7 +24,7 @@ type IRODSFSClient interface {
 	RemoveXattr(path string, name string) error
 	ExistsDir(path string) bool
 	ExistsFile(path string) bool
-	ListUserGroups(user string) ([]*irodsclient_types.IRODSUser, error)
+	ListUserGroups(zoneName string, username string) ([]*irodsclient_types.IRODSUser, error)
 	ListDirACLs(path string) ([]*irodsclient_types.IRODSAccess, error)
 	ListFileACLs(path string) ([]*irodsclient_types.IRODSAccess, error)
 	ListACLsForEntries(path string) ([]*irodsclient_types.IRODSAccess, error)

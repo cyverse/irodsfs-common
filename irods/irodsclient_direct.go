@@ -257,7 +257,7 @@ func (client *IRODSFSClientDirect) ExistsFile(path string) bool {
 }
 
 // ListUserGroups lists user groups
-func (client *IRODSFSClientDirect) ListUserGroups(user string) ([]*irodsclient_types.IRODSUser, error) {
+func (client *IRODSFSClientDirect) ListUserGroups(zoneName string, username string) ([]*irodsclient_types.IRODSUser, error) {
 	if client.fs == nil {
 		return nil, xerrors.Errorf("FSClient is nil")
 	}
@@ -270,7 +270,7 @@ func (client *IRODSFSClientDirect) ListUserGroups(user string) ([]*irodsclient_t
 
 	defer utils.StackTraceFromPanic(logger)
 
-	groups, err := client.fs.ListUserGroups(user)
+	groups, err := client.fs.ListUserGroups(zoneName, username)
 	if err != nil {
 		return nil, err
 	}
