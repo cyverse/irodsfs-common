@@ -504,38 +504,6 @@ func (client *IRODSFSClientOverlay) TruncateFile(irodsPath string, size int64) e
 	return client.clientDirect.TruncateFile(irodsPath, size)
 }
 
-func (client *IRODSFSClientOverlay) AddCacheEventHandler(handler irodsclient_fs.FilesystemCacheEventHandler) (string, error) {
-	if client.clientDirect.fs == nil {
-		return "", xerrors.Errorf("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientOverlay",
-		"function": "AddCacheEventHandler",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	return client.clientDirect.AddCacheEventHandler(handler)
-}
-
-func (client *IRODSFSClientOverlay) RemoveCacheEventHandler(handlerID string) error {
-	if client.clientDirect.fs == nil {
-		return xerrors.Errorf("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientOverlay",
-		"function": "RemoveCacheEventHandler",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	return client.clientDirect.RemoveCacheEventHandler(handlerID)
-}
-
 // IRODSFSClientOverlayFileHandle implements IRODSFSFileHandle
 type IRODSFSClientOverlayFileHandle struct {
 	localHandle   *os.File
