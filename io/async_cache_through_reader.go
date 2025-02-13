@@ -366,15 +366,15 @@ func (reader *AsyncCacheThroughReader) asyncRequestHandler() {
 		reader.mutex.Unlock()
 
 		if terminate {
-			break
+			transfer.MarkFailed()
+		} else {
+			availableReader, ok := <-reader.availableBaseReaders
+			if !ok {
+				transfer.MarkFailed()
+			} else {
+				reader.startAsyncTransfer(transfer, availableReader)
+			}
 		}
-
-		availableReader, ok := <-reader.availableBaseReaders
-		if !ok {
-			break
-		}
-
-		reader.startAsyncTransfer(transfer, availableReader)
 	}
 
 	reader.asyncReaderWaiter.Done()
