@@ -5,7 +5,7 @@ go 1.22
 toolchain go1.22.10
 
 require (
-	github.com/cyverse/go-irodsclient v0.16.6
+	github.com/cyverse/go-irodsclient v0.16.7
 	github.com/hashicorp/golang-lru v0.5.4
 	github.com/rs/xid v1.3.0
 	github.com/sirupsen/logrus v1.9.3
