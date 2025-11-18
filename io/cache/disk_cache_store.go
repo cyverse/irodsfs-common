@@ -150,6 +150,11 @@ func NewDiskCacheStore(sizeCap int64, entrySizeCap int, rootPath string) (CacheS
 		groups:         map[string]map[string]bool{},
 	}
 
+	err = diskCache.clearCacheFiles()
+	if err != nil {
+		return nil, xerrors.Errorf("failed to clear existing cache files: %w", err)
+	}
+
 	lruCache, err := lrucache.NewWithEvict(maxCacheEntryNum, diskCache.onEvicted)
 	if err != nil {
 		return nil, xerrors.Errorf("failed to create LRU cache: %w", err)
@@ -169,6 +174,37 @@ func (store *DiskCacheStore) Release() {
 	store.cache.Purge()
 
 	os.RemoveAll(store.rootPath)
+}
+
+func (store *DiskCacheStore) clearCacheFiles() error {
+	files, err := os.ReadDir(store.rootPath)
+	if err != nil {
+		return xerrors.Errorf("failed to read cache dir %s: %w", store.rootPath, err)
+	}
+
+	errors := []error{}
+
+	for _, file := range files {
+		filePath := utils.JoinPath(store.rootPath, file.Name())
+		if file.IsDir() {
+			err := os.RemoveAll(filePath)
+			if err != nil {
+				errors = append(errors, xerrors.Errorf("failed to remove cache dir %s: %w", filePath, err))
+			}
+		} else {
+			err := os.Remove(filePath)
+			if err != nil {
+				errors = append(errors, xerrors.Errorf("failed to remove cache file %s: %w", filePath, err))
+			}
+		}
+	}
+
+	if len(errors) > 0 {
+		// TODO: handle multi errors
+		return xerrors.Errorf("failed to remove some cache files or directories: %v", errors)
+	}
+
+	return nil
 }
 
 // GetEntrySizeCap returns entry size cap
