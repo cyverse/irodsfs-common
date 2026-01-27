@@ -11,7 +11,7 @@ func NewFileBlockHelper(blockSize int) *FileBlockHelper {
 	}
 }
 
-// MinOffset returns min value between val1 and val2
+// Min returns min value between val1 and val2
 func (helper *FileBlockHelper) Min(val1 int64, val2 int64) int64 {
 	if val1 <= val2 {
 		return val1

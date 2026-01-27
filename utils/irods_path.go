@@ -1,46 +1,22 @@
 package utils
 
 import (
-	"fmt"
 	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"golang.org/x/xerrors"
+	"github.com/cockroachdb/errors"
 )
-
-// JoinPath makes the path from dir and file paths
-func JoinPath(dirPath string, filePath string) string {
-	if strings.HasSuffix(dirPath, "/") {
-		return fmt.Sprintf("%s/%s", dirPath[0:len(dirPath)-1], filePath)
-	}
-	return fmt.Sprintf("%s/%s", dirPath, filePath)
-}
-
-// SplitPath splits the path into dir and file
-func SplitPath(p string) (string, string) {
-	return filepath.Split(p)
-}
-
-// GetDirname returns the dir of the path
-func GetDirname(p string) string {
-	return filepath.Dir(p)
-}
-
-// GetFileName returns the filename of the path
-func GetFileName(p string) string {
-	return filepath.Base(p)
-}
 
 // GetIRODSZone returns the zone of the iRODS path
 func GetIRODSZone(p string) (string, error) {
 	if len(p) < 1 {
-		return "", xerrors.Errorf("failed to extract Zone from path %s", p)
+		return "", errors.Newf("failed to extract Zone from path %q", p)
 	}
 
 	if p[0] != '/' {
-		return "", xerrors.Errorf("failed to extract Zone from path %s", p)
+		return "", errors.Newf("failed to extract Zone from path %q", p)
 	}
 
 	parts := strings.Split(p[1:], "/")
@@ -49,12 +25,7 @@ func GetIRODSZone(p string) (string, error) {
 			return parts[0], nil
 		}
 	}
-	return "", xerrors.Errorf("failed to extract Zone from path %s", p)
-}
-
-// IsAbsolutePath returns true if the path is absolute
-func IsAbsolutePath(p string) bool {
-	return strings.HasPrefix(p, "/")
+	return "", errors.Newf("failed to extract Zone from path %q", p)
 }
 
 // GetPathDepth returns depth of the path
@@ -88,7 +59,7 @@ func GetParentDirs(p string) []string {
 
 	curPath := p
 	for len(curPath) > 0 && curPath != "/" {
-		curDir := GetDirname(curPath)
+		curDir := path.Dir(curPath)
 		if len(curDir) > 0 {
 			parents = append(parents, curDir)
 		}
@@ -106,9 +77,15 @@ func GetParentDirs(p string) []string {
 
 // GetRelativePath returns relative path
 func GetRelativePath(p1 string, p2 string) (string, error) {
-	rel, err := filepath.Rel(p1, p2)
+	p1s := filepath.FromSlash(p1)
+	p2s := filepath.FromSlash(p2)
+
+	rel, err := filepath.Rel(p1s, p2s)
 	if err != nil {
-		return "", xerrors.Errorf("failed to get relative path from %s to %s: %w", p1, p2, err)
+		return "", errors.Errorf("failed to get relative path from %q to %q: %w", p1, p2, err)
 	}
-	return rel, nil
+
+	rels := filepath.ToSlash(rel)
+
+	return rels, nil
 }

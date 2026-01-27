@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"fmt"
 
+	"github.com/cockroachdb/errors"
 	"github.com/cyverse/irodsfs-common/io/cache"
 	"github.com/cyverse/irodsfs-common/utils"
 	lrucache "github.com/hashicorp/golang-lru"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/xerrors"
 )
 
 const (
@@ -57,7 +57,7 @@ func NewFileBlockStore(cacheStore cache.CacheStore, path string, checksum string
 
 	lruCache, err := lrucache.NewWithEvict(readBlockStoreCache, nil)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to create LRU cache: %w", err)
+		return nil, errors.Wrapf(err, "failed to create LRU cache")
 	}
 	fileBlockStore.lruCache = lruCache
 	return fileBlockStore, nil
@@ -100,7 +100,7 @@ func (store *FileBlockStore) Get(blockID int64) *FileBlock {
 
 	if store.cacheStore != nil {
 		entryKey := store.makeCacheKey(blockID)
-		logger.Debugf("check cache %s", entryKey)
+		logger.Debugf("check cache %q", entryKey)
 		cacheEntry := store.cacheStore.GetEntry(entryKey)
 		if cacheEntry != nil {
 			block := NewFileBlock(blockID)

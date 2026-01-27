@@ -7,13 +7,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cockroachdb/errors"
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
 	irodsclient_metrics "github.com/cyverse/go-irodsclient/irods/metrics"
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 	"github.com/cyverse/irodsfs-common/inode"
 	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/xerrors"
 )
 
 // IRODSFSClientOverlay implements IRODSClient interface with go-irodsclient but with overlay
@@ -69,9 +69,9 @@ func (client *IRODSFSClientOverlay) GetApplicationName() string {
 	return client.clientDirect.GetApplicationName()
 }
 
-// GetConnections() returns total number of connections
-func (client *IRODSFSClientOverlay) GetConnections() int {
-	return client.clientDirect.GetConnections()
+// GetOpenConnections() returns total number of open connections
+func (client *IRODSFSClientOverlay) GetOpenConnections() int {
+	return client.clientDirect.GetOpenConnections()
 }
 
 // GetTransferMetrics() returns transfer metrics
@@ -104,7 +104,7 @@ func (client *IRODSFSClientOverlay) getLocalEntryID(irodsPath string) int64 {
 // List lists directory entries
 func (client *IRODSFSClientOverlay) List(irodsPath string) ([]*irodsclient_fs.Entry, error) {
 	if client.clientDirect.fs == nil {
-		return nil, xerrors.Errorf("FSClient is nil")
+		return nil, errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -166,7 +166,7 @@ func (client *IRODSFSClientOverlay) List(irodsPath string) ([]*irodsclient_fs.En
 // Stat stats fs entry
 func (client *IRODSFSClientOverlay) Stat(irodsPath string) (*irodsclient_fs.Entry, error) {
 	if client.clientDirect.fs == nil {
-		return nil, xerrors.Errorf("FSClient is nil")
+		return nil, errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -184,7 +184,7 @@ func (client *IRODSFSClientOverlay) Stat(irodsPath string) (*irodsclient_fs.Entr
 // ListXattr lists xattr
 func (client *IRODSFSClientOverlay) ListXattr(irodsPath string) ([]*irodsclient_types.IRODSMeta, error) {
 	if client.clientDirect.fs == nil {
-		return nil, xerrors.Errorf("FSClient is nil")
+		return nil, errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -202,7 +202,7 @@ func (client *IRODSFSClientOverlay) ListXattr(irodsPath string) ([]*irodsclient_
 // GetXattr returns xattr value
 func (client *IRODSFSClientOverlay) GetXattr(irodsPath string, name string) (*irodsclient_types.IRODSMeta, error) {
 	if client.clientDirect.fs == nil {
-		return nil, xerrors.Errorf("FSClient is nil")
+		return nil, errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -220,7 +220,7 @@ func (client *IRODSFSClientOverlay) GetXattr(irodsPath string, name string) (*ir
 // SetXattr sets xattr
 func (client *IRODSFSClientOverlay) SetXattr(irodsPath string, name string, value string) error {
 	if client.clientDirect.fs == nil {
-		return xerrors.Errorf("FSClient is nil")
+		return errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -238,7 +238,7 @@ func (client *IRODSFSClientOverlay) SetXattr(irodsPath string, name string, valu
 // RemoveXattr removes xattr
 func (client *IRODSFSClientOverlay) RemoveXattr(irodsPath string, name string) error {
 	if client.clientDirect.fs == nil {
-		return xerrors.Errorf("FSClient is nil")
+		return errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -292,7 +292,7 @@ func (client *IRODSFSClientOverlay) ExistsFile(irodsPath string) bool {
 // ListUserGroups lists user groups
 func (client *IRODSFSClientOverlay) ListUserGroups(zoneName string, username string) ([]*irodsclient_types.IRODSUser, error) {
 	if client.clientDirect.fs == nil {
-		return nil, xerrors.Errorf("FSClient is nil")
+		return nil, errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -309,7 +309,7 @@ func (client *IRODSFSClientOverlay) ListUserGroups(zoneName string, username str
 // ListDirACLs lists directory ACLs
 func (client *IRODSFSClientOverlay) ListDirACLs(irodsPath string) ([]*irodsclient_types.IRODSAccess, error) {
 	if client.clientDirect.fs == nil {
-		return nil, xerrors.Errorf("FSClient is nil")
+		return nil, errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -327,7 +327,7 @@ func (client *IRODSFSClientOverlay) ListDirACLs(irodsPath string) ([]*irodsclien
 // ListFileACLs lists file ACLs
 func (client *IRODSFSClientOverlay) ListFileACLs(irodsPath string) ([]*irodsclient_types.IRODSAccess, error) {
 	if client.clientDirect.fs == nil {
-		return nil, xerrors.Errorf("FSClient is nil")
+		return nil, errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -345,7 +345,7 @@ func (client *IRODSFSClientOverlay) ListFileACLs(irodsPath string) ([]*irodsclie
 // ListACLsForEntries lists ACLs for entries in a collection
 func (client *IRODSFSClientOverlay) ListACLsForEntries(irodsPath string) ([]*irodsclient_types.IRODSAccess, error) {
 	if client.clientDirect.fs == nil {
-		return nil, xerrors.Errorf("FSClient is nil")
+		return nil, errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -363,7 +363,7 @@ func (client *IRODSFSClientOverlay) ListACLsForEntries(irodsPath string) ([]*iro
 // RemoveFile removes a file
 func (client *IRODSFSClientOverlay) RemoveFile(irodsPath string, force bool) error {
 	if client.clientDirect.fs == nil {
-		return xerrors.Errorf("FSClient is nil")
+		return errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -381,7 +381,7 @@ func (client *IRODSFSClientOverlay) RemoveFile(irodsPath string, force bool) err
 // RemoveDir removes a directory
 func (client *IRODSFSClientOverlay) RemoveDir(irodsPath string, recurse bool, force bool) error {
 	if client.clientDirect.fs == nil {
-		return xerrors.Errorf("FSClient is nil")
+		return errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -399,7 +399,7 @@ func (client *IRODSFSClientOverlay) RemoveDir(irodsPath string, recurse bool, fo
 // MakeDir makes a new directory
 func (client *IRODSFSClientOverlay) MakeDir(irodsPath string, recurse bool) error {
 	if client.clientDirect.fs == nil {
-		return xerrors.Errorf("FSClient is nil")
+		return errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -417,7 +417,7 @@ func (client *IRODSFSClientOverlay) MakeDir(irodsPath string, recurse bool) erro
 // RenameDirToDir renames a directory, dest path is also a non-existing path for dir
 func (client *IRODSFSClientOverlay) RenameDirToDir(srcPath string, destPath string) error {
 	if client.clientDirect.fs == nil {
-		return xerrors.Errorf("FSClient is nil")
+		return errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -435,7 +435,7 @@ func (client *IRODSFSClientOverlay) RenameDirToDir(srcPath string, destPath stri
 // RenameFileToFile renames a file, dest path is also a non-existing path for file
 func (client *IRODSFSClientOverlay) RenameFileToFile(srcPath string, destPath string) error {
 	if client.clientDirect.fs == nil {
-		return xerrors.Errorf("FSClient is nil")
+		return errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -453,7 +453,7 @@ func (client *IRODSFSClientOverlay) RenameFileToFile(srcPath string, destPath st
 // CreateFile creates a file
 func (client *IRODSFSClientOverlay) CreateFile(irodsPath string, resource string, mode string) (IRODSFSFileHandle, error) {
 	if client.clientDirect.fs == nil {
-		return nil, xerrors.Errorf("FSClient is nil")
+		return nil, errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -471,7 +471,7 @@ func (client *IRODSFSClientOverlay) CreateFile(irodsPath string, resource string
 // OpenFile opens a file
 func (client *IRODSFSClientOverlay) OpenFile(irodsPath string, resource string, mode string) (IRODSFSFileHandle, error) {
 	if client.clientDirect.fs == nil {
-		return nil, xerrors.Errorf("FSClient is nil")
+		return nil, errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{
@@ -489,7 +489,7 @@ func (client *IRODSFSClientOverlay) OpenFile(irodsPath string, resource string, 
 // TruncateFile truncates a file
 func (client *IRODSFSClientOverlay) TruncateFile(irodsPath string, size int64) error {
 	if client.clientDirect.fs == nil {
-		return xerrors.Errorf("FSClient is nil")
+		return errors.New("FSClient is nil")
 	}
 
 	logger := log.WithFields(log.Fields{

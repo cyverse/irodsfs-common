@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"sync"
 
+	"github.com/cockroachdb/errors"
 	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/xerrors"
 )
 
 // SyncBufferedWriter is a writer that buffers data in RAM before write
@@ -149,7 +149,7 @@ func (writer *SyncBufferedWriter) WriteAt(data []byte, offset int64) (int, error
 			// write to buffer
 			_, err = writer.buffer.Write(data)
 			if err != nil {
-				return 0, xerrors.Errorf("failed to write data to buffer for %s, offset %d, length %d: %w", writer.path, offset, len(data), err)
+				return 0, errors.Newf("failed to write data to buffer for %q, offset %d, length %d: %w", writer.path, offset, len(data), err)
 			}
 
 			writer.currentBufferStartOffset = offset
@@ -158,14 +158,14 @@ func (writer *SyncBufferedWriter) WriteAt(data []byte, offset int64) (int, error
 			// write to buffer
 			_, err := writer.buffer.Write(data)
 			if err != nil {
-				return 0, xerrors.Errorf("failed to write data to buffer for %s, offset %d, length %d: %w", writer.path, offset, len(data), err)
+				return 0, errors.Newf("failed to write data to buffer for %q, offset %d, length %d: %w", writer.path, offset, len(data), err)
 			}
 		}
 	} else {
 		// write to buffer
 		_, err := writer.buffer.Write(data)
 		if err != nil {
-			return 0, xerrors.Errorf("failed to write data to buffer for %s, offset %d, length %d: %w", writer.path, offset, len(data), err)
+			return 0, errors.Newf("failed to write data to buffer for %q, offset %d, length %d: %w", writer.path, offset, len(data), err)
 		}
 
 		writer.currentBufferStartOffset = offset

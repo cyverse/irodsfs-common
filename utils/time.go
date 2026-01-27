@@ -3,14 +3,14 @@ package utils
 import (
 	"time"
 
-	"golang.org/x/xerrors"
+	"github.com/cockroachdb/errors"
 )
 
 // ParseTime returns time.Time from text represented time
 func ParseTime(t string) (time.Time, error) {
 	tout, err := time.Parse(time.RFC3339, t)
 	if err != nil {
-		return tout, xerrors.Errorf("failed to parse time '%s' to time.Time: %w", t, err)
+		return tout, errors.Wrapf(err, "failed to parse time %q to time.Time", t)
 	}
 	return tout, nil
 }

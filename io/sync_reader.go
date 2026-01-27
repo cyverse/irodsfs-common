@@ -72,7 +72,7 @@ func (reader *SyncReader) ReadAt(buffer []byte, offset int64) (int, error) {
 		return 0, io.EOF
 	}
 
-	logger.Debugf("Sync Reading - %s, offset %d, length %d", reader.path, offset, len(buffer))
+	logger.Debugf("Sync Reading - %q, offset %d, length %d", reader.path, offset, len(buffer))
 
 	readLen, err := reader.fileHandle.ReadAt(buffer, offset)
 	if err != nil && err != io.EOF {

@@ -4,11 +4,11 @@ import (
 	"io"
 	"sync"
 
+	"github.com/cockroachdb/errors"
 	"github.com/cyverse/irodsfs-common/io/cache"
 	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/xerrors"
 )
 
 const (
@@ -162,7 +162,7 @@ func (reader *AsyncCacheThroughReader) ReadAt(buffer []byte, offset int64) (int,
 		return 0, nil
 	}
 
-	logger.Debugf("Async reading through cache - %s, offset %d, length %d", reader.path, offset, len(buffer))
+	logger.Debugf("Async reading through cache - %q, offset %d, length %d", reader.path, offset, len(buffer))
 
 	defer reader.checkAndTriggerPrefetch(offset)
 
@@ -250,7 +250,7 @@ func (reader *AsyncCacheThroughReader) readAtBase(buffer []byte, offset int64) (
 		return 0, nil
 	}
 
-	logger.Debugf("reading  - %s, offset %d, length %d", reader.path, offset, len(buffer))
+	logger.Debugf("reading - %q, offset %d, length %d", reader.path, offset, len(buffer))
 
 	bufferLen := len(buffer)
 
@@ -266,7 +266,7 @@ func (reader *AsyncCacheThroughReader) readAtBase(buffer []byte, offset int64) (
 	}
 
 	if transfer == nil {
-		return 0, xerrors.Errorf("failed to schedule block %d", blockID)
+		return 0, errors.Newf("failed to schedule block %d", blockID)
 	}
 
 	// wait for read
@@ -274,7 +274,7 @@ func (reader *AsyncCacheThroughReader) readAtBase(buffer []byte, offset int64) (
 	ok := transfer.WaitForData(inBlockOffset + bufferLen)
 	if !ok {
 		// read failed
-		return 0, xerrors.Errorf("failed to read block %d, transfer failed", blockID)
+		return 0, errors.Newf("failed to read block %d, transfer failed", blockID)
 	}
 
 	logger.Debugf("reading from transfer - block %d", blockID)

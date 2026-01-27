@@ -1,9 +1,9 @@
 package io
 
 import (
+	"github.com/cockroachdb/errors"
 	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/utils"
-	"golang.org/x/xerrors"
 )
 
 // NilReader does nothing for read
@@ -56,7 +56,7 @@ func (reader *NilReader) GetSize() int64 {
 
 // ReadAt reads data
 func (reader *NilReader) ReadAt(buffer []byte, offset int64) (int, error) {
-	return 0, xerrors.Errorf("failed to read data from %s, offset %d, length %d", reader.path, offset, len(buffer))
+	return 0, errors.Newf("failed to read data from %q, offset %d, length %d", reader.path, offset, len(buffer))
 }
 
 // GetAvailable returns available data len

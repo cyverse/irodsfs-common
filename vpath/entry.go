@@ -2,14 +2,15 @@ package vpath
 
 import (
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
+	"github.com/cockroachdb/errors"
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 	"github.com/cyverse/irodsfs-common/irods"
 	"github.com/cyverse/irodsfs-common/utils"
-	"golang.org/x/xerrors"
 )
 
 // VPathEntryType determins if the vpath entry is an actual iRODS entry (irods) or a virtual directory entry (virtual).
@@ -92,10 +93,10 @@ func (entry *VPathEntry) UpdateIRODSEntry(fsClient irods.IRODSFSClient) error {
 		irodsEntry, err := fsClient.Stat(entry.IRODSPath)
 		if err != nil {
 			if irodsclient_types.IsFileNotFoundError(err) {
-				return xerrors.Errorf("failed to find path %s: %w", entry.IRODSPath, err)
+				return errors.Wrapf(err, "failed to find path %q", entry.IRODSPath)
 			}
 
-			return xerrors.Errorf("failed to update IRODSEntry for path %s: %w", entry.IRODSPath, err)
+			return errors.Wrapf(err, "failed to update IRODSEntry for path %q", entry.IRODSPath)
 		}
 
 		entry.IRODSEntry = irodsEntry
@@ -109,22 +110,22 @@ func (entry *VPathEntry) UpdateIRODSEntry(fsClient irods.IRODSFSClient) error {
 // GetIRODSPath returns an iRODS path for the given vpath
 func (entry *VPathEntry) GetIRODSPath(vpath string) (string, error) {
 	if entry.Type != VPathIRODS {
-		err := xerrors.Errorf("failed to compute IRODS Path because entry type is not iRODS")
+		err := errors.Newf("failed to compute IRODS Path because entry type is not iRODS")
 		return "", err
 	}
 
 	relPath, err := utils.GetRelativePath(entry.Path, vpath)
 	if err != nil {
-		return "", xerrors.Errorf("failed to compute relative path: %w", err)
+		return "", errors.Wrapf(err, "failed to compute relative path from %q to %q", entry.Path, vpath)
 	}
 
 	if strings.HasPrefix(relPath, "../") {
-		return "", xerrors.Errorf("failed to compute relative path from %s to %s", entry.Path, vpath)
+		return "", errors.Newf("failed to compute relative path from %q to %q", entry.Path, vpath)
 	}
 
 	if relPath == "." {
 		return entry.IRODSPath, nil
 	}
 
-	return utils.JoinPath(entry.IRODSPath, relPath), nil
+	return path.Join(entry.IRODSPath, relPath), nil
 }

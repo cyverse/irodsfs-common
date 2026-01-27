@@ -10,8 +10,6 @@ import (
 	common_io "github.com/cyverse/irodsfs-common/io"
 	common_cache "github.com/cyverse/irodsfs-common/io/cache"
 	"github.com/cyverse/irodsfs-common/irods"
-	"github.com/rs/xid"
-	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -24,37 +22,33 @@ const (
 	iRODSReadWriteSize int = 128 * 1024       // 128KB
 )
 
-var (
-	ioTestID = xid.New().String()
-)
+func getIOTest() Test {
+	return Test{
+		Name: "I/O",
+		Func: ioTest,
+	}
+}
 
-func TestIO(t *testing.T) {
-	setup()
-	defer shutdown()
+func ioTest(t *testing.T, test *Test) {
+	t.Run("VerySmallSyncWriteRead", testVerySmallSyncWriteRead)
+	t.Run("SmallSyncWriteRead", testSmallSyncWriteRead)
+	t.Run("LargeSyncWriteRead", testLargeSyncWriteRead)
 
-	makeHomeDir(t, ioTestID)
+	t.Run("VerySmallSyncBufferedWriteRead", testVerySmallSyncBufferedWriteRead)
+	t.Run("SmallSyncBufferedWriteRead", testSmallSyncBufferedWriteRead)
+	t.Run("LargeSyncBufferedWriteRead", testLargeSyncBufferedWriteRead)
 
-	log.SetLevel(log.DebugLevel)
+	t.Run("VerySmallAsyncWriteRead", testVerySmallAsyncWriteRead)
+	t.Run("SmallAsyncWriteRead", testSmallAsyncWriteRead)
+	t.Run("LargeAsyncWriteRead", testLargeAsyncWriteRead)
 
-	t.Run("test VerySmallSyncWriteRead", testVerySmallSyncWriteRead)
-	t.Run("test SmallSyncWriteRead", testSmallSyncWriteRead)
-	t.Run("test LargeSyncWriteRead", testLargeSyncWriteRead)
+	t.Run("VerySmallAsyncWriteReadWithCache", testVerySmallAsyncWriteReadWithCache)
+	t.Run("SmallAsyncWriteReadWithCache", testSmallAsyncWriteReadWithCache)
+	t.Run("LargeAsyncWriteReadWithCache", testLargeAsyncWriteReadWithCache)
 
-	t.Run("test VerySmallSyncBufferedWriteRead", testVerySmallSyncBufferedWriteRead)
-	t.Run("test SmallAsyncBufferedWriteRead", testSmallSyncBufferedWriteRead)
-	t.Run("test LargeAsyncBufferedWriteRead", testLargeSyncBufferedWriteRead)
-
-	t.Run("test VerySmallAsyncWriteRead", testVerySmallAsyncWriteRead)
-	t.Run("test SmallAsyncWriteRead", testSmallAsyncWriteRead)
-	t.Run("test LargeAsyncWriteRead", testLargeAsyncWriteRead)
-
-	t.Run("test VerySmallAsyncWriteReadWithCache", testVerySmallAsyncWriteReadWithCache)
-	t.Run("test SmallAsyncWriteReadWithCache", testSmallAsyncWriteReadWithCache)
-	t.Run("test LargeAsyncWriteReadWithCache", testLargeAsyncWriteReadWithCache)
-
-	t.Run("test VerySmallAsyncWriteReadWithPrefetch", testVerySmallAsyncWriteReadWithPrefetch)
-	t.Run("test SmallAsyncWriteReadWithPrefetch", testSmallAsyncWriteReadWithPrefetch)
-	t.Run("test LargeAsyncWriteReadWithPrefetch", testLargeAsyncWriteReadWithPrefetch)
+	t.Run("VerySmallAsyncWriteReadWithPrefetch", testVerySmallAsyncWriteReadWithPrefetch)
+	t.Run("SmallAsyncWriteReadWithPrefetch", testSmallAsyncWriteReadWithPrefetch)
+	t.Run("LargeAsyncWriteReadWithPrefetch", testLargeAsyncWriteReadWithPrefetch)
 }
 
 func testVerySmallSyncWriteRead(t *testing.T) {
@@ -198,24 +192,26 @@ func testLargeAsyncWriteReadWithPrefetch(t *testing.T) {
 func syncWriteRead(t *testing.T, size int64) {
 	t.Logf("Testing size %d", size)
 
-	account := GetTestAccount()
-
-	account.ClientServerNegotiation = false
+	test := GetCurrentTest()
+	server := test.GetCurrentServer()
+	serverInfo := server.GetInfo()
+	account, err := serverInfo.GetAccount()
+	FailError(t, err)
 
 	fsConfig := fs.NewFileSystemConfig("irodsfs-common-test")
 
 	filesystem, err := irods.NewIRODSFSClientDirect(account, fsConfig)
-	assert.NoError(t, err)
+	FailError(t, err)
 	defer filesystem.Release()
 
-	homedir := getHomeDir(ioTestID)
+	homeDir, err := test.GetTestHomeDir()
+	FailError(t, err)
 
 	newDataObjectFilename := "testobj_sync_123"
-	newDataObjectPath := homedir + "/" + newDataObjectFilename
-
+	newDataObjectPath := homeDir + "/" + newDataObjectFilename
 	// write
 	writeHandle, err := filesystem.CreateFile(newDataObjectPath, "", "w")
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	writer := common_io.NewSyncWriter(filesystem, writeHandle)
 
@@ -224,20 +220,20 @@ func syncWriteRead(t *testing.T, size int64) {
 
 	writeHasher := sha1.New()
 	for totalWrittenBytes < toWrite {
-		buf := makeRandomContentTestDataBuf(16 * 1024)
+		buf := MakeRandomContentDataBuf(16 * 1024)
 		writeLen := toWrite - totalWrittenBytes
 		if writeLen > int64(len(buf)) {
 			writeLen = int64(len(buf))
 		}
 
 		written, writeErr := writer.WriteAt(buf[:writeLen], totalWrittenBytes)
-		assert.NoError(t, writeErr)
+		FailError(t, writeErr)
 		if writeErr != nil {
 			break
 		}
 
 		_, hashErr := writeHasher.Write(buf[:written])
-		assert.NoError(t, hashErr)
+		FailError(t, hashErr)
 		if hashErr != nil {
 			break
 		}
@@ -246,19 +242,19 @@ func syncWriteRead(t *testing.T, size int64) {
 	}
 
 	err = writer.Flush()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	writer.Release()
 
 	err = writeHandle.Close()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	writeHashBytes := writeHasher.Sum(nil)
 	writeHashString := hex.EncodeToString(writeHashBytes)
 
 	// read
 	readHandle, err := filesystem.OpenFile(newDataObjectPath, "", "r")
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	reader := common_io.NewSyncReader(filesystem, readHandle)
 	totalReadBytes := int64(0)
@@ -268,12 +264,12 @@ func syncWriteRead(t *testing.T, size int64) {
 	for totalReadBytes < totalWrittenBytes {
 		read, readErr := reader.ReadAt(readBuffer, totalReadBytes)
 		if readErr != nil && readErr != io.EOF {
-			assert.NoError(t, readErr)
+			FailError(t, readErr)
 			break
 		}
 
 		_, hashErr := readHasher.Write(readBuffer[:read])
-		assert.NoError(t, hashErr)
+		FailError(t, hashErr)
 		if hashErr != nil {
 			break
 		}
@@ -288,7 +284,7 @@ func syncWriteRead(t *testing.T, size int64) {
 	reader.Release()
 
 	err = readHandle.Close()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	readHashBytes := readHasher.Sum(nil)
 	readHashString := hex.EncodeToString(readHashBytes)
@@ -299,7 +295,7 @@ func syncWriteRead(t *testing.T, size int64) {
 
 	// delete
 	err = filesystem.RemoveFile(newDataObjectPath, true)
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	assert.False(t, filesystem.ExistsFile(newDataObjectPath))
 }
@@ -307,24 +303,27 @@ func syncWriteRead(t *testing.T, size int64) {
 func syncBufferedWriteRead(t *testing.T, size int64) {
 	t.Logf("Testing size %d", size)
 
-	account := GetTestAccount()
-
-	account.ClientServerNegotiation = false
+	test := GetCurrentTest()
+	server := test.GetCurrentServer()
+	serverInfo := server.GetInfo()
+	account, err := serverInfo.GetAccount()
+	FailError(t, err)
 
 	fsConfig := fs.NewFileSystemConfig("irodsfs-common-test")
 
 	filesystem, err := irods.NewIRODSFSClientDirect(account, fsConfig)
-	assert.NoError(t, err)
+	FailError(t, err)
 	defer filesystem.Release()
 
-	homedir := getHomeDir(ioTestID)
+	homeDir, err := test.GetTestHomeDir()
+	FailError(t, err)
 
 	newDataObjectFilename := "testobj_sync_123"
-	newDataObjectPath := homedir + "/" + newDataObjectFilename
+	newDataObjectPath := homeDir + "/" + newDataObjectFilename
 
 	// write
 	writeHandle, err := filesystem.CreateFile(newDataObjectPath, "", "w")
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	syncWriter := common_io.NewSyncWriter(filesystem, writeHandle)
 	writer := common_io.NewSyncBufferedWriter(syncWriter, int(64*kb))
@@ -334,20 +333,20 @@ func syncBufferedWriteRead(t *testing.T, size int64) {
 
 	writeHasher := sha1.New()
 	for totalWrittenBytes < toWrite {
-		buf := makeRandomContentTestDataBuf(16 * 1024)
+		buf := MakeRandomContentDataBuf(16 * 1024)
 		writeLen := toWrite - totalWrittenBytes
 		if writeLen > int64(len(buf)) {
 			writeLen = int64(len(buf))
 		}
 
 		written, writeErr := writer.WriteAt(buf[:writeLen], totalWrittenBytes)
-		assert.NoError(t, writeErr)
+		FailError(t, writeErr)
 		if writeErr != nil {
 			break
 		}
 
 		_, hashErr := writeHasher.Write(buf[:written])
-		assert.NoError(t, hashErr)
+		FailError(t, hashErr)
 		if hashErr != nil {
 			break
 		}
@@ -356,19 +355,19 @@ func syncBufferedWriteRead(t *testing.T, size int64) {
 	}
 
 	err = writer.Flush()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	writer.Release()
 
 	err = writeHandle.Close()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	writeHashBytes := writeHasher.Sum(nil)
 	writeHashString := hex.EncodeToString(writeHashBytes)
 
 	// read
 	readHandle, err := filesystem.OpenFile(newDataObjectPath, "", "r")
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	reader := common_io.NewSyncReader(filesystem, readHandle)
 	totalReadBytes := int64(0)
@@ -378,12 +377,12 @@ func syncBufferedWriteRead(t *testing.T, size int64) {
 	for totalReadBytes < totalWrittenBytes {
 		read, readErr := reader.ReadAt(readBuffer, totalReadBytes)
 		if readErr != nil && readErr != io.EOF {
-			assert.NoError(t, readErr)
+			FailError(t, readErr)
 			break
 		}
 
 		_, hashErr := readHasher.Write(readBuffer[:read])
-		assert.NoError(t, hashErr)
+		FailError(t, hashErr)
 		if hashErr != nil {
 			break
 		}
@@ -398,7 +397,7 @@ func syncBufferedWriteRead(t *testing.T, size int64) {
 	reader.Release()
 
 	err = readHandle.Close()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	readHashBytes := readHasher.Sum(nil)
 	readHashString := hex.EncodeToString(readHashBytes)
@@ -409,7 +408,7 @@ func syncBufferedWriteRead(t *testing.T, size int64) {
 
 	// delete
 	err = filesystem.RemoveFile(newDataObjectPath, true)
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	assert.False(t, filesystem.ExistsFile(newDataObjectPath))
 }
@@ -417,24 +416,27 @@ func syncBufferedWriteRead(t *testing.T, size int64) {
 func asyncWriteRead(t *testing.T, size int64) {
 	t.Logf("Testing size %d", size)
 
-	account := GetTestAccount()
-
-	account.ClientServerNegotiation = false
+	test := GetCurrentTest()
+	server := test.GetCurrentServer()
+	serverInfo := server.GetInfo()
+	account, err := serverInfo.GetAccount()
+	FailError(t, err)
 
 	fsConfig := fs.NewFileSystemConfig("irodsfs-common-test")
 
 	filesystem, err := irods.NewIRODSFSClientDirect(account, fsConfig)
-	assert.NoError(t, err)
+	FailError(t, err)
 	defer filesystem.Release()
 
-	homedir := getHomeDir(ioTestID)
+	homeDir, err := test.GetTestHomeDir()
+	FailError(t, err)
 
 	newDataObjectFilename := "testobj_async_123"
-	newDataObjectPath := homedir + "/" + newDataObjectFilename
+	newDataObjectPath := homeDir + "/" + newDataObjectFilename
 
 	// write
 	writeHandle, err := filesystem.CreateFile(newDataObjectPath, "", "w")
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	syncWriter := common_io.NewSyncWriter(filesystem, writeHandle)
 	writer := common_io.NewAsyncWriter(syncWriter)
@@ -444,20 +446,20 @@ func asyncWriteRead(t *testing.T, size int64) {
 
 	writeHasher := sha1.New()
 	for totalWrittenBytes < toWrite {
-		buf := makeRandomContentTestDataBuf(16 * 1024)
+		buf := MakeRandomContentDataBuf(16 * 1024)
 		writeLen := toWrite - totalWrittenBytes
 		if writeLen > int64(len(buf)) {
 			writeLen = int64(len(buf))
 		}
 
 		written, writeErr := writer.WriteAt(buf[:writeLen], totalWrittenBytes)
-		assert.NoError(t, writeErr)
+		FailError(t, writeErr)
 		if writeErr != nil {
 			break
 		}
 
 		_, hashErr := writeHasher.Write(buf[:written])
-		assert.NoError(t, hashErr)
+		FailError(t, hashErr)
 		if hashErr != nil {
 			break
 		}
@@ -466,23 +468,23 @@ func asyncWriteRead(t *testing.T, size int64) {
 	}
 
 	err = writer.Flush()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	writer.Release()
 
 	err = writeHandle.Close()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	writeHashBytes := writeHasher.Sum(nil)
 	writeHashString := hex.EncodeToString(writeHashBytes)
 
 	// read
 	readHandle, err := filesystem.OpenFile(newDataObjectPath, "", "r")
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	syncReader := common_io.NewSyncReader(filesystem, readHandle)
 	reader, err := common_io.NewAsyncReader([]common_io.Reader{syncReader}, iRODSIOBlockSize)
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	totalReadBytes := int64(0)
 
@@ -491,12 +493,12 @@ func asyncWriteRead(t *testing.T, size int64) {
 	for totalReadBytes < totalWrittenBytes {
 		read, readErr := reader.ReadAt(readBuffer, totalReadBytes)
 		if readErr != nil && readErr != io.EOF {
-			assert.NoError(t, readErr)
+			FailError(t, readErr)
 			break
 		}
 
 		_, hashErr := readHasher.Write(readBuffer[:read])
-		assert.NoError(t, hashErr)
+		FailError(t, hashErr)
 		if hashErr != nil {
 			break
 		}
@@ -511,7 +513,7 @@ func asyncWriteRead(t *testing.T, size int64) {
 	reader.Release()
 
 	err = readHandle.Close()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	readHashBytes := readHasher.Sum(nil)
 	readHashString := hex.EncodeToString(readHashBytes)
@@ -522,7 +524,7 @@ func asyncWriteRead(t *testing.T, size int64) {
 
 	// delete
 	err = filesystem.RemoveFile(newDataObjectPath, true)
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	assert.False(t, filesystem.ExistsFile(newDataObjectPath))
 }
@@ -530,24 +532,27 @@ func asyncWriteRead(t *testing.T, size int64) {
 func asyncWriteReadWithCache(t *testing.T, size int64) {
 	t.Logf("Testing size %d", size)
 
-	account := GetTestAccount()
-
-	account.ClientServerNegotiation = false
+	test := GetCurrentTest()
+	server := test.GetCurrentServer()
+	serverInfo := server.GetInfo()
+	account, err := serverInfo.GetAccount()
+	FailError(t, err)
 
 	fsConfig := fs.NewFileSystemConfig("irodsfs-common-test")
 
 	filesystem, err := irods.NewIRODSFSClientDirect(account, fsConfig)
-	assert.NoError(t, err)
+	FailError(t, err)
 	defer filesystem.Release()
 
-	homedir := getHomeDir(ioTestID)
+	homeDir, err := test.GetTestHomeDir()
+	FailError(t, err)
 
 	newDataObjectFilename := "testobj_async_123"
-	newDataObjectPath := homedir + "/" + newDataObjectFilename
+	newDataObjectPath := homeDir + "/" + newDataObjectFilename
 
 	// write
 	writeHandle, err := filesystem.CreateFile(newDataObjectPath, "", "w")
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	syncWriter := common_io.NewSyncWriter(filesystem, writeHandle)
 	writer := common_io.NewAsyncWriter(syncWriter)
@@ -557,20 +562,20 @@ func asyncWriteReadWithCache(t *testing.T, size int64) {
 
 	writeHasher := sha1.New()
 	for totalWrittenBytes < toWrite {
-		buf := makeRandomContentTestDataBuf(16 * 1024)
+		buf := MakeRandomContentDataBuf(16 * 1024)
 		writeLen := toWrite - totalWrittenBytes
 		if writeLen > int64(len(buf)) {
 			writeLen = int64(len(buf))
 		}
 
 		written, writeErr := writer.WriteAt(buf[:writeLen], totalWrittenBytes)
-		assert.NoError(t, writeErr)
+		FailError(t, writeErr)
 		if writeErr != nil {
 			break
 		}
 
 		_, hashErr := writeHasher.Write(buf[:written])
-		assert.NoError(t, hashErr)
+		FailError(t, hashErr)
 		if hashErr != nil {
 			break
 		}
@@ -579,41 +584,41 @@ func asyncWriteReadWithCache(t *testing.T, size int64) {
 	}
 
 	err = writer.Flush()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	writer.Release()
 
 	err = writeHandle.Close()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	writeHashBytes := writeHasher.Sum(nil)
 	writeHashString := hex.EncodeToString(writeHashBytes)
 
-	cacheStore, err := common_cache.NewDiskCacheStore(100*mb, int(mb), "/tmp")
-	assert.NoError(t, err)
+	cacheStore, err := common_cache.NewDiskCacheStore(100*mb, int(mb), "/tmp/irodsfs-common")
+	FailError(t, err)
 
 	// read #1
 	readHandle, err := filesystem.OpenFile(newDataObjectPath, "", "r")
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	syncReader := common_io.NewSyncReader(filesystem, readHandle)
 	reader, err := common_io.NewAsyncCacheThroughReader([]common_io.Reader{syncReader}, iRODSIOBlockSize, cacheStore)
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	totalReadBytes := int64(0)
 
 	readHasher := sha1.New()
 	readBuffer := make([]byte, iRODSReadWriteSize)
 	for totalReadBytes < totalWrittenBytes {
-		t.Logf("read at %d", totalReadBytes)
+		//t.Logf("read at %d", totalReadBytes)
 		read, readErr := reader.ReadAt(readBuffer, totalReadBytes)
 		if readErr != nil && readErr != io.EOF {
-			assert.NoError(t, readErr)
+			FailError(t, readErr)
 			break
 		}
 
 		_, hashErr := readHasher.Write(readBuffer[:read])
-		assert.NoError(t, hashErr)
+		FailError(t, hashErr)
 		if hashErr != nil {
 			break
 		}
@@ -628,7 +633,7 @@ func asyncWriteReadWithCache(t *testing.T, size int64) {
 	reader.Release()
 
 	err = readHandle.Close()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	readHashBytes := readHasher.Sum(nil)
 	readHashString := hex.EncodeToString(readHashBytes)
@@ -640,26 +645,25 @@ func asyncWriteReadWithCache(t *testing.T, size int64) {
 	// read #2
 	// read again. must hit cache
 	readHandle, err = filesystem.OpenFile(newDataObjectPath, "", "r")
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	syncReader = common_io.NewSyncReader(filesystem, readHandle)
 	reader, err = common_io.NewAsyncCacheThroughReader([]common_io.Reader{syncReader}, iRODSIOBlockSize, cacheStore)
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	totalReadBytes = int64(0)
 
 	readHasher = sha1.New()
 	for totalReadBytes < totalWrittenBytes {
-		//
-		t.Logf("read at %d", totalReadBytes)
+		//t.Logf("read at %d", totalReadBytes)
 		read, readErr := reader.ReadAt(readBuffer, totalReadBytes)
 		if readErr != nil && readErr != io.EOF {
-			assert.NoError(t, readErr)
+			FailError(t, readErr)
 			break
 		}
 
 		_, hashErr := readHasher.Write(readBuffer[:read])
-		assert.NoError(t, hashErr)
+		FailError(t, hashErr)
 		if hashErr != nil {
 			break
 		}
@@ -674,7 +678,7 @@ func asyncWriteReadWithCache(t *testing.T, size int64) {
 	reader.Release()
 
 	err = readHandle.Close()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	readHashBytes = readHasher.Sum(nil)
 	readHashString = hex.EncodeToString(readHashBytes)
@@ -685,7 +689,7 @@ func asyncWriteReadWithCache(t *testing.T, size int64) {
 
 	// delete
 	err = filesystem.RemoveFile(newDataObjectPath, true)
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	assert.False(t, filesystem.ExistsFile(newDataObjectPath))
 }
@@ -693,24 +697,27 @@ func asyncWriteReadWithCache(t *testing.T, size int64) {
 func asyncWriteReadWithPrefetch(t *testing.T, size int64) {
 	t.Logf("Testing size %d", size)
 
-	account := GetTestAccount()
-
-	account.ClientServerNegotiation = false
+	test := GetCurrentTest()
+	server := test.GetCurrentServer()
+	serverInfo := server.GetInfo()
+	account, err := serverInfo.GetAccount()
+	FailError(t, err)
 
 	fsConfig := fs.NewFileSystemConfig("irodsfs-common-test")
 
 	filesystem, err := irods.NewIRODSFSClientDirect(account, fsConfig)
-	assert.NoError(t, err)
+	FailError(t, err)
 	defer filesystem.Release()
 
-	homedir := getHomeDir(ioTestID)
+	homeDir, err := test.GetTestHomeDir()
+	FailError(t, err)
 
 	newDataObjectFilename := "testobj_async_123"
-	newDataObjectPath := homedir + "/" + newDataObjectFilename
+	newDataObjectPath := homeDir + "/" + newDataObjectFilename
 
 	// write
 	writeHandle, err := filesystem.CreateFile(newDataObjectPath, "", "w")
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	syncWriter := common_io.NewSyncWriter(filesystem, writeHandle)
 	writer := common_io.NewAsyncWriter(syncWriter)
@@ -720,20 +727,20 @@ func asyncWriteReadWithPrefetch(t *testing.T, size int64) {
 
 	writeHasher := sha1.New()
 	for totalWrittenBytes < toWrite {
-		buf := makeRandomContentTestDataBuf(16 * 1024)
+		buf := MakeRandomContentDataBuf(16 * 1024)
 		writeLen := toWrite - totalWrittenBytes
 		if writeLen > int64(len(buf)) {
 			writeLen = int64(len(buf))
 		}
 
 		written, writeErr := writer.WriteAt(buf[:writeLen], totalWrittenBytes)
-		assert.NoError(t, writeErr)
+		FailError(t, writeErr)
 		if writeErr != nil {
 			break
 		}
 
 		_, hashErr := writeHasher.Write(buf[:written])
-		assert.NoError(t, hashErr)
+		FailError(t, hashErr)
 		if hashErr != nil {
 			break
 		}
@@ -742,30 +749,30 @@ func asyncWriteReadWithPrefetch(t *testing.T, size int64) {
 	}
 
 	err = writer.Flush()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	writer.Release()
 
 	err = writeHandle.Close()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	writeHashBytes := writeHasher.Sum(nil)
 	writeHashString := hex.EncodeToString(writeHashBytes)
 
-	cacheStore, err := common_cache.NewDiskCacheStore(100*mb, int(mb), "/tmp")
-	assert.NoError(t, err)
+	cacheStore, err := common_cache.NewDiskCacheStore(100*mb, int(mb), "/tmp/irodsfs-common")
+	FailError(t, err)
 
 	// read #1
 	readHandle1, err := filesystem.OpenFile(newDataObjectPath, "", "r")
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	readHandle2, err := filesystem.OpenFile(newDataObjectPath, "", "r")
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	syncReader1 := common_io.NewSyncReader(filesystem, readHandle1)
 	syncReader2 := common_io.NewSyncReader(filesystem, readHandle2)
 	reader, err := common_io.NewAsyncCacheThroughReader([]common_io.Reader{syncReader1, syncReader2}, iRODSIOBlockSize, cacheStore)
-	assert.NoError(t, err)
+	FailError(t, err)
 	totalReadBytes := int64(0)
 
 	readHasher := sha1.New()
@@ -773,12 +780,12 @@ func asyncWriteReadWithPrefetch(t *testing.T, size int64) {
 	for totalReadBytes < totalWrittenBytes {
 		read, readErr := reader.ReadAt(readBuffer, totalReadBytes)
 		if readErr != nil && readErr != io.EOF {
-			assert.NoError(t, readErr)
+			FailError(t, readErr)
 			break
 		}
 
 		_, hashErr := readHasher.Write(readBuffer[:read])
-		assert.NoError(t, hashErr)
+		FailError(t, hashErr)
 		if hashErr != nil {
 			break
 		}
@@ -793,9 +800,9 @@ func asyncWriteReadWithPrefetch(t *testing.T, size int64) {
 	reader.Release()
 
 	err = readHandle1.Close()
-	assert.NoError(t, err)
+	FailError(t, err)
 	err = readHandle2.Close()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	readHashBytes := readHasher.Sum(nil)
 	readHashString := hex.EncodeToString(readHashBytes)
@@ -807,27 +814,27 @@ func asyncWriteReadWithPrefetch(t *testing.T, size int64) {
 	// read #2
 	// again. must hit cache
 	readHandle1, err = filesystem.OpenFile(newDataObjectPath, "", "r")
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	readHandle2, err = filesystem.OpenFile(newDataObjectPath, "", "r")
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	syncReader1 = common_io.NewSyncReader(filesystem, readHandle1)
 	syncReader2 = common_io.NewSyncReader(filesystem, readHandle2)
 	reader, err = common_io.NewAsyncCacheThroughReader([]common_io.Reader{syncReader1, syncReader2}, iRODSIOBlockSize, cacheStore)
-	assert.NoError(t, err)
+	FailError(t, err)
 	totalReadBytes = int64(0)
 
 	readHasher = sha1.New()
 	for totalReadBytes < totalWrittenBytes {
 		read, readErr := reader.ReadAt(readBuffer, totalReadBytes)
 		if readErr != nil && readErr != io.EOF {
-			assert.NoError(t, readErr)
+			FailError(t, readErr)
 			break
 		}
 
 		_, hashErr := readHasher.Write(readBuffer[:read])
-		assert.NoError(t, hashErr)
+		FailError(t, hashErr)
 		if hashErr != nil {
 			break
 		}
@@ -842,9 +849,9 @@ func asyncWriteReadWithPrefetch(t *testing.T, size int64) {
 	reader.Release()
 
 	err = readHandle1.Close()
-	assert.NoError(t, err)
+	FailError(t, err)
 	err = readHandle2.Close()
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	readHashBytes = readHasher.Sum(nil)
 	readHashString = hex.EncodeToString(readHashBytes)
@@ -855,7 +862,7 @@ func asyncWriteReadWithPrefetch(t *testing.T, size int64) {
 
 	// delete
 	err = filesystem.RemoveFile(newDataObjectPath, true)
-	assert.NoError(t, err)
+	FailError(t, err)
 
 	assert.False(t, filesystem.ExistsFile(newDataObjectPath))
 }

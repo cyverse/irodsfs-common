@@ -1,15 +1,15 @@
 package cache
 
 import (
-	"errors"
 	"io"
 	"os"
+	"path"
 	"sync"
 	"time"
 
+	"github.com/cockroachdb/errors"
 	"github.com/cyverse/irodsfs-common/utils"
 	lrucache "github.com/hashicorp/golang-lru"
-	"golang.org/x/xerrors"
 )
 
 // DiskCacheEntry implements CacheEntry
@@ -25,11 +25,11 @@ type DiskCacheEntry struct {
 func NewDiskCacheEntry(cache *DiskCacheStore, key string, group string, data []byte) (*DiskCacheEntry, error) {
 	// write to disk
 	hash := utils.GetSHA1Sum(key)
-	filePath := utils.JoinPath(cache.GetRootPath(), hash)
+	filePath := path.Join(cache.GetRootPath(), hash)
 
 	err := os.WriteFile(filePath, data, 0666)
 	if err != nil {
-		writeErr := xerrors.Errorf("failed to write cache file %s: %w", filePath, err)
+		writeErr := errors.Wrapf(err, "failed to write cache file %q", filePath)
 		return nil, writeErr
 	}
 
@@ -66,7 +66,7 @@ func (entry *DiskCacheEntry) GetCreationTime() time.Time {
 func (entry *DiskCacheEntry) GetData(buffer []byte, inBlockOffset int) (int, error) {
 	f, err := os.Open(entry.filePath)
 	if err != nil {
-		return 0, xerrors.Errorf("failed to open cache file %s: %w", entry.filePath, err)
+		return 0, errors.Wrapf(err, "failed to open cache file %q", entry.filePath)
 	}
 	defer f.Close()
 
@@ -77,7 +77,7 @@ func (entry *DiskCacheEntry) GetData(buffer []byte, inBlockOffset int) (int, err
 	for totalRead < toRead {
 		readLen, err := f.Read(buffer[totalRead:])
 		if err != nil && err != io.EOF {
-			return 0, xerrors.Errorf("failed to read data from cache file %s: %w", entry.filePath, err)
+			return 0, errors.Wrapf(err, "failed to read data from cache file %q", entry.filePath)
 		}
 		totalRead += readLen
 
@@ -93,18 +93,18 @@ func (entry *DiskCacheEntry) GetData(buffer []byte, inBlockOffset int) (int, err
 func (entry *DiskCacheEntry) ReadData(writer io.Writer, inBlockOffset int) (int, error) {
 	f, err := os.Open(entry.filePath)
 	if err != nil {
-		return 0, xerrors.Errorf("failed to open cache file %s: %w", entry.filePath, err)
+		return 0, errors.Wrapf(err, "failed to open cache file %q", entry.filePath)
 	}
 	defer f.Close()
 
 	_, err = f.Seek(int64(inBlockOffset), io.SeekStart)
 	if err != nil {
-		return 0, xerrors.Errorf("failed to seek cache file %s: %w", entry.filePath, err)
+		return 0, errors.Wrapf(err, "failed to seek cache file %q", entry.filePath)
 	}
 
 	copied, err := io.Copy(writer, f)
 	if err != nil {
-		return int(copied), xerrors.Errorf("failed to copy data from cache file %s: %w", entry.filePath, err)
+		return int(copied), errors.Wrapf(err, "failed to copy data from cache file %q", entry.filePath)
 	}
 
 	return int(copied), err
@@ -116,7 +116,7 @@ func (entry *DiskCacheEntry) deleteDataFile() error {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		return xerrors.Errorf("failed to remove cache file %s: %w", entry.filePath, err)
+		return errors.Wrapf(err, "failed to remove cache file %q", entry.filePath)
 	}
 	return nil
 }
@@ -136,7 +136,7 @@ type DiskCacheStore struct {
 func NewDiskCacheStore(sizeCap int64, entrySizeCap int, rootPath string) (CacheStore, error) {
 	err := os.MkdirAll(rootPath, 0777)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to make dir %s: %w", rootPath, err)
+		return nil, errors.Wrapf(err, "failed to make dir %q", rootPath)
 	}
 
 	var maxCacheEntryNum int = int(sizeCap / int64(entrySizeCap))
@@ -152,12 +152,12 @@ func NewDiskCacheStore(sizeCap int64, entrySizeCap int, rootPath string) (CacheS
 
 	err = diskCache.clearCacheFiles()
 	if err != nil {
-		return nil, xerrors.Errorf("failed to clear existing cache files: %w", err)
+		return nil, errors.Wrapf(err, "failed to clear existing cache files")
 	}
 
 	lruCache, err := lrucache.NewWithEvict(maxCacheEntryNum, diskCache.onEvicted)
 	if err != nil {
-		return nil, xerrors.Errorf("failed to create LRU cache: %w", err)
+		return nil, errors.Wrapf(err, "failed to create LRU cache")
 	}
 
 	diskCache.cache = lruCache
@@ -179,29 +179,22 @@ func (store *DiskCacheStore) Release() {
 func (store *DiskCacheStore) clearCacheFiles() error {
 	files, err := os.ReadDir(store.rootPath)
 	if err != nil {
-		return xerrors.Errorf("failed to read cache dir %s: %w", store.rootPath, err)
+		return errors.Wrapf(err, "failed to read cache dir %q", store.rootPath)
 	}
 
-	errors := []error{}
+	removeErrors := []error{}
 
 	for _, file := range files {
-		filePath := utils.JoinPath(store.rootPath, file.Name())
-		if file.IsDir() {
-			err := os.RemoveAll(filePath)
-			if err != nil {
-				errors = append(errors, xerrors.Errorf("failed to remove cache dir %s: %w", filePath, err))
-			}
-		} else {
-			err := os.Remove(filePath)
-			if err != nil {
-				errors = append(errors, xerrors.Errorf("failed to remove cache file %s: %w", filePath, err))
-			}
+		filePath := path.Join(store.rootPath, file.Name())
+		err := os.RemoveAll(filePath)
+		if err != nil {
+			rerr := errors.Wrapf(err, "failed to remove cache file or dir %q", filePath)
+			removeErrors = append(removeErrors, rerr)
 		}
 	}
 
-	if len(errors) > 0 {
-		// TODO: handle multi errors
-		return xerrors.Errorf("failed to remove some cache files or directories: %v", errors)
+	if len(removeErrors) > 0 {
+		return errors.Join(removeErrors...)
 	}
 
 	return nil
@@ -303,7 +296,7 @@ func (store *DiskCacheStore) GetEntryKeysForGroup(group string) []string {
 // CreateEntry creates a new entry
 func (store *DiskCacheStore) CreateEntry(key string, group string, data []byte) (CacheEntry, error) {
 	if store.entrySizeCap < len(data) {
-		return nil, xerrors.Errorf("requested data %d is larger than entry size cap %d", len(data), store.entrySizeCap)
+		return nil, errors.Newf("requested data %d is larger than entry size cap %d", len(data), store.entrySizeCap)
 	}
 
 	entry, err := NewDiskCacheEntry(store, key, group, data)

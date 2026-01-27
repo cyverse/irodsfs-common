@@ -7,9 +7,10 @@ import (
 
 type TimeoutWaitGroup struct {
 	wg      sync.WaitGroup
-	done    chan struct{}
 	mutex   sync.Mutex
 	counter int
+	done    chan struct{}
+	closed  bool
 }
 
 func NewTimeoutWaitGroup() *TimeoutWaitGroup {
@@ -18,32 +19,33 @@ func NewTimeoutWaitGroup() *TimeoutWaitGroup {
 	}
 }
 
-func (wg *TimeoutWaitGroup) Add(i int) {
+func (wg *TimeoutWaitGroup) Add(delta int) {
 	wg.mutex.Lock()
 	defer wg.mutex.Unlock()
 
-	if wg.counter == 0 && i > 0 {
-		wg.done = make(chan struct{})
+	// check negative counter
+	if wg.counter+delta < 0 {
+		panic("sync: negative WaitGroup counter")
 	}
 
-	wg.counter += i
-	wg.wg.Add(i)
+	// recreate channel when new work is added
+	if wg.counter == 0 && delta > 0 && wg.closed {
+		wg.done = make(chan struct{})
+		wg.closed = false
+	}
 
-	if wg.counter == 0 {
+	wg.counter += delta
+	wg.wg.Add(delta)
+
+	// signal done when counter reaches 0
+	if wg.counter == 0 && !wg.closed {
 		close(wg.done)
+		wg.closed = true
 	}
 }
 
 func (wg *TimeoutWaitGroup) Done() {
-	wg.mutex.Lock()
-	defer wg.mutex.Unlock()
-
-	wg.counter--
-	if wg.counter == 0 {
-		close(wg.done)
-	}
-
-	wg.wg.Done()
+	wg.Add(-1) // reuse Add method
 }
 
 func (wg *TimeoutWaitGroup) Wait() {
@@ -59,13 +61,10 @@ func (wg *TimeoutWaitGroup) WaitTimeout(timeout time.Duration) bool {
 	done := wg.done
 	wg.mutex.Unlock()
 
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
 	select {
 	case <-done:
 		return true
-	case <-timer.C:
+	case <-time.After(timeout):
 		return false
 	}
 }

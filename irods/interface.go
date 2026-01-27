@@ -12,7 +12,7 @@ type IRODSFSClient interface {
 	GetAccount() *irodsclient_types.IRODSAccount
 	GetApplicationName() string
 
-	GetConnections() int
+	GetOpenConnections() int
 	GetMetrics() *irodsclient_metrics.IRODSMetrics
 
 	// API

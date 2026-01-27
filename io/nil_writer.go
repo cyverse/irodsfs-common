@@ -1,8 +1,8 @@
 package io
 
 import (
+	"github.com/cockroachdb/errors"
 	"github.com/cyverse/irodsfs-common/irods"
-	"golang.org/x/xerrors"
 )
 
 // NilWriter does nothing for write
@@ -41,7 +41,7 @@ func (writer *NilWriter) GetPath() string {
 
 // WriteAt writes data
 func (writer *NilWriter) WriteAt(data []byte, offset int64) (int, error) {
-	return 0, xerrors.Errorf("failed to writer data to %s, offset %d, length %d", writer.path, offset, len(data))
+	return 0, errors.Newf("failed to write data to %q, offset %d, length %d", writer.path, offset, len(data))
 }
 
 func (writer *NilWriter) Flush() error {

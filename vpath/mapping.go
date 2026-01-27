@@ -2,11 +2,10 @@ package vpath
 
 import (
 	"encoding/json"
-	"fmt"
+	"path"
 	"strings"
 
-	"github.com/cyverse/irodsfs-common/utils"
-	"golang.org/x/xerrors"
+	"github.com/cockroachdb/errors"
 )
 
 // VPathMappingResourceType determines the type of Virtual Path Mapping resource entry
@@ -45,7 +44,7 @@ func (t *VPathMappingResourceType) UnmarshalJSON(b []byte) error {
 	case string(VPathMappingFile):
 		*t = VPathMappingFile
 	default:
-		return fmt.Errorf("invalid vpath mapping resource type: %s", s)
+		return errors.Newf("invalid vpath mapping resource type %q", s)
 	}
 
 	return nil
@@ -63,12 +62,12 @@ type VPathMapping struct {
 
 // Validate validates VPathMapping
 func (mapping *VPathMapping) Validate() error {
-	if !utils.IsAbsolutePath(mapping.IRODSPath) {
-		return xerrors.Errorf("path given (%s) is not absolute path", mapping.IRODSPath)
+	if !path.IsAbs(mapping.IRODSPath) {
+		return errors.Newf("path %q is not absolute", mapping.IRODSPath)
 	}
 
-	if !utils.IsAbsolutePath(mapping.MappingPath) {
-		return xerrors.Errorf("path given (%s) is not absolute path", mapping.MappingPath)
+	if !path.IsAbs(mapping.MappingPath) {
+		return errors.Newf("path %q is not absolute", mapping.MappingPath)
 	}
 
 	return nil
@@ -81,20 +80,20 @@ func ValidateVPathMappings(mappings []VPathMapping) error {
 	for _, mapping := range mappings {
 		err := mapping.Validate()
 		if err != nil {
-			return xerrors.Errorf("failed to validate vpath mapping: %w", err)
+			return errors.Wrapf(err, "failed to validate vpath mapping")
 		}
 
 		// check mapping path is used in another mapping
 		if _, ok := mappingDict[mapping.MappingPath]; ok {
 			// exists
-			return xerrors.Errorf("path given (%s) is already used in another mapping", mapping.MappingPath)
+			return errors.Newf("path %q is already used in another mapping", mapping.MappingPath)
 		}
 
 		mappingDict[mapping.MappingPath] = mapping.IRODSPath
 	}
 
 	if len(mappings) == 0 {
-		return xerrors.Errorf("no virtual path mapping is given")
+		return errors.Newf("no virtual path mapping is given")
 	}
 	return nil
 }
