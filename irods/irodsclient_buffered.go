@@ -20,8 +20,6 @@ import (
 
 // IRODSFSClientBufferedConfig holds configuration for IRODSFSClientBuffered
 type IRODSFSClientBufferedConfig struct {
-	// Read cache (shared, created externally)
-	Cache     *cache.MemoryCacheManager
 	BlockSize int // Block size for read cache in bytes (default: 4MB)
 
 	// Staging settings (leave StagingRootPath empty to disable staging/write support)
@@ -46,15 +44,15 @@ type IRODSFSClientBuffered struct {
 
 // NewIRODSFSClientBuffered creates a new IRODSFSClientBuffered with the given config.
 // The cache is provided externally so it can be shared across multiple clients.
-func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, config *IRODSFSClientBufferedConfig) (IRODSFSClient, error) {
+func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.MemoryCacheManager, config *IRODSFSClientBufferedConfig) (IRODSFSClient, error) {
 	if fs == nil {
 		return nil, errors.New("fs is required")
 	}
+	if cache == nil {
+		return nil, errors.New("cache is required")
+	}
 	if config == nil {
 		return nil, errors.New("config is required")
-	}
-	if config.Cache == nil {
-		return nil, errors.New("config.Cache is required")
 	}
 
 	blockSize := config.BlockSize
@@ -100,7 +98,7 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, config *IRODSFSClie
 		id:      clientID,
 		fs:      fs,
 		client:  directClient,
-		cache:   config.Cache,
+		cache:   cache,
 		helper:  util.NewFileBlockHelper(blockSize),
 		staging: staging,
 		logger:  logger,
