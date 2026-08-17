@@ -461,11 +461,15 @@ func (sf *StagingFS) RegisterActionHandler(handler ActionHandler) {
 	sf.sm.RegisterActionHandler(handler)
 }
 
-// Close stops the background worker and closes the staging filesystem
+// Close syncs all pending data, stops the background worker, and closes the staging filesystem
 func (sf *StagingFS) Close() error {
 	sf.stopOnce.Do(func() {
 		close(sf.stopCh)
 	})
+
+	if err := sf.SyncAll(); err != nil {
+		log.Warnf("failed to sync all staged data on close: %v", err)
+	}
 
 	if sf.sm.db != nil {
 		return sf.sm.db.Close()

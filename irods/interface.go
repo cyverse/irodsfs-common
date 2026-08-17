@@ -36,6 +36,9 @@ type IRODSFSClient interface {
 	OpenFile(path string, mode string) (IRODSFSFileHandle, error)
 	TruncateFile(path string, size int64) error
 
+	// Sync
+	Sync() error
+
 	// File Transfer
 	DownloadFile(irodsPath string, localPath string) error
 	DownloadFileParallel(irodsPath string, localPath string, taskNum int) error

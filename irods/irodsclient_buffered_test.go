@@ -45,9 +45,6 @@ func (h *mockFileHandle) GetOpenMode() irodsclient_types.FileOpenMode      { ret
 func (h *mockFileHandle) IsReadMode() bool                                 { return h.openMode.IsRead() }
 func (h *mockFileHandle) IsWriteMode() bool                                { return h.openMode.IsWrite() }
 func (h *mockFileHandle) GetAvailable(offset int64) int64                  { return int64(len(h.data)) - offset }
-func (h *mockFileHandle) Lock(wait bool) error                             { return nil }
-func (h *mockFileHandle) RLock(wait bool) error                            { return nil }
-func (h *mockFileHandle) Unlock() error                                    { return nil }
 func (h *mockFileHandle) Flush() error                                     { return nil }
 func (h *mockFileHandle) Close() error                                     { return nil }
 func (h *mockFileHandle) Truncate(size int64) error {

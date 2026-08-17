@@ -20,28 +20,16 @@ import (
 
 // IRODSFSClientBufferedConfig holds configuration for IRODSFSClientBuffered
 type IRODSFSClientBufferedConfig struct {
-	// Read cache settings
-	CacheMaxSize int64         // Max memory for block cache in bytes (default: 100GB)
-	CacheTTL     time.Duration // Cache entry TTL (default: 12h)
-	BlockSize    int           // Block size for read cache in bytes (default: 4MB)
+	// Read cache (shared, created externally)
+	Cache     *cache.MemoryCacheManager
+	BlockSize int // Block size for read cache in bytes (default: 4MB)
 
 	// Staging settings (leave StagingRootPath empty to disable staging/write support)
-	StagingRootPath string                   // Local path for staging files
-	SyncInterval    time.Duration            // Background sync interval (default: 5s)
-	GracePeriod     time.Duration            // Grace period before sync (default: 10s)
-	UsePersistence  bool                     // Use BadgerDB for crash recovery
+	StagingRootPath string                     // Local path for staging files
+	SyncInterval    time.Duration              // Background sync interval (default: 5s)
+	GracePeriod     time.Duration              // Grace period before sync (default: 10s)
+	UsePersistence  bool                       // Use BadgerDB for crash recovery
 	OnSyncError     stagingfs.SyncErrorHandler // Optional error callback
-}
-
-// NewDefaultIRODSFSClientBufferedConfig returns a config with sensible defaults
-func NewDefaultIRODSFSClientBufferedConfig() *IRODSFSClientBufferedConfig {
-	return &IRODSFSClientBufferedConfig{
-		CacheMaxSize: 100 * 1024 * 1024 * 1024, // 100GB
-		CacheTTL:     12 * time.Hour,
-		BlockSize:    4 * 1024 * 1024, // 4MB
-		SyncInterval: 5 * time.Second,
-		GracePeriod:  10 * time.Second,
-	}
 }
 
 // IRODSFSClientBuffered wraps IRODSFSClient with block-level read-through caching
@@ -57,28 +45,21 @@ type IRODSFSClientBuffered struct {
 }
 
 // NewIRODSFSClientBuffered creates a new IRODSFSClientBuffered with the given config.
-// It internally creates the memory cache and staging filesystem.
+// The cache is provided externally so it can be shared across multiple clients.
 func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, config *IRODSFSClientBufferedConfig) (IRODSFSClient, error) {
 	if fs == nil {
 		return nil, errors.New("fs is required")
 	}
 	if config == nil {
-		config = NewDefaultIRODSFSClientBufferedConfig()
+		return nil, errors.New("config is required")
+	}
+	if config.Cache == nil {
+		return nil, errors.New("config.Cache is required")
 	}
 
 	blockSize := config.BlockSize
 	if blockSize <= 0 {
 		blockSize = 4 * 1024 * 1024
-	}
-
-	cacheMaxSize := config.CacheMaxSize
-	if cacheMaxSize <= 0 {
-		cacheMaxSize = 100 * 1024 * 1024 * 1024
-	}
-
-	cacheTTL := config.CacheTTL
-	if cacheTTL <= 0 {
-		cacheTTL = 12 * time.Hour
 	}
 
 	// Create direct client
@@ -87,20 +68,6 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, config *IRODSFSClie
 		return nil, err
 	}
 	directClient := client.(*IRODSFSClientDirect)
-
-	// Create memory cache
-	cacheConfig := &cache.MemoryCacheConfig{
-		NumCounters: cacheMaxSize / int64(blockSize) * 10,
-		MaxCost:     cacheMaxSize,
-		BufferItems: 512,
-		TTL:         cacheTTL,
-		Name:        "irodsfs-buffered",
-	}
-	cacheMgr, err := cache.NewMemoryCacheManager(cacheConfig)
-	if err != nil {
-		directClient.Release()
-		return nil, errors.Wrap(err, "failed to create cache manager")
-	}
 
 	// Create staging filesystem (optional)
 	var staging *stagingfs.StagingFS
@@ -119,7 +86,6 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, config *IRODSFSClie
 			staging, err = stagingfs.NewStagingFS(stagingConfig)
 		}
 		if err != nil {
-			cacheMgr.Release()
 			directClient.Release()
 			return nil, errors.Wrap(err, "failed to create staging filesystem")
 		}
@@ -134,7 +100,7 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, config *IRODSFSClie
 		id:      clientID,
 		fs:      fs,
 		client:  directClient,
-		cache:   cacheMgr,
+		cache:   config.Cache,
 		helper:  util.NewFileBlockHelper(blockSize),
 		staging: staging,
 		logger:  logger,
@@ -147,15 +113,30 @@ func (c *IRODSFSClientBuffered) Release() {
 		c.staging = nil
 	}
 
-	if c.cache != nil {
-		c.cache.Release()
-		c.cache = nil
-	}
-
 	if c.client != nil {
 		c.client.Release()
 		c.client = nil
 	}
+}
+
+func (c *IRODSFSClientBuffered) Sync() error {
+	if c.staging == nil {
+		return nil
+	}
+
+	logger := c.logger.WithFields(log.Fields{
+		"method": "Sync",
+	})
+
+	logger.Info("syncing all staged data to iRODS")
+
+	if err := c.staging.SyncAll(); err != nil {
+		return errors.Wrap(err, "failed to sync staged data")
+	}
+
+	c.cache.Clear(true)
+
+	return nil
 }
 
 func (c *IRODSFSClientBuffered) GetAccount() *irodsclient_types.IRODSAccount {

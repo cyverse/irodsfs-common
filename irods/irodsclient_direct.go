@@ -74,6 +74,11 @@ func (c *IRODSFSClientDirect) Release() {
 	}
 }
 
+// Sync is a no-op for direct client (no staging layer)
+func (c *IRODSFSClientDirect) Sync() error {
+	return nil
+}
+
 // List lists directory entries
 func (c *IRODSFSClientDirect) List(path string) ([]*irodsclient_fs.Entry, error) {
 	logger := c.logger.WithFields(log.Fields{

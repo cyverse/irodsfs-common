@@ -3,6 +3,7 @@ package stagingfs
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -313,9 +314,10 @@ func (sm *StagingStateManager) RenameDir(oldPath, newPath string) (bool, error) 
 		return true, nil
 	}
 
-	// IsNew=true case: change path only
+	// IsNew=true case: change path and update all children
+	now := time.Now()
 	meta.Path = newPath
-	meta.LastModifiedAt = time.Now()
+	meta.LastModifiedAt = now
 
 	delete(sm.metadata, oldPath)
 	sm.metadata[newPath] = meta
@@ -325,6 +327,25 @@ func (sm *StagingStateManager) RenameDir(oldPath, newPath string) (bool, error) 
 	}
 	if err := sm.persistMetadata(newPath, meta); err != nil {
 		return false, err
+	}
+
+	// Update all child entries under oldPath
+	oldPrefix := oldPath + "/"
+	for childPath, childMeta := range sm.metadata {
+		if strings.HasPrefix(childPath, oldPrefix) {
+			newChildPath := newPath + "/" + childPath[len(oldPrefix):]
+			childMeta.Path = newChildPath
+			childMeta.LastModifiedAt = now
+			if childMeta.OldPath != "" && strings.HasPrefix(childMeta.OldPath, oldPrefix) {
+				childMeta.OldPath = newPath + "/" + childMeta.OldPath[len(oldPrefix):]
+			}
+
+			delete(sm.metadata, childPath)
+			sm.metadata[newChildPath] = childMeta
+
+			sm.deleteMetadata(childPath)
+			sm.persistMetadata(newChildPath, childMeta)
+		}
 	}
 
 	return false, nil
