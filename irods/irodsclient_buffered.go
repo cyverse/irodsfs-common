@@ -508,19 +508,24 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 		}
 
 		// Write-only mode (w, w+, a)
-		f, err := c.staging.OpenForWrite(path)
-		if err != nil {
-			return nil, err
-		}
-
-		// Truncate if mode requires it
 		if openMode.Truncate() {
+			// w+ mode: no need to download, start fresh
+			f, err := c.staging.OpenForWrite(path)
+			if err != nil {
+				return nil, err
+			}
 			if err := f.Truncate(0); err != nil {
 				f.Close()
 				return nil, err
 			}
+			return newStagedHandle(c, f, path, openMode, entry), nil
 		}
 
+		// w, a modes: need existing content to avoid data loss
+		f, err := c.staging.OpenForReadWrite(path)
+		if err != nil {
+			return nil, err
+		}
 		return newStagedHandle(c, f, path, openMode, entry), nil
 	}
 
