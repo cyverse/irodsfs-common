@@ -7,9 +7,9 @@ import (
 
 	"github.com/cockroachdb/errors"
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
+	irodsclient_util "github.com/cyverse/go-irodsclient/irods/util"
 	"github.com/cyverse/irodsfs-common/inode"
 	"github.com/cyverse/irodsfs-common/irods"
-	"github.com/cyverse/irodsfs-common/utils"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -85,7 +85,7 @@ func (manager *VPathManager) GetClosestEntry(vpath string) *VPathEntry {
 	}
 
 	// get all parent dirs of the given vpath and check if it exists
-	parentDirs := utils.GetParentDirs(vpath)
+	parentDirs := irodsclient_util.GetIRODSParentDirs(vpath)
 	var closestEntry *VPathEntry
 	for _, parentDir := range parentDirs {
 		if entry, ok := manager.entries[parentDir]; ok {
@@ -102,14 +102,14 @@ func (manager *VPathManager) GetClosestEntry(vpath string) *VPathEntry {
 
 // build builds VPaths from mappings
 func (manager *VPathManager) build() error {
-	manager.mutex.RLock()
-	defer manager.mutex.RUnlock()
+	manager.mutex.Lock()
+	defer manager.mutex.Unlock()
 
 	manager.entries = map[string]*VPathEntry{}
 
 	// build
 	for _, mapping := range manager.pathMappings {
-		err := manager.buildOne(&mapping)
+		err := manager.buildMapping(&mapping)
 		if err != nil {
 			return errors.Wrapf(err, "failed to build vpath mapping")
 		}
@@ -117,19 +117,19 @@ func (manager *VPathManager) build() error {
 	return nil
 }
 
-// buildOne builds one VFS mapping
-func (manager *VPathManager) buildOne(mapping *VPathMapping) error {
+// buildMapping builds a single virtual path mapping
+func (manager *VPathManager) buildMapping(mapping *VPathMapping) error {
 	logger := log.WithFields(log.Fields{
 		"package":  "vpath",
 		"struct":   "VPathManager",
-		"function": "buildOne",
+		"function": "buildMapping",
 	})
 
 	logger.Infof("Building a VPath Entry %q", mapping.IRODSPath)
 
 	now := time.Now()
 
-	parentDirs := utils.GetParentDirs(mapping.MappingPath)
+	parentDirs := irodsclient_util.GetIRODSParentDirs(mapping.MappingPath)
 	for idx, parentDir := range parentDirs {
 		// add parentDir if not exists
 		if parentDirEntry, ok := manager.entries[parentDir]; ok {
@@ -140,7 +140,10 @@ func (manager *VPathManager) buildOne(mapping *VPathMapping) error {
 				return errors.Newf("failed to create a virtual dir entry %q, entry already exists", parentDir)
 			}
 		} else {
-			inodeID := manager.inodeManager.GetInodeIDForVPathEntry(parentDir)
+			inodeID, err := manager.inodeManager.GetInodeIDForVirtualEntry(parentDir)
+			if err != nil {
+				return err
+			}
 			dirEntry := &VPathEntry{
 				Type:     VPathVirtualDir,
 				Path:     parentDir,
@@ -246,10 +249,7 @@ func (manager *VPathManager) buildOne(mapping *VPathMapping) error {
 
 		// add to parent
 		if len(parentDirs) > 0 {
-			parentPath := parentDirs[len(parentDirs)-1]
-			if parentEntry, ok := manager.entries[parentPath]; ok {
-				parentEntry.VirtualDirEntry.DirEntries = append(parentEntry.VirtualDirEntry.DirEntries, entry)
-			}
+			manager.addToParentDir(entry, parentDirs[len(parentDirs)-1])
 		}
 	} else if errored {
 		// add empty entry
@@ -259,10 +259,7 @@ func (manager *VPathManager) buildOne(mapping *VPathMapping) error {
 
 		// add to parent
 		if len(parentDirs) > 0 {
-			parentPath := parentDirs[len(parentDirs)-1]
-			if parentEntry, ok := manager.entries[parentPath]; ok {
-				parentEntry.VirtualDirEntry.DirEntries = append(parentEntry.VirtualDirEntry.DirEntries, entry)
-			}
+			manager.addToParentDir(entry, parentDirs[len(parentDirs)-1])
 		}
 	} else {
 		logger.Errorf("failed to build a mapping for path %q", mapping.IRODSPath)
@@ -270,4 +267,11 @@ func (manager *VPathManager) buildOne(mapping *VPathMapping) error {
 	}
 
 	return nil
+}
+
+// addToParentDir adds an entry to its parent directory's entry list
+func (manager *VPathManager) addToParentDir(entry *VPathEntry, parentPath string) {
+	if parentEntry, ok := manager.entries[parentPath]; ok {
+		parentEntry.VirtualDirEntry.DirEntries = append(parentEntry.VirtualDirEntry.DirEntries, entry)
+	}
 }

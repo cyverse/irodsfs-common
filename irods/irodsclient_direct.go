@@ -7,7 +7,8 @@ import (
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
 	irodsclient_metrics "github.com/cyverse/go-irodsclient/irods/metrics"
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
-	"github.com/cyverse/irodsfs-common/utils"
+	"github.com/cyverse/irodsfs-common/util"
+	"github.com/rs/xid"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -15,88 +16,73 @@ import (
 // direct access to iRODS server
 // implements interfaces defined in interface.go
 type IRODSFSClientDirect struct {
-	config  *irodsclient_fs.FileSystemConfig
-	account *irodsclient_types.IRODSAccount
-	fs      *irodsclient_fs.FileSystem
+	id     string
+	fs     *irodsclient_fs.FileSystem
+	logger *log.Entry
 }
 
 // NewIRODSFSClientDirect creates IRODSFSClient using IRODSFSClientDirect
-func NewIRODSFSClientDirect(account *irodsclient_types.IRODSAccount, config *irodsclient_fs.FileSystemConfig) (IRODSFSClient, error) {
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"function": "NewIRODSFSClientDirect",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	fs, err := irodsclient_fs.NewFileSystem(account, config)
-	if err != nil {
-		return nil, err
+func NewIRODSFSClientDirect(fs *irodsclient_fs.FileSystem) (IRODSFSClient, error) {
+	if fs == nil {
+		return nil, errors.New("fs is required")
 	}
 
+	clientID := xid.New().String()
+
+	logger := fs.GetLogger().WithFields(log.Fields{
+		"fsclient_direct_id": clientID,
+	})
+
 	return &IRODSFSClientDirect{
-		config:  config,
-		account: account,
-		fs:      fs,
+		id:     clientID,
+		fs:     fs,
+		logger: logger,
 	}, nil
 }
 
 // GetAccount returns iRODS Account info
-func (client *IRODSFSClientDirect) GetAccount() *irodsclient_types.IRODSAccount {
-	return client.account
+func (c *IRODSFSClientDirect) GetAccount() *irodsclient_types.IRODSAccount {
+	return c.fs.GetAccount()
 }
 
 // GetApplicationName returns application name
-func (client *IRODSFSClientDirect) GetApplicationName() string {
-	return client.config.ApplicationName
+func (c *IRODSFSClientDirect) GetApplicationName() string {
+	return c.fs.GetConfig().ApplicationName
 }
 
 // GetFSClient returns iRODS fs client
-func (client *IRODSFSClientDirect) GetFSClient() *irodsclient_fs.FileSystem {
-	return client.fs
+func (c *IRODSFSClientDirect) GetFSClient() *irodsclient_fs.FileSystem {
+	return c.fs
 }
 
 // GetOpenConnections() returns total number of open connections
-func (client *IRODSFSClientDirect) GetOpenConnections() int {
-	return client.fs.GetOpenConnections()
+func (c *IRODSFSClientDirect) GetOpenConnections() int {
+	return c.fs.GetOpenConnections()
 }
 
 // GetTransferMetrics() returns transfer metrics
-func (client *IRODSFSClientDirect) GetMetrics() *irodsclient_metrics.IRODSMetrics {
-	return client.fs.GetMetrics()
+func (c *IRODSFSClientDirect) GetMetrics() *irodsclient_metrics.IRODSMetrics {
+	return c.fs.GetMetrics()
 }
 
 // Release releases resources
-func (client *IRODSFSClientDirect) Release() {
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "Release",
-	})
+func (c *IRODSFSClientDirect) Release() {
+	defer util.StackTraceFromPanic(c.logger)
 
-	defer utils.StackTraceFromPanic(logger)
-
-	if client.fs != nil {
-		client.fs.Release()
-		client.fs = nil
+	if c.fs != nil {
+		c.fs = nil
 	}
 }
 
 // List lists directory entries
-func (client *IRODSFSClientDirect) List(path string) ([]*irodsclient_fs.Entry, error) {
-	if client.fs == nil {
-		return nil, errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "List",
+func (c *IRODSFSClientDirect) List(path string) ([]*irodsclient_fs.Entry, error) {
+	logger := c.logger.WithFields(log.Fields{
+		"path": path,
 	})
 
-	defer utils.StackTraceFromPanic(logger)
+	defer util.StackTraceFromPanic(logger)
 
-	entries, err := client.fs.List(path)
+	entries, err := c.fs.List(path)
 	if err != nil {
 		return nil, err
 	}
@@ -104,257 +90,52 @@ func (client *IRODSFSClientDirect) List(path string) ([]*irodsclient_fs.Entry, e
 }
 
 // Stat stats fs entry
-func (client *IRODSFSClientDirect) Stat(path string) (*irodsclient_fs.Entry, error) {
-	if client.fs == nil {
-		return nil, errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "Stat",
+func (c *IRODSFSClientDirect) Stat(path string) (*irodsclient_fs.Entry, error) {
+	logger := c.logger.WithFields(log.Fields{
+		"path": path,
 	})
 
-	defer utils.StackTraceFromPanic(logger)
+	defer util.StackTraceFromPanic(logger)
 
-	entry, err := client.fs.Stat(path)
+	entry, err := c.fs.Stat(path)
 	if err != nil {
 		return nil, err
 	}
 	return entry, nil
 }
 
-// ListXattr lists xattr
-func (client *IRODSFSClientDirect) ListXattr(path string) ([]*irodsclient_types.IRODSMeta, error) {
-	if client.fs == nil {
-		return nil, errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "ListXattr",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	metadatas, err := client.fs.ListMetadata(path)
-	if err != nil {
-		return nil, err
-	}
-	return metadatas, nil
-}
-
-// GetXattr returns xattr value
-func (client *IRODSFSClientDirect) GetXattr(path string, name string) (*irodsclient_types.IRODSMeta, error) {
-	if client.fs == nil {
-		return nil, errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "GetXattr",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	metas, err := client.fs.ListMetadata(path)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, meta := range metas {
-		if meta.Name == name {
-			return meta, nil
-		}
-	}
-
-	// if we don't find any, return nil
-	return nil, nil
-}
-
-// SetXattr sets xattr
-func (client *IRODSFSClientDirect) SetXattr(path string, name string, value string) error {
-	if client.fs == nil {
-		return errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "SetXattr",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	// remove first if exists, ignore error if raised
-	// this is required as we can have multiple metadata with same name in iRODS
-	client.fs.DeleteMetadataByName(path, name)
-
-	err := client.fs.AddMetadata(path, name, value, "")
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// RemoveXattr removes xattr
-func (client *IRODSFSClientDirect) RemoveXattr(path string, name string) error {
-	if client.fs == nil {
-		return errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "RemoveXattr",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	err := client.fs.DeleteMetadataByName(path, name)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
 // ExistsDir checks existance of a dir
-func (client *IRODSFSClientDirect) ExistsDir(path string) bool {
-	if client.fs == nil {
-		return false
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "ExistsDir",
+func (c *IRODSFSClientDirect) ExistsDir(path string) bool {
+	logger := c.logger.WithFields(log.Fields{
+		"path": path,
 	})
 
-	defer utils.StackTraceFromPanic(logger)
+	defer util.StackTraceFromPanic(logger)
 
-	return client.fs.ExistsDir(path)
+	return c.fs.ExistsDir(path)
 }
 
 // ExistsFile checks existance of a file
-func (client *IRODSFSClientDirect) ExistsFile(path string) bool {
-	if client.fs == nil {
-		return false
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "ExistsFile",
+func (c *IRODSFSClientDirect) ExistsFile(path string) bool {
+	logger := c.logger.WithFields(log.Fields{
+		"path": path,
 	})
 
-	defer utils.StackTraceFromPanic(logger)
+	defer util.StackTraceFromPanic(logger)
 
-	return client.fs.ExistsFile(path)
-}
-
-// ListUserGroups lists user groups
-func (client *IRODSFSClientDirect) ListUserGroups(zoneName string, username string) ([]*irodsclient_types.IRODSUser, error) {
-	if client.fs == nil {
-		return nil, errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "ListUserGroups",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	groups, err := client.fs.ListUserGroups(zoneName, username)
-	if err != nil {
-		return nil, err
-	}
-	return groups, nil
-}
-
-// ListDirACLs lists directory ACLs
-func (client *IRODSFSClientDirect) ListDirACLs(path string) ([]*irodsclient_types.IRODSAccess, error) {
-	if client.fs == nil {
-		return nil, errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "ListDirACLs",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	accesses, err := client.fs.ListDirACLs(path)
-	if err != nil {
-		return nil, err
-	}
-	return accesses, nil
-}
-
-// ListFileACLs lists file ACLs
-func (client *IRODSFSClientDirect) ListFileACLs(path string) ([]*irodsclient_types.IRODSAccess, error) {
-	if client.fs == nil {
-		return nil, errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "ListFileACLs",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	accesses, err := client.fs.ListFileACLs(path)
-	if err != nil {
-		return nil, err
-	}
-	return accesses, nil
-}
-
-// ListACLsForEntries lists ACLs for entries in a collection
-func (client *IRODSFSClientDirect) ListACLsForEntries(path string) ([]*irodsclient_types.IRODSAccess, error) {
-	if client.fs == nil {
-		return nil, errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "ListACLsForEntries",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	accesses, err := client.fs.ListACLsForEntries(path)
-	if err != nil {
-		return nil, err
-	}
-	return accesses, nil
+	return c.fs.ExistsFile(path)
 }
 
 // RemoveFile removes a file
-func (client *IRODSFSClientDirect) RemoveFile(path string, force bool) error {
-	if client.fs == nil {
-		return errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "RemoveFile",
+func (c *IRODSFSClientDirect) RemoveFile(path string, force bool) error {
+	logger := c.logger.WithFields(log.Fields{
+		"path":  path,
+		"force": force,
 	})
 
-	defer utils.StackTraceFromPanic(logger)
+	defer util.StackTraceFromPanic(logger)
 
-	err := client.fs.RemoveFile(path, force)
+	err := c.fs.RemoveFile(path, force)
 	if err != nil {
 		return err
 	}
@@ -362,20 +143,16 @@ func (client *IRODSFSClientDirect) RemoveFile(path string, force bool) error {
 }
 
 // RemoveDir removes a directory
-func (client *IRODSFSClientDirect) RemoveDir(path string, recurse bool, force bool) error {
-	if client.fs == nil {
-		return errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "RemoveDir",
+func (c *IRODSFSClientDirect) RemoveDir(path string, recurse bool, force bool) error {
+	logger := c.logger.WithFields(log.Fields{
+		"path":    path,
+		"recurse": recurse,
+		"force":   force,
 	})
 
-	defer utils.StackTraceFromPanic(logger)
+	defer util.StackTraceFromPanic(logger)
 
-	err := client.fs.RemoveDir(path, recurse, force)
+	err := c.fs.RemoveDir(path, recurse, force)
 	if err != nil {
 		return err
 	}
@@ -383,20 +160,15 @@ func (client *IRODSFSClientDirect) RemoveDir(path string, recurse bool, force bo
 }
 
 // MakeDir makes a new directory
-func (client *IRODSFSClientDirect) MakeDir(path string, recurse bool) error {
-	if client.fs == nil {
-		return errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "MakeDir",
+func (c *IRODSFSClientDirect) MakeDir(path string, recurse bool) error {
+	logger := c.logger.WithFields(log.Fields{
+		"path":    path,
+		"recurse": recurse,
 	})
 
-	defer utils.StackTraceFromPanic(logger)
+	defer util.StackTraceFromPanic(logger)
 
-	err := client.fs.MakeDir(path, recurse)
+	err := c.fs.MakeDir(path, recurse)
 	if err != nil {
 		return err
 	}
@@ -404,20 +176,15 @@ func (client *IRODSFSClientDirect) MakeDir(path string, recurse bool) error {
 }
 
 // RenameDirToDir renames a directory, dest path is also a non-existing path for dir
-func (client *IRODSFSClientDirect) RenameDirToDir(srcPath string, destPath string) error {
-	if client.fs == nil {
-		return errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "RenameDirToDir",
+func (c *IRODSFSClientDirect) RenameDirToDir(srcPath string, destPath string) error {
+	logger := c.logger.WithFields(log.Fields{
+		"srcPath":  srcPath,
+		"destPath": destPath,
 	})
 
-	defer utils.StackTraceFromPanic(logger)
+	defer util.StackTraceFromPanic(logger)
 
-	err := client.fs.RenameDirToDir(srcPath, destPath)
+	err := c.fs.RenameDirToDir(srcPath, destPath)
 	if err != nil {
 		return err
 	}
@@ -425,20 +192,15 @@ func (client *IRODSFSClientDirect) RenameDirToDir(srcPath string, destPath strin
 }
 
 // RenameFileToFile renames a file, dest path is also a non-existing path for file
-func (client *IRODSFSClientDirect) RenameFileToFile(srcPath string, destPath string) error {
-	if client.fs == nil {
-		return errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "RenameFileToFile",
+func (c *IRODSFSClientDirect) RenameFileToFile(srcPath string, destPath string) error {
+	logger := c.logger.WithFields(log.Fields{
+		"srcPath":  srcPath,
+		"destPath": destPath,
 	})
 
-	defer utils.StackTraceFromPanic(logger)
+	defer util.StackTraceFromPanic(logger)
 
-	err := client.fs.RenameFileToFile(srcPath, destPath)
+	err := c.fs.RenameFileToFile(srcPath, destPath)
 	if err != nil {
 		return err
 	}
@@ -446,234 +208,209 @@ func (client *IRODSFSClientDirect) RenameFileToFile(srcPath string, destPath str
 }
 
 // CreateFile creates a file
-func (client *IRODSFSClientDirect) CreateFile(path string, resource string, mode string) (IRODSFSFileHandle, error) {
-	if client.fs == nil {
-		return nil, errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "CreateFile",
+func (c *IRODSFSClientDirect) CreateFile(path string, mode string) (IRODSFSFileHandle, error) {
+	logger := c.logger.WithFields(log.Fields{
+		"path": path,
+		"mode": mode,
 	})
 
-	defer utils.StackTraceFromPanic(logger)
+	defer util.StackTraceFromPanic(logger)
 
-	handle, err := client.fs.CreateFile(path, resource, mode)
+	handle, err := c.fs.CreateFile(path, "", mode)
 	if err != nil {
 		return nil, err
 	}
 
+	handleID := xid.New().String()
+	handleLogger := logger.WithFields(log.Fields{
+		"handle_id": handleID,
+	})
+
 	fileHandle := &IRODSFSClientDirectFileHandle{
+		id:     handleID,
+		client: c,
 		handle: handle,
+		logger: handleLogger,
 	}
 
 	return fileHandle, nil
 }
 
 // OpenFile opens a file
-func (client *IRODSFSClientDirect) OpenFile(path string, resource string, mode string) (IRODSFSFileHandle, error) {
-	if client.fs == nil {
-		return nil, errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "OpenFile",
+func (c *IRODSFSClientDirect) OpenFile(path string, mode string) (IRODSFSFileHandle, error) {
+	logger := c.logger.WithFields(log.Fields{
+		"path": path,
+		"mode": mode,
 	})
 
-	defer utils.StackTraceFromPanic(logger)
+	defer util.StackTraceFromPanic(logger)
 
-	handle, err := client.fs.OpenFile(path, resource, mode)
+	handle, err := c.fs.OpenFile(path, "", mode)
 	if err != nil {
 		return nil, err
 	}
 
+	handleID := xid.New().String()
+	handleLogger := logger.WithFields(log.Fields{
+		"handle_id": handleID,
+	})
+
 	fileHandle := &IRODSFSClientDirectFileHandle{
+		id:     handleID,
+		client: c,
 		handle: handle,
+		logger: handleLogger,
 	}
 
 	return fileHandle, nil
 }
 
 // TruncateFile truncates a file
-func (client *IRODSFSClientDirect) TruncateFile(path string, size int64) error {
-	if client.fs == nil {
-		return errors.New("FSClient is nil")
-	}
-
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirect",
-		"function": "TruncateFile",
+func (c *IRODSFSClientDirect) TruncateFile(path string, size int64) error {
+	logger := c.logger.WithFields(log.Fields{
+		"path": path,
+		"size": size,
 	})
 
-	defer utils.StackTraceFromPanic(logger)
+	defer util.StackTraceFromPanic(logger)
 
-	err := client.fs.TruncateFile(path, size)
+	err := c.fs.TruncateFile(path, size)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
+// CacheFile is a no-op for direct client
+func (c *IRODSFSClientDirect) CacheFile(irodsPath string) error {
+	return nil
+}
+
+// DownloadFile downloads a file from iRODS to local filesystem
+func (c *IRODSFSClientDirect) DownloadFile(irodsPath string, localPath string) error {
+	logger := c.logger.WithFields(log.Fields{
+		"irodsPath": irodsPath,
+		"localPath": localPath,
+	})
+
+	defer util.StackTraceFromPanic(logger)
+
+	_, err := c.fs.DownloadFile(irodsPath, "", localPath, false, nil)
+	return err
+}
+
+// DownloadFileParallel downloads a file from iRODS to local filesystem in parallel
+func (c *IRODSFSClientDirect) DownloadFileParallel(irodsPath string, localPath string, taskNum int) error {
+	logger := c.logger.WithFields(log.Fields{
+		"irodsPath": irodsPath,
+		"localPath": localPath,
+		"taskNum":   taskNum,
+	})
+
+	defer util.StackTraceFromPanic(logger)
+
+	_, err := c.fs.DownloadFileParallel(irodsPath, "", localPath, taskNum, false, nil)
+	return err
+}
+
+// UploadFile uploads a file from local filesystem to iRODS
+func (c *IRODSFSClientDirect) UploadFile(localPath string, irodsPath string) error {
+	logger := c.logger.WithFields(log.Fields{
+		"localPath": localPath,
+		"irodsPath": irodsPath,
+	})
+
+	defer util.StackTraceFromPanic(logger)
+
+	_, err := c.fs.UploadFile(localPath, irodsPath, "", false, false, nil)
+	return err
+}
+
+// UploadFileParallel uploads a file from local filesystem to iRODS in parallel
+func (c *IRODSFSClientDirect) UploadFileParallel(localPath string, irodsPath string, taskNum int) error {
+	logger := c.logger.WithFields(log.Fields{
+		"localPath": localPath,
+		"irodsPath": irodsPath,
+		"taskNum":   taskNum,
+	})
+
+	defer util.StackTraceFromPanic(logger)
+
+	_, err := c.fs.UploadFileParallel(localPath, irodsPath, "", taskNum, false, false, nil)
+	return err
+}
+
 // IRODSFSClientDirectFileHandle implements IRODSFSFileHandle
 type IRODSFSClientDirectFileHandle struct {
+	id     string
+	client *IRODSFSClientDirect
 	handle *irodsclient_fs.FileHandle
+	logger *log.Entry
 }
 
-func (handle *IRODSFSClientDirectFileHandle) GetID() string {
-	return handle.handle.GetID()
+func (h *IRODSFSClientDirectFileHandle) GetID() string {
+	return h.handle.GetID()
 }
 
-func (handle *IRODSFSClientDirectFileHandle) GetEntry() *irodsclient_fs.Entry {
-	return handle.handle.GetEntry()
+func (h *IRODSFSClientDirectFileHandle) GetEntry() *irodsclient_fs.Entry {
+	return h.handle.GetEntry()
 }
 
-func (handle *IRODSFSClientDirectFileHandle) GetOpenMode() irodsclient_types.FileOpenMode {
-	return handle.handle.GetOpenMode()
+func (h *IRODSFSClientDirectFileHandle) GetOpenMode() irodsclient_types.FileOpenMode {
+	return h.handle.GetOpenMode()
 }
 
-func (handle *IRODSFSClientDirectFileHandle) GetOffset() int64 {
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirectFileHandle",
-		"function": "GetOffset",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	return handle.handle.GetOffset()
+func (h *IRODSFSClientDirectFileHandle) IsReadMode() bool {
+	return h.handle.IsReadMode()
 }
 
-func (handle *IRODSFSClientDirectFileHandle) IsReadMode() bool {
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirectFileHandle",
-		"function": "IsReadMode",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	return handle.handle.IsReadMode()
+func (h *IRODSFSClientDirectFileHandle) IsWriteMode() bool {
+	return h.handle.IsWriteMode()
 }
 
-func (handle *IRODSFSClientDirectFileHandle) IsWriteMode() bool {
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirectFileHandle",
-		"function": "IsWriteMode",
-	})
+func (h *IRODSFSClientDirectFileHandle) ReadAt(buffer []byte, offset int64) (int, error) {
+	defer util.StackTraceFromPanic(h.logger)
 
-	defer utils.StackTraceFromPanic(logger)
-
-	return handle.handle.IsWriteMode()
-}
-
-func (handle *IRODSFSClientDirectFileHandle) ReadAt(buffer []byte, offset int64) (int, error) {
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirectFileHandle",
-		"function": "ReadAt",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	readLen, err := handle.handle.ReadAt(buffer, offset)
+	readLen, err := h.handle.ReadAt(buffer, offset)
 	if err != nil && err != io.EOF {
 		return readLen, err
 	}
 	return readLen, err
 }
 
-func (handle *IRODSFSClientDirectFileHandle) GetAvailable(offset int64) int64 {
+func (h *IRODSFSClientDirectFileHandle) GetAvailable(offset int64) int64 {
 	// unknown
 	return -1
 }
 
-func (handle *IRODSFSClientDirectFileHandle) WriteAt(data []byte, offset int64) (int, error) {
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirectFileHandle",
-		"function": "WriteAt",
-	})
+func (h *IRODSFSClientDirectFileHandle) WriteAt(data []byte, offset int64) (int, error) {
+	defer util.StackTraceFromPanic(h.logger)
 
-	defer utils.StackTraceFromPanic(logger)
-
-	writeLen, err := handle.handle.WriteAt(data, offset)
+	writeLen, err := h.handle.WriteAt(data, offset)
 	if err != nil {
 		return writeLen, err
 	}
 	return writeLen, nil
 }
 
-func (handle *IRODSFSClientDirectFileHandle) Lock(wait bool) error {
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirectFileHandle",
-		"function": "Truncate",
-	})
+func (h *IRODSFSClientDirectFileHandle) Truncate(size int64) error {
+	defer util.StackTraceFromPanic(h.logger)
 
-	defer utils.StackTraceFromPanic(logger)
-
-	return handle.handle.LockDataObject(wait)
-}
-
-func (handle *IRODSFSClientDirectFileHandle) RLock(wait bool) error {
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirectFileHandle",
-		"function": "Truncate",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	return handle.handle.RLockDataObject(wait)
-}
-
-func (handle *IRODSFSClientDirectFileHandle) Unlock() error {
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirectFileHandle",
-		"function": "Truncate",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	return handle.handle.UnlockDataObject()
-}
-
-func (handle *IRODSFSClientDirectFileHandle) Truncate(size int64) error {
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirectFileHandle",
-		"function": "Truncate",
-	})
-
-	defer utils.StackTraceFromPanic(logger)
-
-	err := handle.handle.Truncate(size)
+	err := h.handle.Truncate(size)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func (handle *IRODSFSClientDirectFileHandle) Flush() error {
+func (h *IRODSFSClientDirectFileHandle) Flush() error {
 	return nil
 }
 
-func (handle *IRODSFSClientDirectFileHandle) Close() error {
-	logger := log.WithFields(log.Fields{
-		"package":  "irods",
-		"struct":   "IRODSFSClientDirectFileHandle",
-		"function": "Close",
-	})
+func (h *IRODSFSClientDirectFileHandle) Close() error {
+	defer util.StackTraceFromPanic(h.logger)
 
-	defer utils.StackTraceFromPanic(logger)
-
-	err := handle.handle.Close()
+	err := h.handle.Close()
 	if err != nil {
 		return err
 	}
