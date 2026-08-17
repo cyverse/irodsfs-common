@@ -9,8 +9,8 @@ import (
 	"github.com/cockroachdb/errors"
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
+	irodsclient_util "github.com/cyverse/go-irodsclient/irods/util"
 	"github.com/cyverse/irodsfs-common/irods"
-	"github.com/cyverse/irodsfs-common/utils"
 )
 
 // VPathEntryType determins if the vpath entry is an actual iRODS entry (irods) or a virtual directory entry (virtual).
@@ -114,7 +114,7 @@ func (entry *VPathEntry) GetIRODSPath(vpath string) (string, error) {
 		return "", err
 	}
 
-	relPath, err := utils.GetRelativePath(entry.Path, vpath)
+	relPath, err := irodsclient_util.GetIRODSRelativePath(entry.Path, vpath)
 	if err != nil {
 		return "", errors.Wrapf(err, "failed to compute relative path from %q to %q", entry.Path, vpath)
 	}

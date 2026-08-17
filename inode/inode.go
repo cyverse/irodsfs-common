@@ -1,54 +1,67 @@
 package inode
 
-import "sync"
+import (
+	"math"
+	"sync"
+
+	"github.com/cockroachdb/errors"
+)
 
 const (
-	vpathEntryIDStart   = uint64(9000000000000000000)
-	overlayEntryIDStart = uint64(9000100000000000000)
-	irodsEntryIDStart   = uint64(1000000000000000000)
+	// InodeIDInvalid represents an invalid inode ID (inode 0 is never valid in FUSE)
+	InodeIDInvalid = uint64(0)
+	// InodeIDRoot represents the root inode (inode 1 is reserved for the root directory in FUSE)
+	InodeIDRoot = uint64(1)
 
-	// ID range limits for safety checks
-	overlayEntryIDEnd = uint64(18446744073709551615) // Max uint64
+	irodsEntryIDStart   = uint64(1000000000000000000)
+	virtualEntryIDStart = uint64(7000000000000000000)
+
+	// Capped at max int64 to ensure safe uint64 -> int64 conversion
+	virtualEntryIDEnd = uint64(math.MaxInt64)
 )
 
 // InodeManager is a struct that manages inode.
 type InodeManager struct {
-	currentVPathEntryIDInc   uint64
-	currentOverlayEntryIDInc uint64
-	vpathEntryIDMap          map[string]uint64
-	overlayEntryIDMap        map[string]uint64
+	currentVirtualEntryIDInc uint64
+	virtualEntryIDMap        map[string]uint64
+	reverseVirtualEntryIDMap map[uint64]string
 	mutex                    sync.RWMutex
 }
 
 // NewInodeManager creates a new InodeManager
 func NewInodeManager() *InodeManager {
 	return &InodeManager{
-		currentVPathEntryIDInc:   0,
-		currentOverlayEntryIDInc: 0,
-		vpathEntryIDMap:          map[string]uint64{},
-		overlayEntryIDMap:        map[string]uint64{},
+		currentVirtualEntryIDInc: 0,
+		virtualEntryIDMap:        map[string]uint64{},
+		reverseVirtualEntryIDMap: map[uint64]string{},
 		mutex:                    sync.RWMutex{},
 	}
 }
 
-// GetInodeIDForIRODSEntryID returns inode id for iRODS entry id
-func (manager *InodeManager) GetInodeIDForIRODSEntryID(entryID int64) uint64 {
-	return irodsEntryIDStart + uint64(entryID)
+// GetInodeIDForIRODSEntryID returns inode ID for iRODS entry ID
+func (manager *InodeManager) GetInodeIDForIRODSEntryID(entryID uint64) (uint64, error) {
+	id := irodsEntryIDStart + entryID
+	if id < irodsEntryIDStart || id >= virtualEntryIDStart {
+		return 0, errors.Newf("iRODS inode ID overflow: entryID %d exceeds available range", entryID)
+	}
+	return id, nil
 }
 
-// GetInodeIDForVPathEntryID returns inode id for vpath entry id
-func (manager *InodeManager) GetInodeIDForVPathEntryID(entryID uint64) uint64 {
-	// the same
-	return entryID
+// GetIRODSEntryIDForInodeID returns the original iRODS entry ID from an inode ID
+func GetIRODSEntryIDForInodeID(inodeID uint64) (uint64, bool) {
+	if !IsIRODSEntryID(inodeID) {
+		return 0, false
+	}
+	return inodeID - irodsEntryIDStart, true
 }
 
-// GetInodeIDForVPathEntry returns inode id for vpath entry path
-func (manager *InodeManager) GetInodeIDForVPathEntry(vpath string) uint64 {
+// GetInodeIDForVirtualEntry returns inode id for a virtual entry (vpath or locally buffered).
+func (manager *InodeManager) GetInodeIDForVirtualEntry(path string) (uint64, error) {
 	// First try with read lock
 	manager.mutex.RLock()
-	if id, ok := manager.vpathEntryIDMap[vpath]; ok {
+	if id, ok := manager.virtualEntryIDMap[path]; ok {
 		manager.mutex.RUnlock()
-		return id
+		return id, nil
 	}
 	manager.mutex.RUnlock()
 
@@ -57,54 +70,53 @@ func (manager *InodeManager) GetInodeIDForVPathEntry(vpath string) uint64 {
 	defer manager.mutex.Unlock()
 
 	// Double-check after acquiring write lock (another goroutine might have created it)
-	if id, ok := manager.vpathEntryIDMap[vpath]; ok {
-		return id
+	if id, ok := manager.virtualEntryIDMap[path]; ok {
+		return id, nil
 	}
 
 	// Create a new and save for reuse
-	id := vpathEntryIDStart + manager.currentVPathEntryIDInc
-	manager.currentVPathEntryIDInc++
-	manager.vpathEntryIDMap[vpath] = id
-	return id
+	id := virtualEntryIDStart + manager.currentVirtualEntryIDInc
+	if id < virtualEntryIDStart || id > virtualEntryIDEnd {
+		return 0, errors.Newf("virtual inode ID overflow: no more IDs available for path %q", path)
+	}
+	manager.currentVirtualEntryIDInc++
+	manager.virtualEntryIDMap[path] = id
+	manager.reverseVirtualEntryIDMap[id] = path
+	return id, nil
 }
 
-// GetInodeIDForOverlayEntry returns inode id for overlay entry path
-func (manager *InodeManager) GetInodeIDForOverlayEntry(irodsPath string) uint64 {
-	// First try with read lock
+// GetPathForVirtualEntryID returns the path for a given virtual inode ID.
+func (manager *InodeManager) GetPathForVirtualEntryID(inodeID uint64) (string, bool) {
 	manager.mutex.RLock()
-	if id, ok := manager.overlayEntryIDMap[irodsPath]; ok {
-		manager.mutex.RUnlock()
-		return id
-	}
-	manager.mutex.RUnlock()
+	defer manager.mutex.RUnlock()
+	path, ok := manager.reverseVirtualEntryIDMap[inodeID]
+	return path, ok
+}
 
-	// Need to create new entry, use write lock
+// RemoveVirtualEntry removes a virtual entry from the map after it receives an iRODS ID.
+func (manager *InodeManager) RemoveVirtualEntry(path string) {
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()
-
-	// Double-check after acquiring write lock (another goroutine might have created it)
-	if id, ok := manager.overlayEntryIDMap[irodsPath]; ok {
-		return id
+	if id, ok := manager.virtualEntryIDMap[path]; ok {
+		delete(manager.reverseVirtualEntryIDMap, id)
+		delete(manager.virtualEntryIDMap, path)
 	}
-
-	// Create a new and save for reuse
-	id := overlayEntryIDStart + manager.currentOverlayEntryIDInc
-	manager.currentOverlayEntryIDInc++
-	manager.overlayEntryIDMap[irodsPath] = id
-	return id
 }
 
-// IsVPathEntryID checks if the given inode ID belongs to vpath entries
-func IsVPathEntryID(inodeID uint64) bool {
-	return inodeID >= vpathEntryIDStart && inodeID < overlayEntryIDStart
+// IsValidInodeID checks if the given inode ID falls within a known range
+func IsValidInodeID(inodeID uint64) bool {
+	if inodeID == InodeIDRoot {
+		return true
+	}
+	return IsIRODSEntryID(inodeID) || IsVirtualEntryID(inodeID)
 }
 
-// IsOverlayEntryID checks if the given inode ID belongs to overlay entries
-func IsOverlayEntryID(inodeID uint64) bool {
-	return inodeID >= overlayEntryIDStart && inodeID <= overlayEntryIDEnd
+// IsVirtualEntryID checks if the given inode ID belongs to virtual entries
+func IsVirtualEntryID(inodeID uint64) bool {
+	return inodeID >= virtualEntryIDStart && inodeID <= virtualEntryIDEnd
 }
 
 // IsIRODSEntryID checks if the given inode ID belongs to iRODS entries
 func IsIRODSEntryID(inodeID uint64) bool {
-	return inodeID >= irodsEntryIDStart && inodeID < vpathEntryIDStart
+	return inodeID >= irodsEntryIDStart && inodeID < virtualEntryIDStart
 }

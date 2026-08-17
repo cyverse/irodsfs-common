@@ -1,9 +1,16 @@
 package irods
 
 import (
+	"github.com/cockroachdb/errors"
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
 	irodsclient_metrics "github.com/cyverse/go-irodsclient/irods/metrics"
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
+)
+
+var (
+	ErrNotReadMode  = errors.New("file is not opened in read mode")
+	ErrNotWriteMode = errors.New("file is not opened in write mode")
+	ErrFileStaging  = errors.New("file is in staging state and not yet synced to iRODS")
 )
 
 type IRODSFSClient interface {
@@ -18,39 +25,36 @@ type IRODSFSClient interface {
 	// API
 	List(path string) ([]*irodsclient_fs.Entry, error)
 	Stat(path string) (*irodsclient_fs.Entry, error)
-	ListXattr(path string) ([]*irodsclient_types.IRODSMeta, error)
-	GetXattr(path string, name string) (*irodsclient_types.IRODSMeta, error)
-	SetXattr(path string, name string, value string) error
-	RemoveXattr(path string, name string) error
 	ExistsDir(path string) bool
 	ExistsFile(path string) bool
-	ListUserGroups(zoneName string, username string) ([]*irodsclient_types.IRODSUser, error)
-	ListDirACLs(path string) ([]*irodsclient_types.IRODSAccess, error)
-	ListFileACLs(path string) ([]*irodsclient_types.IRODSAccess, error)
-	ListACLsForEntries(path string) ([]*irodsclient_types.IRODSAccess, error)
 	RemoveFile(path string, force bool) error
 	RemoveDir(path string, recurse bool, force bool) error
 	MakeDir(path string, recurse bool) error
 	RenameDirToDir(srcPath string, destPath string) error
 	RenameFileToFile(srcPath string, destPath string) error
-	CreateFile(path string, resource string, mode string) (IRODSFSFileHandle, error)
-	OpenFile(path string, resource string, mode string) (IRODSFSFileHandle, error)
+	CreateFile(path string, mode string) (IRODSFSFileHandle, error)
+	OpenFile(path string, mode string) (IRODSFSFileHandle, error)
 	TruncateFile(path string, size int64) error
+
+	// File Transfer
+	DownloadFile(irodsPath string, localPath string) error
+	DownloadFileParallel(irodsPath string, localPath string, taskNum int) error
+	UploadFile(localPath string, irodsPath string) error
+	UploadFileParallel(localPath string, irodsPath string, taskNum int) error
+
+	// Cache
+	CacheFile(irodsPath string) error
 }
 
 type IRODSFSFileHandle interface {
 	GetID() string
 	GetEntry() *irodsclient_fs.Entry
 	GetOpenMode() irodsclient_types.FileOpenMode
-	GetOffset() int64
 	IsReadMode() bool
 	IsWriteMode() bool
 	ReadAt(buffer []byte, offset int64) (int, error)
 	GetAvailable(offset int64) int64
 	WriteAt(data []byte, offset int64) (int, error)
-	Lock(wait bool) error
-	RLock(wait bool) error
-	Unlock() error
 	Truncate(size int64) error
 	Flush() error
 	Close() error
