@@ -463,13 +463,11 @@ func (c *IRODSFSClientBuffered) CreateFile(path string, mode string) (IRODSFSFil
 		return nil, err
 	}
 
-	handleID := xid.New().String()
 	handleLogger := logger.WithFields(log.Fields{
-		"handle_id": handleID,
+		"handle_id": handle.GetID(),
 	})
 
 	return &IRODSFSClientBufferedFileHandle{
-		id:        handleID,
 		client:    c,
 		handle:    handle,
 		cache:     c.cache,
@@ -535,13 +533,11 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 		return nil, err
 	}
 
-	handleID := xid.New().String()
 	handleLogger := logger.WithFields(log.Fields{
-		"handle_id": handleID,
+		"handle_id": handle.GetID(),
 	})
 
 	return &IRODSFSClientBufferedFileHandle{
-		id:        handleID,
 		client:    c,
 		handle:    handle,
 		cache:     c.cache,
@@ -733,7 +729,6 @@ func (c *IRODSFSClientBuffered) invalidateFileCacheBlocks(irodsPath string) erro
 
 // IRODSFSClientBufferedFileHandle wraps IRODSFSFileHandle with block-level caching
 type IRODSFSClientBufferedFileHandle struct {
-	id        string
 	client    *IRODSFSClientBuffered
 	handle    IRODSFSFileHandle
 	cache     *cache.MemoryCacheManager

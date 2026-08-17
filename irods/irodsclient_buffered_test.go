@@ -10,9 +10,9 @@ import (
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 	"github.com/cyverse/irodsfs-common/irods/cache"
 	"github.com/cyverse/irodsfs-common/util"
+	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	log "github.com/sirupsen/logrus"
 )
 
 // mockFileHandle implements IRODSFSFileHandle for testing
@@ -39,14 +39,14 @@ func newMockFileHandle(path string, data []byte, mode irodsclient_types.FileOpen
 	}
 }
 
-func (h *mockFileHandle) GetID() string                                    { return h.id }
-func (h *mockFileHandle) GetEntry() *irodsclient_fs.Entry                  { return h.entry }
-func (h *mockFileHandle) GetOpenMode() irodsclient_types.FileOpenMode      { return h.openMode }
-func (h *mockFileHandle) IsReadMode() bool                                 { return h.openMode.IsRead() }
-func (h *mockFileHandle) IsWriteMode() bool                                { return h.openMode.IsWrite() }
-func (h *mockFileHandle) GetAvailable(offset int64) int64                  { return int64(len(h.data)) - offset }
-func (h *mockFileHandle) Flush() error                                     { return nil }
-func (h *mockFileHandle) Close() error                                     { return nil }
+func (h *mockFileHandle) GetID() string                               { return h.id }
+func (h *mockFileHandle) GetEntry() *irodsclient_fs.Entry             { return h.entry }
+func (h *mockFileHandle) GetOpenMode() irodsclient_types.FileOpenMode { return h.openMode }
+func (h *mockFileHandle) IsReadMode() bool                            { return h.openMode.IsRead() }
+func (h *mockFileHandle) IsWriteMode() bool                           { return h.openMode.IsWrite() }
+func (h *mockFileHandle) GetAvailable(offset int64) int64             { return int64(len(h.data)) - offset }
+func (h *mockFileHandle) Flush() error                                { return nil }
+func (h *mockFileHandle) Close() error                                { return nil }
 func (h *mockFileHandle) Truncate(size int64) error {
 	if size < int64(len(h.data)) {
 		h.data = h.data[:size]
@@ -109,7 +109,6 @@ func TestBufferedFileHandleReadAtCacheHit(t *testing.T) {
 	mock := newMockFileHandle("/test/file.dat", data, irodsclient_types.FileOpenModeReadOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		id:        "test-handle",
 		client:    &IRODSFSClientBuffered{logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
@@ -142,7 +141,6 @@ func TestBufferedFileHandleReadAtCrossBock(t *testing.T) {
 	mock := newMockFileHandle("/test/cross.dat", data, irodsclient_types.FileOpenModeReadOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		id:        "test-handle",
 		client:    &IRODSFSClientBuffered{logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
@@ -169,7 +167,6 @@ func TestBufferedFileHandleReadAtPartialLastBlock(t *testing.T) {
 	mock := newMockFileHandle("/test/partial.dat", data, irodsclient_types.FileOpenModeReadOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		id:        "test-handle",
 		client:    &IRODSFSClientBuffered{logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
@@ -196,7 +193,6 @@ func TestBufferedFileHandleReadAtBeyondEOF(t *testing.T) {
 	mock := newMockFileHandle("/test/short.dat", data, irodsclient_types.FileOpenModeReadOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		id:        "test-handle",
 		client:    &IRODSFSClientBuffered{logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
@@ -222,7 +218,6 @@ func TestBufferedFileHandleReadAtClampToFileSize(t *testing.T) {
 	mock := newMockFileHandle("/test/clamp.dat", data, irodsclient_types.FileOpenModeReadOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		id:        "test-handle",
 		client:    &IRODSFSClientBuffered{logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
@@ -249,7 +244,6 @@ func TestBufferedFileHandleWriteAtInvalidatesCache(t *testing.T) {
 	mock := newMockFileHandle("/test/write.dat", data, irodsclient_types.FileOpenModeReadWrite)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		id:        "test-handle",
 		client:    &IRODSFSClientBuffered{logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
@@ -287,7 +281,6 @@ func TestBufferedFileHandleTruncateInvalidatesCache(t *testing.T) {
 	mock := newMockFileHandle("/test/trunc.dat", data, irodsclient_types.FileOpenModeReadWrite)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		id:        "test-handle",
 		client:    &IRODSFSClientBuffered{logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
@@ -318,7 +311,6 @@ func TestBufferedFileHandleReadNotWriteMode(t *testing.T) {
 	mock := newMockFileHandle("/test/wo.dat", data, irodsclient_types.FileOpenModeWriteOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		id:        "test-handle",
 		client:    &IRODSFSClientBuffered{logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
