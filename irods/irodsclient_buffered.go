@@ -150,6 +150,10 @@ func (c *IRODSFSClientBuffered) GetFSClient() *irodsclient_fs.FileSystem {
 	return c.client.fs
 }
 
+func (c *IRODSFSClientBuffered) GetStagingFS() *stagingfs.StagingFS {
+	return c.staging
+}
+
 func (c *IRODSFSClientBuffered) GetOpenConnections() int {
 	return c.client.GetOpenConnections()
 }

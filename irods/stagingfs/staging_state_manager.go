@@ -54,6 +54,7 @@ type StagingMetadata struct {
 	IsNew          bool       // Is this a new file?
 	CreatedAt      time.Time  // Creation time
 	LastModifiedAt time.Time  // Last modification time
+	SyncFailCount  int        // Number of consecutive sync failures
 }
 
 // StagingStateManager manages staging metadata for async uploads
@@ -703,7 +704,7 @@ func (sm *StagingStateManager) persistMetadata(path string, meta *StagingMetadat
 	})
 }
 
-// deleteMetadata removes metadata from memory and Badger
+// deleteMetadata removes metadata from memory and Badger (caller must hold mu)
 func (sm *StagingStateManager) deleteMetadata(path string) error {
 	delete(sm.metadata, path)
 
@@ -715,6 +716,13 @@ func (sm *StagingStateManager) deleteMetadata(path string) error {
 	return sm.db.Update(func(txn *badger.Txn) error {
 		return txn.Delete(key)
 	})
+}
+
+// deleteMetadataPublic removes metadata with locking (for external callers)
+func (sm *StagingStateManager) deleteMetadataPublic(path string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.deleteMetadata(path)
 }
 
 // RegisterActionHandler registers a handler for operations

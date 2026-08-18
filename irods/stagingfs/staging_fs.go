@@ -27,20 +27,30 @@ type SyncErrorHandler func(meta *StagingMetadata, err error)
 
 // StagingFSConfig holds configuration for StagingFS
 type StagingFSConfig struct {
-	LocalRootPath    string           // Local base directory for staging (e.g., /staging)
-	Client           StagingClient    // Backend storage client
-	SyncInterval     time.Duration    // How often the background worker runs (default: 5s)
-	GracePeriod      time.Duration    // Items older than this are synced (default: 10s)
-	OnSyncError      SyncErrorHandler // Called when background sync fails for an item (optional)
+	LocalRootPath string           // Local base directory for staging (e.g., /staging)
+	Client        StagingClient    // Backend storage client
+	SyncInterval  time.Duration    // How often the background worker runs (default: 5s)
+	GracePeriod   time.Duration    // Items older than this are synced (default: 10s)
+	MaxDataSize   int64            // Max total disk usage for staged data (default: 1GB, 0 = unlimited)
+	OnSyncError   SyncErrorHandler // Called when background sync fails for an item (optional)
 }
+
+const DefaultMaxDataSize = 10 * 1024 * 1024 * 1024 // 10GB
+
+const MaxSyncFailCount = 3
 
 // StagingFS manages local file staging and metadata tracking
 type StagingFS struct {
-	config   *StagingFSConfig
-	sm       *StagingStateManager
-	client   StagingClient
-	stopCh   chan struct{}
-	stopOnce sync.Once
+	config      *StagingFSConfig
+	sm          *StagingStateManager
+	client      StagingClient
+	stopCh      chan struct{}
+	stopOnce    sync.Once
+	sizeMutex   sync.Mutex
+	currentSize int64 // current total staged data size
+	maxSize     int64 // max allowed data size
+	failedMutex sync.Mutex
+	failedItems map[string]*StagingMetadata // items that exceeded max retry count
 }
 
 // NewStagingFS creates a new StagingFS with memory-only state manager
@@ -71,13 +81,22 @@ func NewStagingFS(config *StagingFSConfig) (*StagingFS, error) {
 
 	sm := NewStagingStateManager()
 
-	sf := &StagingFS{
-		config: config,
-		sm:     sm,
-		client: config.Client,
-		stopCh: make(chan struct{}),
+	maxSize := config.MaxDataSize
+	if maxSize == 0 {
+		maxSize = DefaultMaxDataSize
 	}
 
+	sf := &StagingFS{
+		config:      config,
+		sm:          sm,
+		client:      config.Client,
+		stopCh:      make(chan struct{}),
+		maxSize:     maxSize,
+		failedItems: make(map[string]*StagingMetadata),
+	}
+
+	sf.currentSize = sf.computeDataDirSize()
+	sf.cleanOrphanFiles()
 	sf.registerDefaultHandler()
 	sf.startBackgroundWorker()
 
@@ -123,13 +142,22 @@ func NewStagingFSWithPersistence(config *StagingFSConfig) (*StagingFS, error) {
 		return nil, errors.Wrap(err, "failed to restore from Badger")
 	}
 
-	sf := &StagingFS{
-		config: config,
-		sm:     sm,
-		client: config.Client,
-		stopCh: make(chan struct{}),
+	maxSize := config.MaxDataSize
+	if maxSize == 0 {
+		maxSize = DefaultMaxDataSize
 	}
 
+	sf := &StagingFS{
+		config:      config,
+		sm:          sm,
+		client:      config.Client,
+		stopCh:      make(chan struct{}),
+		maxSize:     maxSize,
+		failedItems: make(map[string]*StagingMetadata),
+	}
+
+	sf.currentSize = sf.computeDataDirSize()
+	sf.cleanOrphanFiles()
 	sf.registerDefaultHandler()
 	sf.startBackgroundWorker()
 
@@ -170,6 +198,10 @@ func (sf *StagingFS) Create(path string) error {
 
 // OpenForWrite opens a file for writing only
 func (sf *StagingFS) OpenForWrite(path string) (*os.File, error) {
+	if err := sf.checkQuota(0); err != nil {
+		return nil, err
+	}
+
 	localPath := sf.getLocalDataPath(path)
 
 	// Ensure parent directory exists
@@ -199,31 +231,6 @@ func (sf *StagingFS) OpenForWrite(path string) (*os.File, error) {
 	return f, nil
 }
 
-// OpenForRead opens a file for reading only (downloads from iRODS first)
-func (sf *StagingFS) OpenForRead(path string) (*os.File, error) {
-	localPath := sf.getLocalDataPath(path)
-
-	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
-		return nil, errors.Wrap(err, "failed to create parent directory")
-	}
-
-	// Download file from iRODS if not already present locally
-	if _, err := os.Stat(localPath); os.IsNotExist(err) {
-		// File doesn't exist locally, download from iRODS
-		if err := sf.client.DownloadFileParallel(path, localPath, 4); err != nil {
-			return nil, errors.Wrapf(err, "failed to download file from iRODS: %s", path)
-		}
-	}
-
-	f, err := os.OpenFile(localPath, os.O_RDONLY, 0644)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to open local file for reading")
-	}
-
-	return f, nil
-}
-
 // OpenForReadWrite opens a file for reading and writing (downloads from iRODS first)
 func (sf *StagingFS) OpenForReadWrite(path string) (*os.File, error) {
 	localPath := sf.getLocalDataPath(path)
@@ -235,9 +242,13 @@ func (sf *StagingFS) OpenForReadWrite(path string) (*os.File, error) {
 			return nil, errors.Wrap(err, "failed to create parent directory")
 		}
 
-		// File doesn't exist locally, download from iRODS
 		if err := sf.client.DownloadFileParallel(path, localPath, 4); err != nil {
 			return nil, errors.Wrapf(err, "failed to download file from iRODS: %s", path)
+		}
+
+		// Track downloaded file size
+		if info, err := os.Stat(localPath); err == nil {
+			sf.addDataSize(info.Size())
 		}
 	}
 
@@ -320,6 +331,12 @@ func (sf *StagingFS) Delete(path string) error {
 	}
 
 	localPath := sf.getLocalDataPath(path)
+
+	// Track size before removal
+	if info, err := os.Stat(localPath); err == nil {
+		sf.subtractDataSize(info.Size())
+	}
+
 	if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
 		return errors.Wrap(err, "failed to delete local file")
 	}
@@ -363,9 +380,6 @@ func (sf *StagingFS) Rmdir(path string) error {
 
 // SyncAll performs all pending operations
 func (sf *StagingFS) SyncAll() error {
-	// Handler will be invoked by StagingStateManager.SyncAll()
-	// Handlers should be registered before calling SyncAll()
-
 	if err := sf.sm.SyncAll(); err != nil {
 		return err
 	}
@@ -375,6 +389,10 @@ func (sf *StagingFS) SyncAll() error {
 	if err := os.RemoveAll(dataPath); err != nil {
 		return errors.Wrap(err, "failed to clean up data directory")
 	}
+
+	sf.sizeMutex.Lock()
+	sf.currentSize = 0
+	sf.sizeMutex.Unlock()
 
 	return os.MkdirAll(dataPath, 0755)
 }
@@ -515,15 +533,28 @@ func (sf *StagingFS) syncOldItems(gracePeriod time.Duration) {
 		}
 
 		if err := sf.sm.syncOne(meta); err != nil {
-			log.Warnf("background sync failed for %s (%s): %v", meta.Path, meta.Action, err)
+			meta.SyncFailCount++
+			log.Warnf("background sync failed for %s (%s), attempt %d: %v", meta.Path, meta.Action, meta.SyncFailCount, err)
+
 			if sf.config.OnSyncError != nil {
 				sf.config.OnSyncError(meta, err)
+			}
+
+			if meta.SyncFailCount >= MaxSyncFailCount {
+				sf.failedMutex.Lock()
+				sf.failedItems[meta.Path] = meta
+				sf.failedMutex.Unlock()
+
+				sf.sm.deleteMetadataPublic(meta.Path)
 			}
 			continue
 		}
 
 		// Clean up local file after successful sync
 		localPath := sf.getLocalDataPath(meta.Path)
+		if info, err := os.Stat(localPath); err == nil {
+			sf.subtractDataSize(info.Size())
+		}
 		os.Remove(localPath)
 	}
 }
@@ -565,6 +596,25 @@ func (sf *StagingFS) GetAll() map[string]*StagingMetadata {
 	return sf.sm.GetAll()
 }
 
+// GetFailedItems returns all items that exceeded the max retry count
+func (sf *StagingFS) GetFailedItems() map[string]*StagingMetadata {
+	sf.failedMutex.Lock()
+	defer sf.failedMutex.Unlock()
+
+	result := make(map[string]*StagingMetadata, len(sf.failedItems))
+	for k, v := range sf.failedItems {
+		result[k] = v
+	}
+	return result
+}
+
+// ClearFailedItems removes all failed items
+func (sf *StagingFS) ClearFailedItems() {
+	sf.failedMutex.Lock()
+	defer sf.failedMutex.Unlock()
+	sf.failedItems = make(map[string]*StagingMetadata)
+}
+
 // Clear clears all metadata and local files
 func (sf *StagingFS) Clear() error {
 	if err := sf.sm.Clear(); err != nil {
@@ -577,6 +627,102 @@ func (sf *StagingFS) Clear() error {
 		return errors.Wrap(err, "failed to remove data directory")
 	}
 
+	sf.sizeMutex.Lock()
+	sf.currentSize = 0
+	sf.sizeMutex.Unlock()
+
 	// Recreate data directory
 	return os.MkdirAll(dataPath, 0755)
+}
+
+// GetCurrentDataSize returns the current total staged data size
+func (sf *StagingFS) GetCurrentDataSize() int64 {
+	sf.sizeMutex.Lock()
+	defer sf.sizeMutex.Unlock()
+	return sf.currentSize
+}
+
+// GetMaxDataSize returns the configured max data size
+func (sf *StagingFS) GetMaxDataSize() int64 {
+	return sf.maxSize
+}
+
+// GetAvailableDataSize returns remaining disk quota
+func (sf *StagingFS) GetAvailableDataSize() int64 {
+	sf.sizeMutex.Lock()
+	defer sf.sizeMutex.Unlock()
+	return sf.maxSize - sf.currentSize
+}
+
+// checkQuota checks if adding size bytes would exceed the quota
+func (sf *StagingFS) checkQuota(size int64) error {
+	sf.sizeMutex.Lock()
+	defer sf.sizeMutex.Unlock()
+
+	if sf.currentSize+size > sf.maxSize {
+		return errors.Errorf("staging quota exceeded: current %d + requested %d > max %d",
+			sf.currentSize, size, sf.maxSize)
+	}
+	return nil
+}
+
+// addDataSize adds to the tracked data size
+func (sf *StagingFS) addDataSize(size int64) {
+	sf.sizeMutex.Lock()
+	defer sf.sizeMutex.Unlock()
+	sf.currentSize += size
+}
+
+// subtractDataSize subtracts from the tracked data size
+func (sf *StagingFS) subtractDataSize(size int64) {
+	sf.sizeMutex.Lock()
+	defer sf.sizeMutex.Unlock()
+	sf.currentSize -= size
+	if sf.currentSize < 0 {
+		sf.currentSize = 0
+	}
+}
+
+// computeDataDirSize walks the data directory and sums file sizes
+func (sf *StagingFS) computeDataDirSize() int64 {
+	dataPath := filepath.Join(sf.config.LocalRootPath, "data")
+	var total int64
+	filepath.Walk(dataPath, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}
+
+// cleanOrphanFiles removes data files that have no corresponding metadata entry.
+// These are leftover from incomplete downloads that crashed before metadata was written.
+func (sf *StagingFS) cleanOrphanFiles() {
+	dataPath := filepath.Join(sf.config.LocalRootPath, "data")
+	metadata := sf.sm.GetAll()
+
+	filepath.Walk(dataPath, func(filePath string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+
+		relPath, err := filepath.Rel(dataPath, filePath)
+		if err != nil {
+			return nil
+		}
+		irodsPath := "/" + relPath
+
+		if _, exists := metadata[irodsPath]; !exists {
+			size := info.Size()
+			if removeErr := os.Remove(filePath); removeErr == nil {
+				sf.subtractDataSize(size)
+			}
+		}
+
+		return nil
+	})
 }
