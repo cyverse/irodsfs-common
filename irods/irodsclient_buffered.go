@@ -9,6 +9,7 @@ import (
 
 	"github.com/cockroachdb/errors"
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
+	irodsclient_common "github.com/cyverse/go-irodsclient/irods/common"
 	irodsclient_metrics "github.com/cyverse/go-irodsclient/irods/metrics"
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 	"github.com/cyverse/irodsfs-common/irods/cache"
@@ -554,7 +555,7 @@ func (c *IRODSFSClientBuffered) TruncateFile(path string, size int64) error {
 }
 
 // CacheFile downloads a file from iRODS into the block cache without writing to local disk
-func (c *IRODSFSClientBuffered) CacheFile(irodsPath string) error {
+func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback irodsclient_common.TransferTrackerCallback) error {
 	logger := c.logger.WithFields(log.Fields{
 		"irodsPath": irodsPath,
 	})
@@ -572,12 +573,12 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string) error {
 		return nil
 	}
 
-	_, err := c.client.fs.DownloadFileParallelWithCallback(irodsPath, "", c.helper.GetBlockSize(), 3, blockReadyCallback, 4, nil)
+	_, err := c.client.fs.DownloadFileParallelWithCallback(irodsPath, "", c.helper.GetBlockSize(), 3, blockReadyCallback, 4, transferCallback)
 	return err
 }
 
 // DownloadFile downloads a file with block-level read-through caching
-func (c *IRODSFSClientBuffered) DownloadFile(irodsPath string, localPath string) error {
+func (c *IRODSFSClientBuffered) DownloadFile(irodsPath string, localPath string, transferCallback irodsclient_common.TransferTrackerCallback) error {
 	logger := c.logger.WithFields(log.Fields{
 		"irodsPath": irodsPath,
 		"localPath": localPath,
@@ -607,12 +608,12 @@ func (c *IRODSFSClientBuffered) DownloadFile(irodsPath string, localPath string)
 		return nil
 	}
 
-	_, err = c.client.fs.DownloadFileWithCallback(irodsPath, "", c.helper.GetBlockSize(), 3, blockReadyCallback, nil)
+	_, err = c.client.fs.DownloadFileWithCallback(irodsPath, "", c.helper.GetBlockSize(), 3, blockReadyCallback, transferCallback)
 	return err
 }
 
 // DownloadFileParallel downloads a file in parallel with block-level read-through caching
-func (c *IRODSFSClientBuffered) DownloadFileParallel(irodsPath string, localPath string, taskNum int) error {
+func (c *IRODSFSClientBuffered) DownloadFileParallel(irodsPath string, localPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error {
 	logger := c.logger.WithFields(log.Fields{
 		"irodsPath": irodsPath,
 		"localPath": localPath,
@@ -643,12 +644,12 @@ func (c *IRODSFSClientBuffered) DownloadFileParallel(irodsPath string, localPath
 		return nil
 	}
 
-	_, err = c.client.fs.DownloadFileParallelWithCallback(irodsPath, "", c.helper.GetBlockSize(), taskNum*3, blockReadyCallback, taskNum, nil)
+	_, err = c.client.fs.DownloadFileParallelWithCallback(irodsPath, "", c.helper.GetBlockSize(), taskNum*3, blockReadyCallback, taskNum, transferCallback)
 	return err
 }
 
 // UploadFile uploads a file and invalidates cache based on server file size
-func (c *IRODSFSClientBuffered) UploadFile(localPath string, irodsPath string) error {
+func (c *IRODSFSClientBuffered) UploadFile(localPath string, irodsPath string, transferCallback irodsclient_common.TransferTrackerCallback) error {
 	logger := c.logger.WithFields(log.Fields{
 		"localPath": localPath,
 		"irodsPath": irodsPath,
@@ -657,7 +658,7 @@ func (c *IRODSFSClientBuffered) UploadFile(localPath string, irodsPath string) e
 	defer util.StackTraceFromPanic(logger)
 
 	// Upload file
-	if err := c.client.UploadFile(localPath, irodsPath); err != nil {
+	if err := c.client.UploadFile(localPath, irodsPath, transferCallback); err != nil {
 		return err
 	}
 
@@ -670,7 +671,7 @@ func (c *IRODSFSClientBuffered) UploadFile(localPath string, irodsPath string) e
 }
 
 // UploadFileParallel uploads a file in parallel and invalidates cache based on server file size
-func (c *IRODSFSClientBuffered) UploadFileParallel(localPath string, irodsPath string, taskNum int) error {
+func (c *IRODSFSClientBuffered) UploadFileParallel(localPath string, irodsPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error {
 	logger := c.logger.WithFields(log.Fields{
 		"localPath": localPath,
 		"irodsPath": irodsPath,
@@ -680,7 +681,7 @@ func (c *IRODSFSClientBuffered) UploadFileParallel(localPath string, irodsPath s
 	defer util.StackTraceFromPanic(logger)
 
 	// Upload file in parallel
-	if err := c.client.UploadFileParallel(localPath, irodsPath, taskNum); err != nil {
+	if err := c.client.UploadFileParallel(localPath, irodsPath, taskNum, transferCallback); err != nil {
 		return err
 	}
 

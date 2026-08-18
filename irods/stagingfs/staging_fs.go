@@ -7,14 +7,15 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	irodsclient_common "github.com/cyverse/go-irodsclient/irods/common"
 	"github.com/dgraph-io/badger/v3"
 	log "github.com/sirupsen/logrus"
 )
 
 // StagingClient defines the minimal interface that StagingFS needs from the backend storage
 type StagingClient interface {
-	DownloadFileParallel(irodsPath string, localPath string, taskNum int) error
-	UploadFileParallel(localPath string, irodsPath string, taskNum int) error
+	DownloadFileParallel(irodsPath string, localPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error
+	UploadFileParallel(localPath string, irodsPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error
 	RenameFileToFile(srcPath string, destPath string) error
 	RenameDirToDir(srcPath string, destPath string) error
 	RemoveFile(path string, force bool) error
@@ -242,7 +243,7 @@ func (sf *StagingFS) OpenForReadWrite(path string) (*os.File, error) {
 			return nil, errors.Wrap(err, "failed to create parent directory")
 		}
 
-		if err := sf.client.DownloadFileParallel(path, localPath, 4); err != nil {
+		if err := sf.client.DownloadFileParallel(path, localPath, 4, nil); err != nil {
 			return nil, errors.Wrapf(err, "failed to download file from iRODS: %s", path)
 		}
 
@@ -433,7 +434,7 @@ func (sf *StagingFS) registerDefaultHandler() {
 			// Upload file to iRODS in parallel
 			localPath := sf.getLocalDataPath(meta.Path)
 
-			if err := sf.client.UploadFileParallel(localPath, meta.Path, 4); err != nil {
+			if err := sf.client.UploadFileParallel(localPath, meta.Path, 4, nil); err != nil {
 				return errors.Wrapf(err, "failed to upload file in iRODS: %s", meta.Path)
 			}
 

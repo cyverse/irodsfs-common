@@ -4,28 +4,30 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	irodsclient_common "github.com/cyverse/go-irodsclient/irods/common"
 )
 
 // MockStagingClient implements StagingClient for testing
 type MockStagingClient struct{}
 
-func (m *MockStagingClient) DownloadFileParallel(irodsPath string, localPath string, taskNum int) error {
+func (m *MockStagingClient) DownloadFileParallel(irodsPath string, localPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error {
 	return nil
 }
-func (m *MockStagingClient) UploadFileParallel(localPath string, irodsPath string, taskNum int) error {
+func (m *MockStagingClient) UploadFileParallel(localPath string, irodsPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error {
 	return nil
 }
 func (m *MockStagingClient) RenameFileToFile(srcPath string, destPath string) error { return nil }
 func (m *MockStagingClient) RenameDirToDir(srcPath string, destPath string) error   { return nil }
 func (m *MockStagingClient) RemoveFile(path string, force bool) error               { return nil }
 func (m *MockStagingClient) MakeDir(path string, recurse bool) error                { return nil }
-func (m *MockStagingClient) RemoveDir(path string, recurse bool, force bool) error { return nil }
+func (m *MockStagingClient) RemoveDir(path string, recurse bool, force bool) error  { return nil }
 
 func TestStagingFSCreate(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &StagingFSConfig{
 		LocalRootPath: tmpDir,
-		Client: &MockStagingClient{},
+		Client:        &MockStagingClient{},
 	}
 
 	sf, err := NewStagingFS(config)
@@ -57,7 +59,7 @@ func TestStagingFSCreateAndWrite(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &StagingFSConfig{
 		LocalRootPath: tmpDir,
-		Client: &MockStagingClient{},
+		Client:        &MockStagingClient{},
 	}
 
 	sf, err := NewStagingFS(config)
@@ -96,7 +98,7 @@ func TestStagingFSCreateDelete(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &StagingFSConfig{
 		LocalRootPath: tmpDir,
-		Client: &MockStagingClient{},
+		Client:        &MockStagingClient{},
 	}
 
 	sf, err := NewStagingFS(config)
@@ -128,7 +130,7 @@ func TestStagingFSRenameNewFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &StagingFSConfig{
 		LocalRootPath: tmpDir,
-		Client: &MockStagingClient{},
+		Client:        &MockStagingClient{},
 	}
 
 	sf, err := NewStagingFS(config)
@@ -169,7 +171,7 @@ func TestStagingFSOpenForWriteCreatesNew(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &StagingFSConfig{
 		LocalRootPath: tmpDir,
-		Client: &MockStagingClient{},
+		Client:        &MockStagingClient{},
 	}
 
 	sf, err := NewStagingFS(config)
@@ -204,7 +206,7 @@ func TestStagingFSSyncAll(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &StagingFSConfig{
 		LocalRootPath: tmpDir,
-		Client: &MockStagingClient{},
+		Client:        &MockStagingClient{},
 	}
 
 	sf, err := NewStagingFS(config)
@@ -278,7 +280,7 @@ func TestStagingFSMkdir(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &StagingFSConfig{
 		LocalRootPath: tmpDir,
-		Client: &MockStagingClient{},
+		Client:        &MockStagingClient{},
 	}
 
 	sf, err := NewStagingFS(config)
@@ -315,7 +317,7 @@ func TestStagingFSMkdirThenRmdir(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &StagingFSConfig{
 		LocalRootPath: tmpDir,
-		Client: &MockStagingClient{},
+		Client:        &MockStagingClient{},
 	}
 
 	sf, err := NewStagingFS(config)
@@ -347,7 +349,7 @@ func TestStagingFSRmdirExistingDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &StagingFSConfig{
 		LocalRootPath: tmpDir,
-		Client: &MockStagingClient{},
+		Client:        &MockStagingClient{},
 	}
 
 	sf, err := NewStagingFS(config)
@@ -395,7 +397,7 @@ func TestStagingFSRenameDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &StagingFSConfig{
 		LocalRootPath: tmpDir,
-		Client: &MockStagingClient{},
+		Client:        &MockStagingClient{},
 	}
 
 	sf, err := NewStagingFS(config)
@@ -436,7 +438,7 @@ func TestStagingFSRenameDirExisting(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &StagingFSConfig{
 		LocalRootPath: tmpDir,
-		Client: &MockStagingClient{},
+		Client:        &MockStagingClient{},
 	}
 
 	sf, err := NewStagingFS(config)

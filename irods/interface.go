@@ -3,6 +3,7 @@ package irods
 import (
 	"github.com/cockroachdb/errors"
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
+	irodsclient_common "github.com/cyverse/go-irodsclient/irods/common"
 	irodsclient_metrics "github.com/cyverse/go-irodsclient/irods/metrics"
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 )
@@ -40,13 +41,13 @@ type IRODSFSClient interface {
 	Sync() error
 
 	// File Transfer
-	DownloadFile(irodsPath string, localPath string) error
-	DownloadFileParallel(irodsPath string, localPath string, taskNum int) error
-	UploadFile(localPath string, irodsPath string) error
-	UploadFileParallel(localPath string, irodsPath string, taskNum int) error
+	DownloadFile(irodsPath string, localPath string, transferCallback irodsclient_common.TransferTrackerCallback) error
+	DownloadFileParallel(irodsPath string, localPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error
+	UploadFile(localPath string, irodsPath string, transferCallback irodsclient_common.TransferTrackerCallback) error
+	UploadFileParallel(localPath string, irodsPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error
 
 	// Cache
-	CacheFile(irodsPath string) error
+	CacheFile(irodsPath string, transferCallback irodsclient_common.TransferTrackerCallback) error
 }
 
 type IRODSFSFileHandle interface {
