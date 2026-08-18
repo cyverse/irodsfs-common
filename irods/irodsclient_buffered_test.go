@@ -86,7 +86,6 @@ func newTestCacheManager(t *testing.T) *cache.MemoryCacheManager {
 		MaxCost:     1024 * 1024,
 		BufferItems: 64,
 		TTL:         1 * time.Hour,
-		Name:        "test",
 	}
 	mgr, err := cache.NewMemoryCacheManager(config)
 	require.NoError(t, err)

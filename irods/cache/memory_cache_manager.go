@@ -80,16 +80,14 @@ type MemoryCacheConfig struct {
 	MaxCost     int64
 	BufferItems int64
 	TTL         time.Duration
-	Name        string
 }
 
-func NewDefaultMemoryCacheConfig(name string) *MemoryCacheConfig {
+func NewDefaultMemoryCacheConfig() *MemoryCacheConfig {
 	return &MemoryCacheConfig{
 		NumCounters: 50000000,
 		MaxCost:     100 * 1024 * 1024 * 1024, // 100GB
 		BufferItems: 512,
 		TTL:         12 * time.Hour,
-		Name:        name,
 	}
 }
 
@@ -107,10 +105,6 @@ type MemoryCacheManager struct {
 func NewMemoryCacheManager(config *MemoryCacheConfig) (*MemoryCacheManager, error) {
 	if config == nil {
 		return nil, errors.New("config is null")
-	}
-
-	if len(config.Name) == 0 {
-		return nil, errors.New("name is empty")
 	}
 
 	mgr := &MemoryCacheManager{

@@ -14,7 +14,6 @@ func TestMemoryCacheManagerPut(t *testing.T) {
 		MaxCost:     1024 * 1024,
 		BufferItems: 64,
 		TTL:         1 * time.Hour,
-		Name:        "test",
 	}
 
 	mgr, err := NewMemoryCacheManager(config)
@@ -35,7 +34,6 @@ func TestMemoryCacheManagerGet(t *testing.T) {
 		MaxCost:     1024 * 1024,
 		BufferItems: 64,
 		TTL:         1 * time.Hour,
-		Name:        "test",
 	}
 
 	mgr, err := NewMemoryCacheManager(config)
@@ -61,7 +59,6 @@ func TestMemoryCacheManagerGetData(t *testing.T) {
 		MaxCost:     1024 * 1024,
 		BufferItems: 64,
 		TTL:         1 * time.Hour,
-		Name:        "test",
 	}
 
 	mgr, err := NewMemoryCacheManager(config)
@@ -90,7 +87,6 @@ func TestMemoryCacheManagerGetDataWriteTo(t *testing.T) {
 		MaxCost:     1024 * 1024,
 		BufferItems: 64,
 		TTL:         1 * time.Hour,
-		Name:        "test",
 	}
 
 	mgr, err := NewMemoryCacheManager(config)
@@ -123,7 +119,6 @@ func TestMemoryCacheManagerDelete(t *testing.T) {
 		MaxCost:     1024 * 1024,
 		BufferItems: 64,
 		TTL:         1 * time.Hour,
-		Name:        "test",
 	}
 
 	mgr, err := NewMemoryCacheManager(config)
@@ -145,7 +140,6 @@ func TestMemoryCacheManagerMultipleEntries(t *testing.T) {
 		MaxCost:     1024 * 1024,
 		BufferItems: 64,
 		TTL:         1 * time.Hour,
-		Name:        "test",
 	}
 
 	mgr, err := NewMemoryCacheManager(config)
@@ -174,7 +168,6 @@ func TestMemoryCacheManagerCount(t *testing.T) {
 		MaxCost:     1024 * 1024,
 		BufferItems: 64,
 		TTL:         1 * time.Hour,
-		Name:        "test",
 	}
 
 	mgr, err := NewMemoryCacheManager(config)
@@ -199,7 +192,6 @@ func TestMemoryCacheManagerTotalSize(t *testing.T) {
 		MaxCost:     1024 * 1024,
 		BufferItems: 64,
 		TTL:         1 * time.Hour,
-		Name:        "test",
 	}
 
 	mgr, err := NewMemoryCacheManager(config)
@@ -228,7 +220,6 @@ func TestMemoryCacheManagerAvailableSize(t *testing.T) {
 		MaxCost:     maxCost,
 		BufferItems: 64,
 		TTL:         1 * time.Hour,
-		Name:        "test",
 	}
 
 	mgr, err := NewMemoryCacheManager(config)
@@ -257,7 +248,6 @@ func TestMemoryCacheManagerClear(t *testing.T) {
 		MaxCost:     1024 * 1024,
 		BufferItems: 64,
 		TTL:         1 * time.Hour,
-		Name:        "test",
 	}
 
 	mgr, err := NewMemoryCacheManager(config)
