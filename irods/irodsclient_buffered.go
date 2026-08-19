@@ -648,6 +648,69 @@ func (c *IRODSFSClientBuffered) DownloadFileParallel(irodsPath string, localPath
 	return err
 }
 
+func (c *IRODSFSClientBuffered) DownloadFileWithCallback(irodsPath string, blockSize int, numBlocks int, blockReadyCallback irodsclient_common.DataObjectBlockCallback, transferCallback irodsclient_common.TransferTrackerCallback) error {
+	logger := c.logger.WithFields(log.Fields{
+		"irodsPath": irodsPath,
+		"blockSize": blockSize,
+		"numBlocks": numBlocks,
+	})
+
+	defer util.StackTraceFromPanic(logger)
+
+	blockReadyCallbackWrapper := func(data []byte, offset int64) error {
+		if len(data) > 0 {
+			blockNum := c.helper.GetBlockID(offset)
+			cacheKey := c.makeCacheKey(irodsPath, blockNum)
+			if _, cacheErr := c.cache.PutCopy(cacheKey, data, false); cacheErr != nil {
+				logger.Warnf("failed to cache block %d: %v", blockNum, cacheErr)
+			}
+
+			if blockReadyCallback != nil {
+				if callbackErr := blockReadyCallback(data, offset); callbackErr != nil {
+					return errors.Wrapf(callbackErr, "failed to handle block at offset %d", offset)
+				}
+			}
+		}
+
+		return nil
+	}
+
+	_, err := c.fs.DownloadFileWithCallback(irodsPath, "", blockSize, numBlocks, blockReadyCallbackWrapper, transferCallback)
+	return err
+}
+
+func (c *IRODSFSClientBuffered) DownloadFileParallelWithCallback(irodsPath string, blockSize int, numBlocks int, blockReadyCallback irodsclient_common.DataObjectBlockCallback, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error {
+	logger := c.logger.WithFields(log.Fields{
+		"irodsPath": irodsPath,
+		"blockSize": blockSize,
+		"numBlocks": numBlocks,
+		"taskNum":   taskNum,
+	})
+
+	defer util.StackTraceFromPanic(logger)
+
+	blockReadyCallbackWrapper := func(data []byte, offset int64) error {
+		if len(data) > 0 {
+			blockNum := c.helper.GetBlockID(offset)
+			cacheKey := c.makeCacheKey(irodsPath, blockNum)
+			if _, cacheErr := c.cache.PutCopy(cacheKey, data, false); cacheErr != nil {
+				logger.Warnf("failed to cache block %d: %v", blockNum, cacheErr)
+			}
+
+			if blockReadyCallback != nil {
+				if callbackErr := blockReadyCallback(data, offset); callbackErr != nil {
+					return errors.Wrapf(callbackErr, "failed to handle block at offset %d", offset)
+				}
+			}
+		}
+
+		return nil
+	}
+
+	_, err := c.fs.DownloadFileParallelWithCallback(irodsPath, "", blockSize, numBlocks, blockReadyCallbackWrapper, taskNum, transferCallback)
+	return err
+}
+
 // UploadFile uploads a file and invalidates cache based on server file size
 func (c *IRODSFSClientBuffered) UploadFile(localPath string, irodsPath string, transferCallback irodsclient_common.TransferTrackerCallback) error {
 	logger := c.logger.WithFields(log.Fields{

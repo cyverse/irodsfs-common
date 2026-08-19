@@ -319,6 +319,33 @@ func (c *IRODSFSClientDirect) DownloadFileParallel(irodsPath string, localPath s
 	return err
 }
 
+func (c *IRODSFSClientDirect) DownloadFileWithCallback(irodsPath string, blockSize int, numBlocks int, blockReadyCallback irodsclient_common.DataObjectBlockCallback, transferCallback irodsclient_common.TransferTrackerCallback) error {
+	logger := c.logger.WithFields(log.Fields{
+		"irodsPath": irodsPath,
+		"blockSize": blockSize,
+		"numBlocks": numBlocks,
+	})
+
+	defer util.StackTraceFromPanic(logger)
+
+	_, err := c.fs.DownloadFileWithCallback(irodsPath, "", blockSize, numBlocks, blockReadyCallback, transferCallback)
+	return err
+}
+
+func (c *IRODSFSClientDirect) DownloadFileParallelWithCallback(irodsPath string, blockSize int, numBlocks int, blockReadyCallback irodsclient_common.DataObjectBlockCallback, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error {
+	logger := c.logger.WithFields(log.Fields{
+		"irodsPath": irodsPath,
+		"blockSize": blockSize,
+		"numBlocks": numBlocks,
+		"taskNum":   taskNum,
+	})
+
+	defer util.StackTraceFromPanic(logger)
+
+	_, err := c.fs.DownloadFileParallelWithCallback(irodsPath, "", blockSize, numBlocks, blockReadyCallback, taskNum, transferCallback)
+	return err
+}
+
 // UploadFile uploads a file from local filesystem to iRODS
 func (c *IRODSFSClientDirect) UploadFile(localPath string, irodsPath string, transferCallback irodsclient_common.TransferTrackerCallback) error {
 	logger := c.logger.WithFields(log.Fields{

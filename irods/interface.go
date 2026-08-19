@@ -43,6 +43,8 @@ type IRODSFSClient interface {
 	// File Transfer
 	DownloadFile(irodsPath string, localPath string, transferCallback irodsclient_common.TransferTrackerCallback) error
 	DownloadFileParallel(irodsPath string, localPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error
+	DownloadFileWithCallback(irodsPath string, blockSize int, numBlocks int, blockReadyCallback irodsclient_common.DataObjectBlockCallback, transferCallback irodsclient_common.TransferTrackerCallback) error
+	DownloadFileParallelWithCallback(irodsPath string, blockSize int, numBlocks int, blockReadyCallback irodsclient_common.DataObjectBlockCallback, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error
 	UploadFile(localPath string, irodsPath string, transferCallback irodsclient_common.TransferTrackerCallback) error
 	UploadFileParallel(localPath string, irodsPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error
 
