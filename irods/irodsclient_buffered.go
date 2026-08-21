@@ -24,11 +24,12 @@ type IRODSFSClientBufferedConfig struct {
 	BlockSize int // Block size for read cache in bytes (default: 4MB)
 
 	// Staging settings (leave StagingRootPath empty to disable staging/write support)
-	StagingRootPath string                     // Local path for staging files
-	SyncInterval    time.Duration              // Background sync interval (default: 5s)
-	GracePeriod     time.Duration              // Grace period before sync (default: 10s)
-	UsePersistence  bool                       // Use BadgerDB for crash recovery
-	OnSyncError     stagingfs.SyncErrorHandler // Optional error callback
+	StagingRootPath    string                     // Local path for staging files
+	MaxStagingDataSize int64                      // Max disk usage for staged data (0 = use default 10GB)
+	SyncInterval       time.Duration              // Background sync interval (default: 5s)
+	GracePeriod        time.Duration              // Grace period before sync (default: 10s)
+	UsePersistence     bool                       // Use BadgerDB for crash recovery
+	OnSyncError        stagingfs.SyncErrorHandler // Optional error callback
 }
 
 // IRODSFSClientBuffered wraps IRODSFSClient with block-level read-through caching
@@ -74,6 +75,7 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 		stagingConfig := &stagingfs.StagingFSConfig{
 			LocalRootPath: config.StagingRootPath,
 			Client:        directClient,
+			MaxDataSize:   config.MaxStagingDataSize,
 			SyncInterval:  config.SyncInterval,
 			GracePeriod:   config.GracePeriod,
 			OnSyncError:   config.OnSyncError,
