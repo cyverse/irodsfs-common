@@ -536,8 +536,16 @@ func (sf *StagingFS) Close() error {
 	}
 
 	if sf.sm.db != nil {
-		return sf.sm.db.Close()
+		if err := sf.sm.db.Close(); err != nil {
+			return err
+		}
 	}
+
+	// Remove staging directory after successful sync and DB close
+	if sf.config.LocalRootPath != "" {
+		os.RemoveAll(sf.config.LocalRootPath)
+	}
+
 	return nil
 }
 
