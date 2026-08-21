@@ -951,11 +951,13 @@ func (h *IRODSFSClientBufferedFileHandle) ReadAt(buffer []byte, offset int64) (i
 			if err == nil && len(data) > 0 {
 				n := copy(buffer[totalCopied:totalCopied+int(toCopy)], data)
 				totalCopied += n
+				h.client.client.GetMetrics().IncreaseCounterForCacheHit(1)
 				continue
 			}
 		}
 
 		// Cache miss — read the full block from underlying handle
+		h.client.client.GetMetrics().IncreaseCounterForCacheMiss(1)
 		blockBuf := make([]byte, blockDataLen)
 		n, err := h.handle.ReadAt(blockBuf, blockStart)
 		if err != nil && err != io.EOF {
