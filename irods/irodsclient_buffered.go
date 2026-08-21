@@ -579,6 +579,27 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 		}
 	}
 
+	// skip if all blocks are already cached
+	entry, err := c.client.Stat(irodsPath)
+	if err != nil {
+		return errors.Wrap(err, "failed to stat file for cache check")
+	}
+
+	if entry.Size > 0 {
+		lastBlock := c.helper.GetLastBlockID(entry.Size)
+		allCached := true
+		for blockNum := int64(0); blockNum <= lastBlock; blockNum++ {
+			cacheKey := c.makeCacheKey(irodsPath, blockNum)
+			if !c.cache.Has(cacheKey) {
+				allCached = false
+				break
+			}
+		}
+		if allCached {
+			return nil
+		}
+	}
+
 	blockReadyCallback := func(data []byte, offset int64) error {
 		if len(data) > 0 {
 			blockNum := c.helper.GetBlockID(offset)
@@ -590,7 +611,7 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 		return nil
 	}
 
-	_, err := c.client.fs.DownloadFileParallelWithCallback(irodsPath, "", c.helper.GetBlockSize(), 3, blockReadyCallback, 4, transferCallback)
+	_, err = c.client.fs.DownloadFileParallelWithCallback(irodsPath, "", c.helper.GetBlockSize(), 3, blockReadyCallback, 4, transferCallback)
 	return err
 }
 
