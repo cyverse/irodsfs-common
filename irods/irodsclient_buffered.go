@@ -824,6 +824,43 @@ func (h *IRODSFSClientBufferedFileHandle) IsWriteMode() bool {
 }
 
 func (h *IRODSFSClientBufferedFileHandle) GetAvailable(offset int64) int64 {
+	if !h.handle.IsReadMode() {
+		return h.handle.GetAvailable(offset)
+	}
+
+	entry := h.handle.GetEntry()
+	if entry == nil || offset >= entry.Size {
+		return 0
+	}
+
+	blockSize := int64(h.helper.GetBlockSize())
+	var available int64
+
+	blockNum := h.helper.GetBlockID(offset)
+	blockStart := h.helper.GetBlockStart(blockNum)
+
+	for blockStart < entry.Size {
+		cacheKey := h.makeCacheKey(blockNum)
+		cacheEntry := h.cache.Get(cacheKey)
+		if cacheEntry == nil {
+			break
+		}
+
+		blockEnd := min(blockStart+blockSize, entry.Size)
+		if available == 0 {
+			available = blockEnd - offset
+		} else {
+			available += blockEnd - blockStart
+		}
+
+		blockNum++
+		blockStart += blockSize
+	}
+
+	if available > 0 {
+		return available
+	}
+
 	return h.handle.GetAvailable(offset)
 }
 
