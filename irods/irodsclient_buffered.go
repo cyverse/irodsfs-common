@@ -501,7 +501,7 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 
 	// Use staging for write modes
 	if c.staging != nil && openMode.IsWrite() {
-		entry, err := c.client.Stat(path)
+		entry, err := c.Stat(path)
 		if err != nil {
 			return nil, err
 		}
@@ -579,6 +579,13 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 }
 
 func (c *IRODSFSClientBuffered) TruncateFile(path string, size int64) error {
+	if c.staging != nil {
+		meta := c.staging.Get(path)
+		if meta != nil && meta.Action == stagingfs.ActionUpload {
+			localPath := c.staging.GetLocalDataPath(path)
+			return os.Truncate(localPath, size)
+		}
+	}
 	return c.client.TruncateFile(path, size)
 }
 
@@ -844,7 +851,6 @@ func (c *IRODSFSClientBuffered) makeCacheKey(irodsPath string, blockNum int64) s
 }
 
 // invalidateFileCacheBlocks removes all cached blocks for a file
-// Used for remove, rename operations - gets size from iRODS
 func (c *IRODSFSClientBuffered) invalidateFileCacheBlocks(irodsPath string) error {
 	logger := c.logger.WithFields(log.Fields{
 		"irodsPath": irodsPath,
@@ -854,9 +860,16 @@ func (c *IRODSFSClientBuffered) invalidateFileCacheBlocks(irodsPath string) erro
 
 	var fileSize int64
 
-	// Get file size from iRODS
+	// Check both staging and iRODS, use the larger value to ensure all blocks are invalidated
+	if c.staging != nil {
+		localSize := c.staging.GetLocalFileSize(irodsPath)
+		if localSize > fileSize {
+			fileSize = localSize
+		}
+	}
+
 	entry, err := c.client.Stat(irodsPath)
-	if err == nil && entry != nil {
+	if err == nil && entry != nil && entry.Size > fileSize {
 		fileSize = entry.Size
 	}
 
