@@ -5,6 +5,7 @@ import (
 	"os"
 	"path"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/errors"
@@ -42,6 +43,9 @@ type IRODSFSClientBuffered struct {
 	helper  *util.FileBlockHelper
 	staging *stagingfs.StagingFS
 	logger  *log.Entry
+
+	cacheHit  uint64
+	cacheMiss uint64
 }
 
 // NewIRODSFSClientBuffered creates a new IRODSFSClientBuffered with the given config.
@@ -162,7 +166,10 @@ func (c *IRODSFSClientBuffered) GetOpenConnections() int {
 }
 
 func (c *IRODSFSClientBuffered) GetMetrics() *irodsclient_metrics.IRODSMetrics {
-	return c.client.GetMetrics()
+	metrics := c.client.GetMetrics()
+	metrics.IncreaseCounterForCacheHit(atomic.LoadUint64(&c.cacheHit))
+	metrics.IncreaseCounterForCacheMiss(atomic.LoadUint64(&c.cacheMiss))
+	return metrics
 }
 
 func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, error) {
@@ -951,13 +958,13 @@ func (h *IRODSFSClientBufferedFileHandle) ReadAt(buffer []byte, offset int64) (i
 			if err == nil && len(data) > 0 {
 				n := copy(buffer[totalCopied:totalCopied+int(toCopy)], data)
 				totalCopied += n
-				h.client.client.GetMetrics().IncreaseCounterForCacheHit(1)
+				atomic.AddUint64(&h.client.cacheHit, 1)
 				continue
 			}
 		}
 
 		// Cache miss — read the full block from underlying handle
-		h.client.client.GetMetrics().IncreaseCounterForCacheMiss(1)
+		atomic.AddUint64(&h.client.cacheMiss, 1)
 		blockBuf := make([]byte, blockDataLen)
 		n, err := h.handle.ReadAt(blockBuf, blockStart)
 		if err != nil && err != io.EOF {
