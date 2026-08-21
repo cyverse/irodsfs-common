@@ -582,8 +582,7 @@ func (c *IRODSFSClientBuffered) TruncateFile(path string, size int64) error {
 	if c.staging != nil {
 		meta := c.staging.Get(path)
 		if meta != nil && meta.Action == stagingfs.ActionUpload {
-			localPath := c.staging.GetLocalDataPath(path)
-			return os.Truncate(localPath, size)
+			return c.staging.TruncateFile(path, size)
 		}
 	}
 	return c.client.TruncateFile(path, size)
@@ -737,17 +736,15 @@ func (c *IRODSFSClientBuffered) DownloadFileWithCallback(irodsPath string, block
 
 
 func (c *IRODSFSClientBuffered) downloadFromStaging(irodsPath string, blockSize int, blockReadyCallback irodsclient_common.DataObjectBlockCallback, transferCallback irodsclient_common.TransferTrackerCallback) error {
-	localPath := c.staging.GetLocalDataPath(irodsPath)
-
-	f, err := os.Open(localPath)
+	f, err := c.staging.OpenForRead(irodsPath)
 	if err != nil {
-		return errors.Wrapf(err, "failed to open staged file %q", localPath)
+		return errors.Wrapf(err, "failed to open staged file %q", irodsPath)
 	}
 	defer f.Close()
 
 	info, err := f.Stat()
 	if err != nil {
-		return errors.Wrapf(err, "failed to stat staged file %q", localPath)
+		return errors.Wrapf(err, "failed to stat staged file %q", irodsPath)
 	}
 	fileSize := info.Size()
 
@@ -770,7 +767,7 @@ func (c *IRODSFSClientBuffered) downloadFromStaging(irodsPath string, blockSize 
 			break
 		}
 		if readErr != nil {
-			return errors.Wrapf(readErr, "failed to read staged file %q", localPath)
+			return errors.Wrapf(readErr, "failed to read staged file %q", irodsPath)
 		}
 		offset += int64(n)
 	}

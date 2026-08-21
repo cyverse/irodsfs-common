@@ -247,6 +247,34 @@ func (sf *StagingFS) OpenForRead(path string) (*os.File, error) {
 	return f, nil
 }
 
+// TruncateFile truncates a staged file to the given size.
+func (sf *StagingFS) TruncateFile(path string, size int64) error {
+	sf.sm.WaitForSync(path)
+
+	localPath := sf.getLocalDataPath(path)
+
+	oldInfo, err := os.Stat(localPath)
+	if err != nil {
+		return errors.Wrap(err, "failed to stat local file for truncate")
+	}
+
+	if err := os.Truncate(localPath, size); err != nil {
+		return errors.Wrap(err, "failed to truncate local file")
+	}
+
+	// Adjust tracked data size
+	sf.subtractDataSize(oldInfo.Size())
+	sf.addDataSize(size)
+
+	// Update last modified time to reset grace period
+	meta := sf.sm.Get(path)
+	if meta != nil {
+		meta.LastModifiedAt = time.Now()
+	}
+
+	return nil
+}
+
 // OpenForReadWrite opens a file for reading and writing (downloads from iRODS first)
 func (sf *StagingFS) OpenForReadWrite(path string) (*os.File, error) {
 	sf.sm.WaitForSync(path)
