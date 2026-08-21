@@ -539,7 +539,26 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 		return newStagedHandle(c, f, path, openMode, entry), nil
 	}
 
-	// Read-only mode or no staging: use cached read path
+	// Read-only mode: check staging first
+	if c.staging != nil {
+		meta := c.staging.Get(path)
+		if meta != nil && meta.Action == stagingfs.ActionUpload {
+			f, err := c.staging.OpenForRead(path)
+			if err != nil {
+				return nil, err
+			}
+
+			entry, err := c.Stat(path)
+			if err != nil {
+				f.Close()
+				return nil, err
+			}
+
+			return newStagedHandle(c, f, path, openMode, entry), nil
+		}
+	}
+
+	// No staging or file not in staging: use cached read path
 	handle, err := c.client.OpenFile(path, mode)
 	if err != nil {
 		return nil, err

@@ -725,6 +725,19 @@ func (sm *StagingStateManager) deleteMetadataPublic(path string) error {
 	return sm.deleteMetadata(path)
 }
 
+// WaitForSync blocks until the given path is no longer being synced.
+func (sm *StagingStateManager) WaitForSync(path string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	for sm.lockedPaths[path] {
+		if sm.pathConds[path] == nil {
+			sm.pathConds[path] = sync.NewCond(&sm.mu)
+		}
+		sm.pathConds[path].Wait()
+	}
+}
+
 // RegisterActionHandler registers a handler for operations
 func (sm *StagingStateManager) RegisterActionHandler(handler ActionHandler) {
 	sm.mu.Lock()

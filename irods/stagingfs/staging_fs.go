@@ -199,6 +199,8 @@ func (sf *StagingFS) Create(path string) error {
 
 // OpenForWrite opens a file for writing only
 func (sf *StagingFS) OpenForWrite(path string) (*os.File, error) {
+	sf.sm.WaitForSync(path)
+
 	if err := sf.checkQuota(0); err != nil {
 		return nil, err
 	}
@@ -232,8 +234,23 @@ func (sf *StagingFS) OpenForWrite(path string) (*os.File, error) {
 	return f, nil
 }
 
+// OpenForRead opens a staged file for reading only. Returns an error if the file
+// is not present locally in staging.
+func (sf *StagingFS) OpenForRead(path string) (*os.File, error) {
+	localPath := sf.getLocalDataPath(path)
+
+	f, err := os.Open(localPath)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to open local file for reading")
+	}
+
+	return f, nil
+}
+
 // OpenForReadWrite opens a file for reading and writing (downloads from iRODS first)
 func (sf *StagingFS) OpenForReadWrite(path string) (*os.File, error) {
+	sf.sm.WaitForSync(path)
+
 	localPath := sf.getLocalDataPath(path)
 
 	// Download file from iRODS if not already present locally
