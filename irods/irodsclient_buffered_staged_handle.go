@@ -200,7 +200,11 @@ func (h *IRODSFSClientBufferedStagedHandle) Close() error {
 			h.client.staging.ReleaseRef(currentPath)
 			h.client.staging.UnregisterHandle(currentPath, h)
 		}
-		h.client.invalidateFileCacheBlocks(currentPath)
+		// Pass the known entry size to skip the iRODS Stat call inside
+		// invalidateFileCacheBlocks. For bulk-uploaded files the file does not
+		// exist on iRODS yet (sync is async), so the stat would fail and still
+		// incur a blocking network round-trip.
+		h.client.invalidateFileCacheBlocksHint(currentPath, h.entry.Size)
 	}
 
 	return nil

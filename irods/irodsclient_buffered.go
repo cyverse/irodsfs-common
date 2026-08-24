@@ -1162,17 +1162,26 @@ func (c *IRODSFSClientBuffered) isCacheFileFresh(irodsPath string, entry *irodsc
 	return cachedSize == entry.Size && cachedModNano == entry.ModifyTime.UnixNano()
 }
 
-// invalidateFileCacheBlocks removes all cached blocks for a file
+// invalidateFileCacheBlocks removes all cached blocks for a file, discovering the
+// file size from staging and iRODS.
 func (c *IRODSFSClientBuffered) invalidateFileCacheBlocks(irodsPath string) error {
+	return c.invalidateFileCacheBlocksHint(irodsPath, 0)
+}
+
+// invalidateFileCacheBlocksHint removes all cached blocks for a file.
+// When sizeHint > 0 the iRODS Stat call is skipped; the hint (plus any larger
+// staging size) is used directly. Pass the caller's already-known file size to
+// avoid a blocking network round-trip (e.g. from a staged handle Close where
+// the file has not been synced to iRODS yet).
+func (c *IRODSFSClientBuffered) invalidateFileCacheBlocksHint(irodsPath string, sizeHint int64) error {
 	logger := c.logger.WithFields(log.Fields{
 		"irodsPath": irodsPath,
 	})
 
 	defer util.StackTraceFromPanic(logger)
 
-	var fileSize int64
+	fileSize := sizeHint
 
-	// Check both staging and iRODS, use the larger value to ensure all blocks are invalidated
 	if c.staging != nil {
 		localSize := c.staging.GetLocalFileSize(irodsPath)
 		if localSize > fileSize {
@@ -1180,12 +1189,16 @@ func (c *IRODSFSClientBuffered) invalidateFileCacheBlocks(irodsPath string) erro
 		}
 	}
 
-	entry, err := c.client.Stat(irodsPath)
-	if err == nil && entry != nil && entry.Size > fileSize {
-		fileSize = entry.Size
+	// Only stat iRODS when the caller has no size hint. This avoids a blocking
+	// network call when the size is already known (e.g. staged handle Close).
+	if sizeHint == 0 {
+		entry, err := c.client.Stat(irodsPath)
+		if err == nil && entry != nil && entry.Size > fileSize {
+			fileSize = entry.Size
+		}
 	}
 
-	// If we don't have file size, use a reasonable upper bound
+	// If we still don't have file size, use a reasonable upper bound
 	if fileSize == 0 {
 		fileSize = 4 * 1024 * 1024 * 1024 // 4GB default
 	}
