@@ -1,6 +1,7 @@
 package irods
 
 import (
+	"encoding/binary"
 	"io"
 	"os"
 	"path"
@@ -700,6 +701,54 @@ func (c *IRODSFSClientBuffered) TruncateFile(path string, size int64) error {
 	return c.client.TruncateFile(path, size)
 }
 
+// checkAllBlocksCached returns true if every block of the file is present in the memory cache.
+func (c *IRODSFSClientBuffered) checkAllBlocksCached(irodsPath string, fileSize int64) bool {
+	if fileSize <= 0 {
+		return true
+	}
+	lastBlock := c.helper.GetLastBlockID(fileSize)
+	for blockNum := int64(0); blockNum <= lastBlock; blockNum++ {
+		if !c.cache.Has(c.makeCacheKey(irodsPath, blockNum)) {
+			return false
+		}
+	}
+	return true
+}
+
+// serveFileFromCache feeds an entire file to blockReadyCallback block by block using only
+// the memory cache. Each block increments cacheHit. Returns an error if any block has been
+// evicted since checkAllBlocksCached was called (rare TTL race).
+func (c *IRODSFSClientBuffered) serveFileFromCache(irodsPath string, fileSize int64, blockReadyCallback irodsclient_common.DataObjectBlockCallback, transferCallback irodsclient_common.TransferTrackerCallback) error {
+	cacheBlockSize := int64(c.helper.GetBlockSize())
+	lastBlock := c.helper.GetLastBlockID(fileSize)
+
+	offset := int64(0)
+	for blockNum := int64(0); blockNum <= lastBlock; blockNum++ {
+		cacheKey := c.makeCacheKey(irodsPath, blockNum)
+		cacheEntry := c.cache.Get(cacheKey)
+		if cacheEntry == nil {
+			return errors.Errorf("cache block %d of %q evicted during serve", blockNum, irodsPath)
+		}
+		data, err := cacheEntry.GetData(0)
+		if err != nil {
+			return errors.Wrapf(err, "failed to read cache block %d of %q", blockNum, irodsPath)
+		}
+
+		blockEnd := min(offset+cacheBlockSize, fileSize)
+		blockData := data[:blockEnd-offset]
+
+		atomic.AddUint64(&c.cacheHit, 1)
+		if callbackErr := blockReadyCallback(blockData, offset); callbackErr != nil {
+			return callbackErr
+		}
+		if transferCallback != nil {
+			transferCallback("download", blockEnd, fileSize)
+		}
+		offset = blockEnd
+	}
+	return nil
+}
+
 // CacheFile downloads a file from iRODS into the block cache without writing to local disk
 func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback irodsclient_common.TransferTrackerCallback) error {
 	logger := c.logger.WithFields(log.Fields{
@@ -716,31 +765,24 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 		}
 	}
 
-	// skip if all blocks are already cached
 	entry, err := c.client.Stat(irodsPath)
 	if err != nil {
 		return errors.Wrap(err, "failed to stat file for cache check")
 	}
 
-	if entry.Size > 0 {
-		lastBlock := c.helper.GetLastBlockID(entry.Size)
-		allCached := true
-		for blockNum := int64(0); blockNum <= lastBlock; blockNum++ {
-			cacheKey := c.makeCacheKey(irodsPath, blockNum)
-			if !c.cache.Has(cacheKey) {
-				allCached = false
-				break
-			}
+	if c.checkAllBlocksCached(irodsPath, entry.Size) {
+		if c.isCacheFileFresh(irodsPath, entry) {
+			return c.serveFileFromCache(irodsPath, entry.Size, func(_ []byte, _ int64) error { return nil }, transferCallback)
 		}
-		if allCached {
-			return nil
-		}
+		// File changed on iRODS — drop stale blocks
+		c.invalidateFileCacheBlocks(irodsPath)
 	}
 
 	blockReadyCallback := func(data []byte, offset int64) error {
 		if len(data) > 0 {
 			blockNum := c.helper.GetBlockID(offset)
 			cacheKey := c.makeCacheKey(irodsPath, blockNum)
+			atomic.AddUint64(&c.cacheMiss, 1)
 			if _, err := c.cache.PutCopy(cacheKey, data, false); err != nil {
 				logger.Warnf("failed to cache block %d: %v", blockNum, err)
 			}
@@ -749,6 +791,9 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 	}
 
 	_, err = c.client.fs.DownloadFileParallelWithCallback(irodsPath, "", c.helper.GetBlockSize(), 3, blockReadyCallback, 4, transferCallback)
+	if err == nil {
+		c.storeCacheFileMeta(irodsPath, entry)
+	}
 	return err
 }
 
@@ -784,7 +829,35 @@ func (c *IRODSFSClientBuffered) DownloadFile(irodsPath string, localPath string,
 		}
 	}
 
-	_, err = c.client.fs.DownloadFileWithCallback(irodsPath, "", c.helper.GetBlockSize(), 3, writeCallback, transferCallback)
+	entry, err := c.client.Stat(irodsPath)
+	if err != nil {
+		return errors.Wrap(err, "failed to stat file")
+	}
+
+	if c.checkAllBlocksCached(irodsPath, entry.Size) {
+		if c.isCacheFileFresh(irodsPath, entry) {
+			return c.serveFileFromCache(irodsPath, entry.Size, writeCallback, transferCallback)
+		}
+		c.invalidateFileCacheBlocks(irodsPath)
+	}
+
+	cacheBlockSize := c.helper.GetBlockSize()
+	cachedWriteCallback := func(data []byte, offset int64) error {
+		if len(data) > 0 {
+			blockNum := offset / int64(cacheBlockSize)
+			cacheKey := c.makeCacheKey(irodsPath, blockNum)
+			atomic.AddUint64(&c.cacheMiss, 1)
+			if _, cacheErr := c.cache.PutCopy(cacheKey, data, false); cacheErr != nil {
+				logger.Warnf("failed to cache block %d: %v", blockNum, cacheErr)
+			}
+		}
+		return writeCallback(data, offset)
+	}
+
+	_, err = c.client.fs.DownloadFileWithCallback(irodsPath, "", cacheBlockSize, 3, cachedWriteCallback, transferCallback)
+	if err == nil {
+		c.storeCacheFileMeta(irodsPath, entry)
+	}
 	return err
 }
 
@@ -821,7 +894,35 @@ func (c *IRODSFSClientBuffered) DownloadFileParallel(irodsPath string, localPath
 		}
 	}
 
-	_, err = c.client.fs.DownloadFileParallelWithCallback(irodsPath, "", c.helper.GetBlockSize(), taskNum*3, writeCallback, taskNum, transferCallback)
+	entry, err := c.client.Stat(irodsPath)
+	if err != nil {
+		return errors.Wrap(err, "failed to stat file")
+	}
+
+	if c.checkAllBlocksCached(irodsPath, entry.Size) {
+		if c.isCacheFileFresh(irodsPath, entry) {
+			return c.serveFileFromCache(irodsPath, entry.Size, writeCallback, transferCallback)
+		}
+		c.invalidateFileCacheBlocks(irodsPath)
+	}
+
+	cacheBlockSize := c.helper.GetBlockSize()
+	cachedWriteCallback := func(data []byte, offset int64) error {
+		if len(data) > 0 {
+			blockNum := offset / int64(cacheBlockSize)
+			cacheKey := c.makeCacheKey(irodsPath, blockNum)
+			atomic.AddUint64(&c.cacheMiss, 1)
+			if _, cacheErr := c.cache.PutCopy(cacheKey, data, false); cacheErr != nil {
+				logger.Warnf("failed to cache block %d: %v", blockNum, cacheErr)
+			}
+		}
+		return writeCallback(data, offset)
+	}
+
+	_, err = c.client.fs.DownloadFileParallelWithCallback(irodsPath, "", cacheBlockSize, taskNum*3, cachedWriteCallback, taskNum, transferCallback)
+	if err == nil {
+		c.storeCacheFileMeta(irodsPath, entry)
+	}
 	return err
 }
 
@@ -842,10 +943,41 @@ func (c *IRODSFSClientBuffered) DownloadFileWithCallback(irodsPath string, block
 		}
 	}
 
+	cacheBlockSize := c.helper.GetBlockSize()
+	if blockSize == cacheBlockSize {
+		entry, err := c.client.Stat(irodsPath)
+		if err != nil {
+			return errors.Wrap(err, "failed to stat file")
+		}
+
+		if c.checkAllBlocksCached(irodsPath, entry.Size) {
+			if c.isCacheFileFresh(irodsPath, entry) {
+				return c.serveFileFromCache(irodsPath, entry.Size, blockReadyCallback, transferCallback)
+			}
+			c.invalidateFileCacheBlocks(irodsPath)
+		}
+
+		cachedCallback := func(data []byte, offset int64) error {
+			if len(data) > 0 {
+				blockNum := offset / int64(cacheBlockSize)
+				cacheKey := c.makeCacheKey(irodsPath, blockNum)
+				atomic.AddUint64(&c.cacheMiss, 1)
+				if _, cacheErr := c.cache.PutCopy(cacheKey, data, false); cacheErr != nil {
+					logger.Warnf("failed to cache block %d: %v", blockNum, cacheErr)
+				}
+			}
+			return blockReadyCallback(data, offset)
+		}
+		_, err = c.fs.DownloadFileWithCallback(irodsPath, "", blockSize, numBlocks, cachedCallback, transferCallback)
+		if err == nil {
+			c.storeCacheFileMeta(irodsPath, entry)
+		}
+		return err
+	}
+
 	_, err := c.fs.DownloadFileWithCallback(irodsPath, "", blockSize, numBlocks, blockReadyCallback, transferCallback)
 	return err
 }
-
 
 func (c *IRODSFSClientBuffered) downloadFromStaging(irodsPath string, blockSize int, blockReadyCallback irodsclient_common.DataObjectBlockCallback, transferCallback irodsclient_common.TransferTrackerCallback) error {
 	f, err := c.staging.OpenForRead(irodsPath)
@@ -903,6 +1035,38 @@ func (c *IRODSFSClientBuffered) DownloadFileParallelWithCallback(irodsPath strin
 		if meta != nil && meta.Action == stagingfs.ActionUpload {
 			return c.downloadFromStaging(irodsPath, blockSize, blockReadyCallback, transferCallback)
 		}
+	}
+
+	cacheBlockSize := c.helper.GetBlockSize()
+	if blockSize == cacheBlockSize {
+		entry, err := c.client.Stat(irodsPath)
+		if err != nil {
+			return errors.Wrap(err, "failed to stat file")
+		}
+
+		if c.checkAllBlocksCached(irodsPath, entry.Size) {
+			if c.isCacheFileFresh(irodsPath, entry) {
+				return c.serveFileFromCache(irodsPath, entry.Size, blockReadyCallback, transferCallback)
+			}
+			c.invalidateFileCacheBlocks(irodsPath)
+		}
+
+		cachedCallback := func(data []byte, offset int64) error {
+			if len(data) > 0 {
+				blockNum := offset / int64(cacheBlockSize)
+				cacheKey := c.makeCacheKey(irodsPath, blockNum)
+				atomic.AddUint64(&c.cacheMiss, 1)
+				if _, cacheErr := c.cache.PutCopy(cacheKey, data, false); cacheErr != nil {
+					logger.Warnf("failed to cache block %d: %v", blockNum, cacheErr)
+				}
+			}
+			return blockReadyCallback(data, offset)
+		}
+		_, err = c.fs.DownloadFileParallelWithCallback(irodsPath, "", blockSize, numBlocks, cachedCallback, taskNum, transferCallback)
+		if err == nil {
+			c.storeCacheFileMeta(irodsPath, entry)
+		}
+		return err
 	}
 
 	_, err := c.fs.DownloadFileParallelWithCallback(irodsPath, "", blockSize, numBlocks, blockReadyCallback, taskNum, transferCallback)
@@ -970,6 +1134,34 @@ func (c *IRODSFSClientBuffered) makeCacheKey(irodsPath string, blockNum int64) s
 	return "irods:block:" + irodsPath + ":" + strconv.FormatInt(blockNum, 10)
 }
 
+// storeCacheFileMeta writes the file's size and modification time into block slot -1.
+// This acts as a freshness stamp: before serving from cache, callers compare this against
+// the current iRODS entry and invalidate if the file has changed.
+func (c *IRODSFSClientBuffered) storeCacheFileMeta(irodsPath string, entry *irodsclient_fs.Entry) {
+	buf := make([]byte, 16)
+	binary.LittleEndian.PutUint64(buf[0:8], uint64(entry.Size))
+	binary.LittleEndian.PutUint64(buf[8:16], uint64(entry.ModifyTime.UnixNano()))
+	if _, err := c.cache.PutCopy(c.makeCacheKey(irodsPath, -1), buf, false); err != nil {
+		c.logger.Warnf("failed to store cache meta for %q: %v", irodsPath, err)
+	}
+}
+
+// isCacheFileFresh returns true when the meta stored at block -1 matches the given entry.
+// Returns false (treat as stale) when the meta block is absent or mismatched.
+func (c *IRODSFSClientBuffered) isCacheFileFresh(irodsPath string, entry *irodsclient_fs.Entry) bool {
+	metaEntry := c.cache.Get(c.makeCacheKey(irodsPath, -1))
+	if metaEntry == nil {
+		return false
+	}
+	data, err := metaEntry.GetData(0)
+	if err != nil || len(data) < 16 {
+		return false
+	}
+	cachedSize := int64(binary.LittleEndian.Uint64(data[0:8]))
+	cachedModNano := int64(binary.LittleEndian.Uint64(data[8:16]))
+	return cachedSize == entry.Size && cachedModNano == entry.ModifyTime.UnixNano()
+}
+
 // invalidateFileCacheBlocks removes all cached blocks for a file
 func (c *IRODSFSClientBuffered) invalidateFileCacheBlocks(irodsPath string) error {
 	logger := c.logger.WithFields(log.Fields{
@@ -1000,9 +1192,10 @@ func (c *IRODSFSClientBuffered) invalidateFileCacheBlocks(irodsPath string) erro
 
 	lastBlockID := c.helper.GetLastBlockID(fileSize)
 
+	// Also delete the meta block (-1) so freshness checks don't see stale stamps.
+	c.cache.Delete(c.makeCacheKey(irodsPath, -1), false)
 	for blockNum := int64(0); blockNum <= lastBlockID; blockNum++ {
-		cacheKey := c.makeCacheKey(irodsPath, blockNum)
-		c.cache.Delete(cacheKey, false)
+		c.cache.Delete(c.makeCacheKey(irodsPath, blockNum), false)
 	}
 
 	return nil
@@ -1151,6 +1344,10 @@ func (h *IRODSFSClientBufferedFileHandle) ReadAt(buffer []byte, offset int64) (i
 		if n > 0 {
 			if _, cacheErr := h.cache.PutCopy(cacheKey, blockBuf[:n], false); cacheErr != nil {
 				h.logger.Warnf("failed to cache block %d: %v", blockNum, cacheErr)
+			}
+			// Store freshness stamp on first cache miss so download paths can validate staleness.
+			if !h.cache.Has(h.client.makeCacheKey(h.irodsPath, -1)) {
+				h.client.storeCacheFileMeta(h.irodsPath, entry)
 			}
 
 			// Copy the requested portion to the output buffer
