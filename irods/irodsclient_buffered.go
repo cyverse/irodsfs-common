@@ -455,25 +455,26 @@ func (c *IRODSFSClientBuffered) CreateFile(path string, mode string) (IRODSFSFil
 
 	// Use staging for write modes
 	if c.staging != nil && openMode.IsWrite() {
-		f, err := c.staging.OpenForWrite(path, false)
-		if err != nil {
-			return nil, err
-		}
-
-		// Truncate if mode requires it
-		if openMode.Truncate() {
-			if err := f.Truncate(0); err != nil {
-				f.Close()
-				return nil, err
+		f, stagingErr := c.staging.OpenForWrite(path, false)
+		if stagingErr != nil {
+			if !errors.Is(stagingErr, stagingfs.ErrQuotaExceeded) {
+				return nil, stagingErr
 			}
+			logger.Warnf("staging quota exceeded, falling back to direct iRODS write for %q", path)
+		} else {
+			if openMode.Truncate() {
+				if err := f.Truncate(0); err != nil {
+					f.Close()
+					return nil, err
+				}
+			}
+			h := newStagedHandleForNewFile(c, f, path, openMode)
+			c.staging.RegisterHandle(path, h)
+			return h, nil
 		}
-
-		h := newStagedHandleForNewFile(c, f, path, openMode)
-		c.staging.RegisterHandle(path, h)
-		return h, nil
 	}
 
-	// Fallback to direct for non-staging
+	// Fallback: no staging, or quota exceeded
 	handle, err := c.client.CreateFile(path, mode)
 	if err != nil {
 		return nil, err
@@ -511,36 +512,45 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 		}
 
 		if openMode.IsRead() {
-			f, err := c.staging.OpenForReadWrite(path, false)
-			if err != nil {
-				return nil, err
+			f, stagingErr := c.staging.OpenForReadWrite(path, false)
+			if stagingErr != nil {
+				if !errors.Is(stagingErr, stagingfs.ErrQuotaExceeded) {
+					return nil, stagingErr
+				}
+			} else {
+				h := newStagedHandle(c, f, path, openMode, entry)
+				c.staging.RegisterHandle(path, h)
+				return h, nil
 			}
-			h := newStagedHandle(c, f, path, openMode, entry)
-			c.staging.RegisterHandle(path, h)
-			return h, nil
-		}
-
-		if openMode.Truncate() {
-			f, err := c.staging.OpenForWrite(path, false)
-			if err != nil {
-				return nil, err
+		} else if openMode.Truncate() {
+			f, stagingErr := c.staging.OpenForWrite(path, false)
+			if stagingErr != nil {
+				if !errors.Is(stagingErr, stagingfs.ErrQuotaExceeded) {
+					return nil, stagingErr
+				}
+			} else {
+				if err := f.Truncate(0); err != nil {
+					f.Close()
+					return nil, err
+				}
+				h := newStagedHandle(c, f, path, openMode, entry)
+				c.staging.RegisterHandle(path, h)
+				return h, nil
 			}
-			if err := f.Truncate(0); err != nil {
-				f.Close()
-				return nil, err
+		} else {
+			f, stagingErr := c.staging.OpenForReadWrite(path, false)
+			if stagingErr != nil {
+				if !errors.Is(stagingErr, stagingfs.ErrQuotaExceeded) {
+					return nil, stagingErr
+				}
+			} else {
+				h := newStagedHandle(c, f, path, openMode, entry)
+				c.staging.RegisterHandle(path, h)
+				return h, nil
 			}
-			h := newStagedHandle(c, f, path, openMode, entry)
-			c.staging.RegisterHandle(path, h)
-			return h, nil
 		}
-
-		f, err := c.staging.OpenForReadWrite(path, false)
-		if err != nil {
-			return nil, err
-		}
-		h := newStagedHandle(c, f, path, openMode, entry)
-		c.staging.RegisterHandle(path, h)
-		return h, nil
+		// staging quota exceeded — fall through to direct iRODS write
+		logger.Warnf("staging quota exceeded, falling back to direct iRODS write for %q", path)
 	}
 
 	// Read-only mode: check staging first
@@ -597,24 +607,26 @@ func (c *IRODSFSClientBuffered) CreateFileBulk(path string, mode string) (IRODSF
 	openMode := irodsclient_types.FileOpenMode(mode)
 
 	if c.staging != nil && openMode.IsWrite() {
-		f, err := c.staging.OpenForWrite(path, true)
-		if err != nil {
-			return nil, err
-		}
-
-		if openMode.Truncate() {
-			if err := f.Truncate(0); err != nil {
-				f.Close()
-				return nil, err
+		f, stagingErr := c.staging.OpenForWrite(path, true)
+		if stagingErr != nil {
+			if !errors.Is(stagingErr, stagingfs.ErrQuotaExceeded) {
+				return nil, stagingErr
 			}
+			logger.Warnf("staging quota exceeded, falling back to direct iRODS write for %q", path)
+		} else {
+			if openMode.Truncate() {
+				if err := f.Truncate(0); err != nil {
+					f.Close()
+					return nil, err
+				}
+			}
+			h := newStagedHandleForNewFile(c, f, path, openMode)
+			c.staging.RegisterHandle(path, h)
+			return h, nil
 		}
-
-		h := newStagedHandleForNewFile(c, f, path, openMode)
-		c.staging.RegisterHandle(path, h)
-		return h, nil
 	}
 
-	return c.CreateFile(path, mode)
+	return c.client.CreateFile(path, mode)
 }
 
 func (c *IRODSFSClientBuffered) OpenFileBulk(path string, mode string) (IRODSFSFileHandle, error) {
@@ -634,39 +646,48 @@ func (c *IRODSFSClientBuffered) OpenFileBulk(path string, mode string) (IRODSFSF
 		}
 
 		if openMode.IsRead() {
-			f, err := c.staging.OpenForReadWrite(path, true)
-			if err != nil {
-				return nil, err
+			f, stagingErr := c.staging.OpenForReadWrite(path, true)
+			if stagingErr != nil {
+				if !errors.Is(stagingErr, stagingfs.ErrQuotaExceeded) {
+					return nil, stagingErr
+				}
+			} else {
+				h := newStagedHandle(c, f, path, openMode, entry)
+				c.staging.RegisterHandle(path, h)
+				return h, nil
 			}
-			h := newStagedHandle(c, f, path, openMode, entry)
-			c.staging.RegisterHandle(path, h)
-			return h, nil
-		}
-
-		if openMode.Truncate() {
-			f, err := c.staging.OpenForWrite(path, true)
-			if err != nil {
-				return nil, err
+		} else if openMode.Truncate() {
+			f, stagingErr := c.staging.OpenForWrite(path, true)
+			if stagingErr != nil {
+				if !errors.Is(stagingErr, stagingfs.ErrQuotaExceeded) {
+					return nil, stagingErr
+				}
+			} else {
+				if err := f.Truncate(0); err != nil {
+					f.Close()
+					return nil, err
+				}
+				h := newStagedHandle(c, f, path, openMode, entry)
+				c.staging.RegisterHandle(path, h)
+				return h, nil
 			}
-			if err := f.Truncate(0); err != nil {
-				f.Close()
-				return nil, err
+		} else {
+			f, stagingErr := c.staging.OpenForReadWrite(path, true)
+			if stagingErr != nil {
+				if !errors.Is(stagingErr, stagingfs.ErrQuotaExceeded) {
+					return nil, stagingErr
+				}
+			} else {
+				h := newStagedHandle(c, f, path, openMode, entry)
+				c.staging.RegisterHandle(path, h)
+				return h, nil
 			}
-			h := newStagedHandle(c, f, path, openMode, entry)
-			c.staging.RegisterHandle(path, h)
-			return h, nil
 		}
-
-		f, err := c.staging.OpenForReadWrite(path, true)
-		if err != nil {
-			return nil, err
-		}
-		h := newStagedHandle(c, f, path, openMode, entry)
-		c.staging.RegisterHandle(path, h)
-		return h, nil
+		// staging quota exceeded — fall through to direct iRODS write
+		logger.Warnf("staging quota exceeded, falling back to direct iRODS write for %q", path)
 	}
 
-	return c.OpenFile(path, mode)
+	return c.client.OpenFile(path, mode)
 }
 
 func (c *IRODSFSClientBuffered) TruncateFile(path string, size int64) error {

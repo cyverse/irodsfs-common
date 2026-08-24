@@ -15,6 +15,10 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// ErrQuotaExceeded is returned by ensureQuota when staging space cannot be freed sufficiently.
+// Callers may use errors.Is to detect this and fall back to a non-staging path.
+var ErrQuotaExceeded = errors.New("staging quota exceeded")
+
 // PathHolder is implemented by any object that holds a staging path reference and
 // must be notified when the path changes (e.g. due to a rename while the handle is open).
 type PathHolder interface {
@@ -1088,8 +1092,10 @@ func (sf *StagingFS) ensureQuota(size int64) error {
 	current := sf.currentSize
 	sf.sizeMutex.Unlock()
 
-	return errors.Errorf("staging quota exceeded: current %d + requested %d > max %d",
-		current, size, sf.maxSize)
+	return errors.Mark(
+		errors.Errorf("staging quota exceeded: current %d + requested %d > max %d", current, size, sf.maxSize),
+		ErrQuotaExceeded,
+	)
 }
 
 // evictCachedOldest removes the oldest cached files (by LastAccessedAt) until needed bytes are freed.
