@@ -40,7 +40,7 @@ func newStagedHandle(client *IRODSFSClientBuffered, file *os.File, irodsPath str
 			"mode":      string(mode),
 		})
 	} else {
-		handleLogger = log.NewEntry(log.StandardLogger()).WithFields(log.Fields{
+		handleLogger = log.WithFields(log.Fields{
 			"handle_id": handleID,
 			"path":      irodsPath,
 			"mode":      string(mode),
@@ -150,7 +150,6 @@ func (h *IRODSFSClientBufferedStagedHandle) WriteAt(data []byte, offset int64) (
 	return n, nil
 }
 
-
 func (h *IRODSFSClientBufferedStagedHandle) Truncate(size int64) error {
 	defer util.StackTraceFromPanic(h.logger)
 
@@ -174,19 +173,34 @@ func (h *IRODSFSClientBufferedStagedHandle) Flush() error {
 	return h.file.Sync()
 }
 
+// UpdateStagingPath updates the iRODS path held by this handle. Called by StagingFS.Rename
+// to keep the handle's path in sync after a rename while the handle is open.
+func (h *IRODSFSClientBufferedStagedHandle) UpdateStagingPath(newPath string) {
+	h.mu.Lock()
+	h.irodsPath = newPath
+	h.mu.Unlock()
+}
+
 func (h *IRODSFSClientBufferedStagedHandle) Close() error {
 	defer util.StackTraceFromPanic(h.logger)
 
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	err := h.file.Close()
+	currentPath := h.irodsPath
+	h.mu.Unlock() // release before calling staging methods to avoid deadlock with Rename
 
-	if err := h.file.Close(); err != nil {
+	if err != nil {
 		return err
 	}
 
-	// Invalidate read cache for this path since local writes may differ
 	if h.client != nil {
-		h.client.invalidateFileCacheBlocks(h.irodsPath)
+		if h.client.staging != nil {
+			// Update size tracking to reflect all bytes written via WriteAt.
+			h.client.staging.NotifyFileClosed(currentPath)
+			h.client.staging.ReleaseRef(currentPath)
+			h.client.staging.UnregisterHandle(currentPath, h)
+		}
+		h.client.invalidateFileCacheBlocks(currentPath)
 	}
 
 	return nil

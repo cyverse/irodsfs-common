@@ -27,6 +27,7 @@ type IRODSFSClientBufferedConfig struct {
 	// Staging settings (leave StagingRootPath empty to disable staging/write support)
 	StagingRootPath    string                     // Local path for staging files
 	MaxStagingDataSize int64                      // Max disk usage for staged data (0 = use default 10GB)
+	MaxCacheFileSize   int64                      // Max size of a single file kept as read cache after sync (0 = use default 1GB)
 	SyncInterval       time.Duration              // Background sync interval (default: 5s)
 	GracePeriod        time.Duration              // Grace period before sync (default: 10s)
 	UsePersistence     bool                       // Use BadgerDB for crash recovery
@@ -77,12 +78,13 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 	var staging *stagingfs.StagingFS
 	if config.StagingRootPath != "" {
 		stagingConfig := &stagingfs.StagingFSConfig{
-			LocalRootPath: config.StagingRootPath,
-			Client:        directClient,
-			MaxDataSize:   config.MaxStagingDataSize,
-			SyncInterval:  config.SyncInterval,
-			GracePeriod:   config.GracePeriod,
-			OnSyncError:   config.OnSyncError,
+			LocalRootPath:    config.StagingRootPath,
+			Client:           directClient,
+			MaxDataSize:      config.MaxStagingDataSize,
+			MaxCacheFileSize: config.MaxCacheFileSize,
+			SyncInterval:     config.SyncInterval,
+			GracePeriod:      config.GracePeriod,
+			OnSyncError:      config.OnSyncError,
 		}
 
 		if config.UsePersistence {
@@ -453,7 +455,7 @@ func (c *IRODSFSClientBuffered) CreateFile(path string, mode string) (IRODSFSFil
 
 	// Use staging for write modes
 	if c.staging != nil && openMode.IsWrite() {
-		f, err := c.staging.OpenForWrite(path)
+		f, err := c.staging.OpenForWrite(path, false)
 		if err != nil {
 			return nil, err
 		}
@@ -466,7 +468,9 @@ func (c *IRODSFSClientBuffered) CreateFile(path string, mode string) (IRODSFSFil
 			}
 		}
 
-		return newStagedHandleForNewFile(c, f, path, openMode), nil
+		h := newStagedHandleForNewFile(c, f, path, openMode)
+		c.staging.RegisterHandle(path, h)
+		return h, nil
 	}
 
 	// Fallback to direct for non-staging
@@ -507,20 +511,17 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 		}
 
 		if openMode.IsRead() {
-			// Read+Write mode (r+, a+): download first, then allow read/write
-			f, err := c.staging.OpenForReadWrite(path)
+			f, err := c.staging.OpenForReadWrite(path, false)
 			if err != nil {
 				return nil, err
 			}
-
-			// For append mode, caller handles seeking; local file has full content
-			return newStagedHandle(c, f, path, openMode, entry), nil
+			h := newStagedHandle(c, f, path, openMode, entry)
+			c.staging.RegisterHandle(path, h)
+			return h, nil
 		}
 
-		// Write-only mode (w, w+, a)
 		if openMode.Truncate() {
-			// w+ mode: no need to download, start fresh
-			f, err := c.staging.OpenForWrite(path)
+			f, err := c.staging.OpenForWrite(path, false)
 			if err != nil {
 				return nil, err
 			}
@@ -528,15 +529,18 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 				f.Close()
 				return nil, err
 			}
-			return newStagedHandle(c, f, path, openMode, entry), nil
+			h := newStagedHandle(c, f, path, openMode, entry)
+			c.staging.RegisterHandle(path, h)
+			return h, nil
 		}
 
-		// w, a modes: need existing content to avoid data loss
-		f, err := c.staging.OpenForReadWrite(path)
+		f, err := c.staging.OpenForReadWrite(path, false)
 		if err != nil {
 			return nil, err
 		}
-		return newStagedHandle(c, f, path, openMode, entry), nil
+		h := newStagedHandle(c, f, path, openMode, entry)
+		c.staging.RegisterHandle(path, h)
+		return h, nil
 	}
 
 	// Read-only mode: check staging first
@@ -576,6 +580,93 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 		helper:    c.helper,
 		logger:    handleLogger,
 	}, nil
+}
+
+func (c *IRODSFSClientBuffered) CreateFileBulk(path string, mode string) (IRODSFSFileHandle, error) {
+	logger := c.logger.WithFields(log.Fields{
+		"path": path,
+		"mode": mode,
+	})
+
+	defer util.StackTraceFromPanic(logger)
+
+	if err := c.invalidateFileCacheBlocks(path); err != nil {
+		logger.Warnf("failed to invalidate cache before file creation: %v", err)
+	}
+
+	openMode := irodsclient_types.FileOpenMode(mode)
+
+	if c.staging != nil && openMode.IsWrite() {
+		f, err := c.staging.OpenForWrite(path, true)
+		if err != nil {
+			return nil, err
+		}
+
+		if openMode.Truncate() {
+			if err := f.Truncate(0); err != nil {
+				f.Close()
+				return nil, err
+			}
+		}
+
+		h := newStagedHandleForNewFile(c, f, path, openMode)
+		c.staging.RegisterHandle(path, h)
+		return h, nil
+	}
+
+	return c.CreateFile(path, mode)
+}
+
+func (c *IRODSFSClientBuffered) OpenFileBulk(path string, mode string) (IRODSFSFileHandle, error) {
+	logger := c.logger.WithFields(log.Fields{
+		"path": path,
+		"mode": mode,
+	})
+
+	defer util.StackTraceFromPanic(logger)
+
+	openMode := irodsclient_types.FileOpenMode(mode)
+
+	if c.staging != nil && openMode.IsWrite() {
+		entry, err := c.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+
+		if openMode.IsRead() {
+			f, err := c.staging.OpenForReadWrite(path, true)
+			if err != nil {
+				return nil, err
+			}
+			h := newStagedHandle(c, f, path, openMode, entry)
+			c.staging.RegisterHandle(path, h)
+			return h, nil
+		}
+
+		if openMode.Truncate() {
+			f, err := c.staging.OpenForWrite(path, true)
+			if err != nil {
+				return nil, err
+			}
+			if err := f.Truncate(0); err != nil {
+				f.Close()
+				return nil, err
+			}
+			h := newStagedHandle(c, f, path, openMode, entry)
+			c.staging.RegisterHandle(path, h)
+			return h, nil
+		}
+
+		f, err := c.staging.OpenForReadWrite(path, true)
+		if err != nil {
+			return nil, err
+		}
+		h := newStagedHandle(c, f, path, openMode, entry)
+		c.staging.RegisterHandle(path, h)
+		return h, nil
+	}
+
+	return c.OpenFile(path, mode)
 }
 
 func (c *IRODSFSClientBuffered) TruncateFile(path string, size int64) error {
@@ -797,7 +888,10 @@ func (c *IRODSFSClientBuffered) DownloadFileParallelWithCallback(irodsPath strin
 	return err
 }
 
-// UploadFile uploads a file and invalidates cache based on server file size
+// UploadFile stages a file for bulk upload. The file is copied into the staging area and
+// uploaded to iRODS by the background sync worker. Unlike FUSE-written files (ActionUpload),
+// bulk-uploaded files are deleted from local storage immediately after sync (not cached).
+// Falls back to direct upload if staging is not configured.
 func (c *IRODSFSClientBuffered) UploadFile(localPath string, irodsPath string, transferCallback irodsclient_common.TransferTrackerCallback) error {
 	logger := c.logger.WithFields(log.Fields{
 		"localPath": localPath,
@@ -806,12 +900,16 @@ func (c *IRODSFSClientBuffered) UploadFile(localPath string, irodsPath string, t
 
 	defer util.StackTraceFromPanic(logger)
 
-	// Upload file
-	if err := c.client.UploadFile(localPath, irodsPath, transferCallback); err != nil {
-		return err
+	if c.staging != nil {
+		if err := c.staging.StageForBulkUpload(localPath, irodsPath); err != nil {
+			return err
+		}
+	} else {
+		if err := c.client.UploadFile(localPath, irodsPath, transferCallback); err != nil {
+			return err
+		}
 	}
 
-	// Invalidate cache based on server file size after upload
 	if err := c.invalidateFileCacheBlocks(irodsPath); err != nil {
 		logger.Warnf("failed to invalidate cache after upload: %v", err)
 	}
@@ -819,7 +917,7 @@ func (c *IRODSFSClientBuffered) UploadFile(localPath string, irodsPath string, t
 	return nil
 }
 
-// UploadFileParallel uploads a file in parallel and invalidates cache based on server file size
+// UploadFileParallel stages a file for bulk upload (parallel). See UploadFile for details.
 func (c *IRODSFSClientBuffered) UploadFileParallel(localPath string, irodsPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error {
 	logger := c.logger.WithFields(log.Fields{
 		"localPath": localPath,
@@ -829,12 +927,16 @@ func (c *IRODSFSClientBuffered) UploadFileParallel(localPath string, irodsPath s
 
 	defer util.StackTraceFromPanic(logger)
 
-	// Upload file in parallel
-	if err := c.client.UploadFileParallel(localPath, irodsPath, taskNum, transferCallback); err != nil {
-		return err
+	if c.staging != nil {
+		if err := c.staging.StageForBulkUpload(localPath, irodsPath); err != nil {
+			return err
+		}
+	} else {
+		if err := c.client.UploadFileParallel(localPath, irodsPath, taskNum, transferCallback); err != nil {
+			return err
+		}
 	}
 
-	// Invalidate cache based on server file size after upload
 	if err := c.invalidateFileCacheBlocks(irodsPath); err != nil {
 		logger.Warnf("failed to invalidate cache after upload: %v", err)
 	}

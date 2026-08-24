@@ -35,6 +35,8 @@ type IRODSFSClient interface {
 	RenameFileToFile(srcPath string, destPath string) error
 	CreateFile(path string, mode string) (IRODSFSFileHandle, error)
 	OpenFile(path string, mode string) (IRODSFSFileHandle, error)
+	CreateFileBulk(path string, mode string) (IRODSFSFileHandle, error)
+	OpenFileBulk(path string, mode string) (IRODSFSFileHandle, error)
 	TruncateFile(path string, size int64) error
 
 	// Sync

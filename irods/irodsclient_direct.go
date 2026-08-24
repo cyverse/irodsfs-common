@@ -271,6 +271,16 @@ func (c *IRODSFSClientDirect) OpenFile(path string, mode string) (IRODSFSFileHan
 	return fileHandle, nil
 }
 
+// CreateFileBulk delegates to CreateFile (Direct has no staging distinction)
+func (c *IRODSFSClientDirect) CreateFileBulk(path string, mode string) (IRODSFSFileHandle, error) {
+	return c.CreateFile(path, mode)
+}
+
+// OpenFileBulk delegates to OpenFile (Direct has no staging distinction)
+func (c *IRODSFSClientDirect) OpenFileBulk(path string, mode string) (IRODSFSFileHandle, error) {
+	return c.OpenFile(path, mode)
+}
+
 // TruncateFile truncates a file
 func (c *IRODSFSClientDirect) TruncateFile(path string, size int64) error {
 	logger := c.logger.WithFields(log.Fields{

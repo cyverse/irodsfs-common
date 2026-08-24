@@ -19,7 +19,8 @@ type (
 type ActionType int
 
 const (
-	ActionUpload ActionType = iota
+	ActionUpload     ActionType = iota
+	ActionBulkUpload            // bulk upload via UploadFile/UploadFileParallel; deleted immediately after sync (not cached)
 	ActionRename
 	ActionRenameDir
 	ActionDelete
@@ -31,6 +32,8 @@ func (a ActionType) String() string {
 	switch a {
 	case ActionUpload:
 		return "UPLOAD"
+	case ActionBulkUpload:
+		return "BULK_UPLOAD"
 	case ActionRename:
 		return "RENAME"
 	case ActionRenameDir:
@@ -46,15 +49,38 @@ func (a ActionType) String() string {
 	}
 }
 
+// StagingFileState represents whether a local staging file is dirty (pending sync) or cached (already synced)
+type StagingFileState int
+
+const (
+	// StagingFileDirty means the local file has pending changes that need to be synced to iRODS
+	StagingFileDirty StagingFileState = iota
+	// StagingFileCached means the local file has been synced and is kept as a read cache
+	StagingFileCached
+)
+
+func (s StagingFileState) String() string {
+	switch s {
+	case StagingFileDirty:
+		return "DIRTY"
+	case StagingFileCached:
+		return "CACHED"
+	default:
+		return "UNKNOWN"
+	}
+}
+
 // StagingMetadata represents the state of a staged file
 type StagingMetadata struct {
-	Path           string     // Current path
-	OldPath        string     // Old path (for RENAME actions)
-	Action         ActionType // Final action
-	IsNew          bool       // Is this a new file?
-	CreatedAt      time.Time  // Creation time
-	LastModifiedAt time.Time  // Last modification time
-	SyncFailCount  int        // Number of consecutive sync failures
+	Path           string           // Current path
+	OldPath        string           // Old path (for RENAME actions)
+	Action         ActionType       // Final action
+	IsNew          bool             // Is this a new file?
+	CreatedAt      time.Time        // Creation time
+	LastModifiedAt time.Time        // Last modification time
+	SyncFailCount  int              // Number of consecutive sync failures
+	FileState      StagingFileState // Whether local file is dirty or cached
+	LastAccessedAt time.Time        // Last time the cached file was accessed (for eviction)
 }
 
 // StagingStateManager manages staging metadata for async uploads
@@ -104,6 +130,29 @@ func (sm *StagingStateManager) Create(path string) error {
 	meta := &StagingMetadata{
 		Path:           path,
 		Action:         ActionUpload,
+		IsNew:          true,
+		CreatedAt:      now,
+		LastModifiedAt: now,
+	}
+	return sm.persistMetadata(path, meta)
+}
+
+// CreateBulkUpload registers a path for bulk upload (will be deleted after sync, not cached)
+func (sm *StagingStateManager) CreateBulkUpload(path string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	for sm.lockedPaths[path] {
+		if sm.pathConds[path] == nil {
+			sm.pathConds[path] = sync.NewCond(&sm.mu)
+		}
+		sm.pathConds[path].Wait()
+	}
+
+	now := time.Now()
+	meta := &StagingMetadata{
+		Path:           path,
+		Action:         ActionBulkUpload,
 		IsNew:          true,
 		CreatedAt:      now,
 		LastModifiedAt: now,
@@ -511,14 +560,17 @@ func (sm *StagingStateManager) Get(path string) *StagingMetadata {
 	return sm.metadata[path]
 }
 
-// GetAll returns all staged metadata
+// GetAll returns deep copies of all staged metadata.
+// Deep copies prevent concurrent mutations (via Delete, Rename, etc.) from affecting
+// the caller's snapshot — a necessary guarantee for the background sync worker.
 func (sm *StagingStateManager) GetAll() map[string]*StagingMetadata {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
 	result := make(map[string]*StagingMetadata)
 	for k, v := range sm.metadata {
-		result[k] = v
+		copy := *v
+		result[k] = &copy
 	}
 	return result
 }
@@ -556,21 +608,30 @@ func (sm *StagingStateManager) syncOne(meta *StagingMetadata) error {
 		}
 	}
 
-	// Remove from metadata and Badger with lock
+	// Remove from metadata with lock, but only if it hasn't been replaced by a newer
+	// operation (e.g. OpenForWrite called between our snapshot and now).
+	// We detect replacement by comparing LastModifiedAt: a concurrent Create/Modify
+	// always sets a strictly later timestamp, so if the live entry is newer we leave it
+	// for the next sync cycle rather than deleting the fresh registration.
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
 
-	if err := sm.deleteMetadata(meta.Path); err != nil {
-		return err
+	current := sm.metadata[meta.Path]
+	var deleteErr error
+	if current != nil && !current.LastModifiedAt.After(meta.LastModifiedAt) {
+		deleteErr = sm.deleteMetadata(meta.Path)
 	}
+	// current==nil: already removed externally (e.g. DELETE on a new file) — nothing to do.
+	// current.LastModifiedAt > meta.LastModifiedAt: newer entry registered during upload
+	// — leave it; next sync cycle will handle it.
 
-	// Unlock path and signal waiting goroutines
+	// Always unlock path and signal, even on error.
 	delete(sm.lockedPaths, meta.Path)
 	if sm.pathConds[meta.Path] != nil {
 		sm.pathConds[meta.Path].Broadcast()
 	}
+	sm.mu.Unlock()
 
-	return nil
+	return deleteErr
 }
 
 // SyncAll performs all pending iRODS operations and clears metadata one by one (exclusive lock)
@@ -606,12 +667,14 @@ func (sm *StagingStateManager) SyncAll() error {
 func (sm *StagingStateManager) SyncOld(gracePeriod time.Duration) error {
 	sm.mu.Lock()
 
-	// Find items older than grace period
+	// Find items older than grace period — take deep copies so concurrent mutations
+	// (e.g. Rename mutating Path, Delete mutating Action) don't affect our snapshot.
 	now := time.Now()
 	var metasToSync []*StagingMetadata
 	for _, meta := range sm.metadata {
 		if now.Sub(meta.LastModifiedAt) >= gracePeriod {
-			metasToSync = append(metasToSync, meta)
+			copy := *meta
+			metasToSync = append(metasToSync, &copy)
 		}
 	}
 

@@ -1,8 +1,11 @@
 package stagingfs
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,6 +14,12 @@ import (
 	"github.com/dgraph-io/badger/v3"
 	log "github.com/sirupsen/logrus"
 )
+
+// PathHolder is implemented by any object that holds a staging path reference and
+// must be notified when the path changes (e.g. due to a rename while the handle is open).
+type PathHolder interface {
+	UpdateStagingPath(newPath string)
+}
 
 // StagingClient defines the minimal interface that StagingFS needs from the backend storage
 type StagingClient interface {
@@ -32,11 +41,13 @@ type StagingFSConfig struct {
 	Client        StagingClient    // Backend storage client
 	SyncInterval  time.Duration    // How often the background worker runs (default: 5s)
 	GracePeriod   time.Duration    // Items older than this are synced (default: 10s)
-	MaxDataSize   int64            // Max total disk usage for staged data (default: 1GB, 0 = unlimited)
-	OnSyncError   SyncErrorHandler // Called when background sync fails for an item (optional)
+	MaxDataSize      int64            // Max total disk usage for staged data (default: 10GB, 0 = use default)
+	MaxCacheFileSize int64            // Files larger than this are not kept as read cache after sync (default: 1GB, 0 = cache all)
+	OnSyncError      SyncErrorHandler // Called when background sync fails for an item (optional)
 }
 
-const DefaultMaxDataSize = 10 * 1024 * 1024 * 1024 // 10GB
+const DefaultMaxDataSize = 10 * 1024 * 1024 * 1024      // 10GB
+const DefaultMaxCacheFileSize = 1 * 1024 * 1024 * 1024  // 1GB
 
 const MaxSyncFailCount = 3
 
@@ -47,11 +58,20 @@ type StagingFS struct {
 	client      StagingClient
 	stopCh      chan struct{}
 	stopOnce    sync.Once
-	sizeMutex   sync.Mutex
-	currentSize int64 // current total staged data size
-	maxSize     int64 // max allowed data size
+	sizeMutex        sync.Mutex
+	currentSize      int64 // current total staged data size (dirty + cached)
+	maxSize          int64 // max allowed data size
+	maxCacheFileSize int64 // files larger than this skip the read cache after sync
 	failedMutex sync.Mutex
 	failedItems map[string]*StagingMetadata // items that exceeded max retry count
+	cacheMutex  sync.Mutex
+	cachedItems map[string]*StagingMetadata // files that are synced and kept as read cache
+	refMu       sync.Mutex
+	openRefs    map[string]int // path → number of open write handles; sync skips these paths
+	handlesMu   sync.Mutex
+	handles     map[string][]PathHolder // path → open write handles (for rename path propagation)
+	pathSizesMu sync.Mutex
+	pathSizes   map[string]int64 // per-path tracked sizes for accurate currentSize accounting
 }
 
 // NewStagingFS creates a new StagingFS with memory-only state manager
@@ -87,13 +107,23 @@ func NewStagingFS(config *StagingFSConfig) (*StagingFS, error) {
 		maxSize = DefaultMaxDataSize
 	}
 
+	maxCacheFileSize := config.MaxCacheFileSize
+	if maxCacheFileSize == 0 {
+		maxCacheFileSize = DefaultMaxCacheFileSize
+	}
+
 	sf := &StagingFS{
 		config:      config,
 		sm:          sm,
 		client:      config.Client,
-		stopCh:      make(chan struct{}),
-		maxSize:     maxSize,
+		stopCh:           make(chan struct{}),
+		maxSize:          maxSize,
+		maxCacheFileSize: maxCacheFileSize,
 		failedItems: make(map[string]*StagingMetadata),
+		cachedItems: make(map[string]*StagingMetadata),
+		openRefs:    make(map[string]int),
+		handles:     make(map[string][]PathHolder),
+		pathSizes:   make(map[string]int64),
 	}
 
 	sf.currentSize = sf.computeDataDirSize()
@@ -148,13 +178,23 @@ func NewStagingFSWithPersistence(config *StagingFSConfig) (*StagingFS, error) {
 		maxSize = DefaultMaxDataSize
 	}
 
+	maxCacheFileSize := config.MaxCacheFileSize
+	if maxCacheFileSize == 0 {
+		maxCacheFileSize = DefaultMaxCacheFileSize
+	}
+
 	sf := &StagingFS{
 		config:      config,
 		sm:          sm,
 		client:      config.Client,
-		stopCh:      make(chan struct{}),
-		maxSize:     maxSize,
+		stopCh:           make(chan struct{}),
+		maxSize:          maxSize,
+		maxCacheFileSize: maxCacheFileSize,
 		failedItems: make(map[string]*StagingMetadata),
+		cachedItems: make(map[string]*StagingMetadata),
+		openRefs:    make(map[string]int),
+		handles:     make(map[string][]PathHolder),
+		pathSizes:   make(map[string]int64),
 	}
 
 	sf.currentSize = sf.computeDataDirSize()
@@ -197,32 +237,82 @@ func (sf *StagingFS) Create(path string) error {
 	return nil
 }
 
-// OpenForWrite opens a file for writing only
-func (sf *StagingFS) OpenForWrite(path string) (*os.File, error) {
+// AcquireRef increments the open-handle ref count for path, preventing sync from touching it.
+func (sf *StagingFS) AcquireRef(path string) {
+	sf.refMu.Lock()
+	sf.openRefs[path]++
+	sf.refMu.Unlock()
+}
+
+// ReleaseRef decrements the open-handle ref count for path.
+func (sf *StagingFS) ReleaseRef(path string) {
+	sf.refMu.Lock()
+	sf.openRefs[path]--
+	if sf.openRefs[path] <= 0 {
+		delete(sf.openRefs, path)
+	}
+	sf.refMu.Unlock()
+}
+
+// RegisterHandle records a write handle so it can be notified on rename.
+func (sf *StagingFS) RegisterHandle(path string, h PathHolder) {
+	sf.handlesMu.Lock()
+	sf.handles[path] = append(sf.handles[path], h)
+	sf.handlesMu.Unlock()
+}
+
+// UnregisterHandle removes a write handle from the registry (called on Close).
+func (sf *StagingFS) UnregisterHandle(path string, h PathHolder) {
+	sf.handlesMu.Lock()
+	list := sf.handles[path]
+	for i, entry := range list {
+		if entry == h {
+			sf.handles[path] = append(list[:i], list[i+1:]...)
+			break
+		}
+	}
+	if len(sf.handles[path]) == 0 {
+		delete(sf.handles, path)
+	}
+	sf.handlesMu.Unlock()
+}
+
+// hasOpenRef returns true if path currently has open write handles.
+func (sf *StagingFS) hasOpenRef(path string) bool {
+	sf.refMu.Lock()
+	defer sf.refMu.Unlock()
+	return sf.openRefs[path] > 0
+}
+
+// OpenForWrite opens a file for writing only.
+// If bulk is true, the file is registered as ActionBulkUpload and deleted after sync (not cached).
+func (sf *StagingFS) OpenForWrite(path string, bulk bool) (*os.File, error) {
 	sf.sm.WaitForSync(path)
 
-	if err := sf.checkQuota(0); err != nil {
+	if err := sf.ensureQuota(0); err != nil {
 		return nil, err
 	}
 
 	localPath := sf.getLocalDataPath(path)
 
-	// Ensure parent directory exists
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 		return nil, errors.Wrap(err, "failed to create parent directory")
 	}
 
-	// Check if file already exists or needs to be created
-	meta := sf.sm.Get(path)
-	if meta == nil {
-		// File doesn't exist, create metadata
-		if err := sf.sm.Create(path); err != nil {
+	if bulk {
+		if err := sf.sm.CreateBulkUpload(path); err != nil {
 			return nil, err
 		}
-	} else if meta.Action != ActionUpload {
-		// If file exists but isn't in UPLOAD state, mark as modified
-		if err := sf.sm.Modify(path); err != nil {
-			return nil, err
+	} else {
+		meta := sf.sm.Get(path)
+		if meta == nil {
+			if err := sf.sm.Create(path); err != nil {
+				return nil, err
+			}
+		} else if meta.Action != ActionUpload {
+			if err := sf.sm.Modify(path); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -231,6 +321,7 @@ func (sf *StagingFS) OpenForWrite(path string) (*os.File, error) {
 		return nil, errors.Wrap(err, "failed to open local file for writing")
 	}
 
+	sf.AcquireRef(path)
 	return f, nil
 }
 
@@ -253,18 +344,11 @@ func (sf *StagingFS) TruncateFile(path string, size int64) error {
 
 	localPath := sf.getLocalDataPath(path)
 
-	oldInfo, err := os.Stat(localPath)
-	if err != nil {
-		return errors.Wrap(err, "failed to stat local file for truncate")
-	}
-
 	if err := os.Truncate(localPath, size); err != nil {
 		return errors.Wrap(err, "failed to truncate local file")
 	}
 
-	// Adjust tracked data size
-	sf.subtractDataSize(oldInfo.Size())
-	sf.addDataSize(size)
+	sf.setPathSize(path, size)
 
 	// Update last modified time to reset grace period
 	meta := sf.sm.Get(path)
@@ -275,15 +359,18 @@ func (sf *StagingFS) TruncateFile(path string, size int64) error {
 	return nil
 }
 
-// OpenForReadWrite opens a file for reading and writing (downloads from iRODS first)
-func (sf *StagingFS) OpenForReadWrite(path string) (*os.File, error) {
+// OpenForReadWrite opens a file for reading and writing (downloads from iRODS first).
+// If bulk is true, the file is registered as ActionBulkUpload and deleted after sync (not cached).
+func (sf *StagingFS) OpenForReadWrite(path string, bulk bool) (*os.File, error) {
 	sf.sm.WaitForSync(path)
+
+	if err := sf.ensureQuota(0); err != nil {
+		return nil, err
+	}
 
 	localPath := sf.getLocalDataPath(path)
 
-	// Download file from iRODS if not already present locally
 	if _, err := os.Stat(localPath); os.IsNotExist(err) {
-		// Ensure parent directory exists
 		if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 			return nil, errors.Wrap(err, "failed to create parent directory")
 		}
@@ -292,23 +379,21 @@ func (sf *StagingFS) OpenForReadWrite(path string) (*os.File, error) {
 			return nil, errors.Wrapf(err, "failed to download file from iRODS: %s", path)
 		}
 
-		// Track downloaded file size
 		if info, err := os.Stat(localPath); err == nil {
-			sf.addDataSize(info.Size())
+			sf.setPathSize(path, info.Size())
 		}
 	}
 
-	// Mark as modified in staging metadata
-	meta := sf.sm.Get(path)
-	if meta == nil {
-		// File doesn't exist in staging, create metadata
-		if err := sf.sm.Modify(path); err != nil {
+	if bulk {
+		if err := sf.sm.CreateBulkUpload(path); err != nil {
 			return nil, err
 		}
-	} else if meta.Action != ActionUpload {
-		// If file exists but isn't in UPLOAD state, mark as modified
-		if err := sf.sm.Modify(path); err != nil {
-			return nil, err
+	} else {
+		meta := sf.sm.Get(path)
+		if meta == nil || meta.Action != ActionUpload {
+			if err := sf.sm.Modify(path); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -317,6 +402,7 @@ func (sf *StagingFS) OpenForReadWrite(path string) (*os.File, error) {
 		return nil, errors.Wrap(err, "failed to open local file for reading and writing")
 	}
 
+	sf.AcquireRef(path)
 	return f, nil
 }
 
@@ -327,12 +413,50 @@ func (sf *StagingFS) Rename(oldPath, newPath string) error {
 		return err
 	}
 
-	if syncNow {
-		return nil
+	// Update cachedItems
+	sf.cacheMutex.Lock()
+	if cached, exists := sf.cachedItems[oldPath]; exists {
+		delete(sf.cachedItems, oldPath)
+		cached.Path = newPath
+		sf.cachedItems[newPath] = cached
+	}
+	sf.cacheMutex.Unlock()
+
+	// Update per-path size tracking
+	sf.pathSizesMu.Lock()
+	if size, exists := sf.pathSizes[oldPath]; exists {
+		delete(sf.pathSizes, oldPath)
+		sf.pathSizes[newPath] = size
+	}
+	sf.pathSizesMu.Unlock()
+
+	// Move open refs and collect handles to notify (outside handlesMu to avoid deadlock)
+	sf.refMu.Lock()
+	if count, exists := sf.openRefs[oldPath]; exists {
+		delete(sf.openRefs, oldPath)
+		sf.openRefs[newPath] += count
+	}
+	sf.refMu.Unlock()
+
+	sf.handlesMu.Lock()
+	movedHandles := sf.handles[oldPath]
+	delete(sf.handles, oldPath)
+	if len(movedHandles) > 0 {
+		sf.handles[newPath] = append(sf.handles[newPath], movedHandles...)
+	}
+	sf.handlesMu.Unlock()
+
+	// Notify handles of the new path (after releasing handlesMu to avoid deadlock with Close)
+	for _, h := range movedHandles {
+		h.UpdateStagingPath(newPath)
 	}
 
 	oldLocalPath := sf.getLocalDataPath(oldPath)
 	newLocalPath := sf.getLocalDataPath(newPath)
+
+	if _, err := os.Stat(oldLocalPath); err != nil {
+		return nil
+	}
 
 	if err := os.MkdirAll(filepath.Dir(newLocalPath), 0755); err != nil {
 		return errors.Wrap(err, "failed to create parent directory")
@@ -342,6 +466,7 @@ func (sf *StagingFS) Rename(oldPath, newPath string) error {
 		return errors.Wrap(err, "failed to rename local file")
 	}
 
+	_ = syncNow
 	return nil
 }
 
@@ -352,12 +477,71 @@ func (sf *StagingFS) RenameDir(oldPath, newPath string) error {
 		return err
 	}
 
-	if syncNow {
-		return nil
+	oldPrefix := oldPath + "/"
+
+	// Update cachedItems under oldPath
+	sf.cacheMutex.Lock()
+	for p, cached := range sf.cachedItems {
+		if p == oldPath || strings.HasPrefix(p, oldPrefix) {
+			delete(sf.cachedItems, p)
+			updated := newPath + p[len(oldPath):]
+			cached.Path = updated
+			sf.cachedItems[updated] = cached
+		}
+	}
+	sf.cacheMutex.Unlock()
+
+	// Update per-path size tracking under oldPath
+	sf.pathSizesMu.Lock()
+	for p, size := range sf.pathSizes {
+		if p == oldPath || strings.HasPrefix(p, oldPrefix) {
+			delete(sf.pathSizes, p)
+			sf.pathSizes[newPath+p[len(oldPath):]] = size
+		}
+	}
+	sf.pathSizesMu.Unlock()
+
+	// Move open refs for all paths under oldPath
+	sf.refMu.Lock()
+	for p, count := range sf.openRefs {
+		if p == oldPath || strings.HasPrefix(p, oldPrefix) {
+			delete(sf.openRefs, p)
+			sf.openRefs[newPath+p[len(oldPath):]] += count
+		}
+	}
+	sf.refMu.Unlock()
+
+	// Collect and move handles under oldPath
+	var toNotify []struct {
+		h       PathHolder
+		newPath string
+	}
+	sf.handlesMu.Lock()
+	for p, list := range sf.handles {
+		if p == oldPath || strings.HasPrefix(p, oldPrefix) {
+			updated := newPath + p[len(oldPath):]
+			delete(sf.handles, p)
+			sf.handles[updated] = append(sf.handles[updated], list...)
+			for _, h := range list {
+				toNotify = append(toNotify, struct {
+					h       PathHolder
+					newPath string
+				}{h, updated})
+			}
+		}
+	}
+	sf.handlesMu.Unlock()
+
+	for _, n := range toNotify {
+		n.h.UpdateStagingPath(n.newPath)
 	}
 
 	oldLocalPath := sf.getLocalDataPath(oldPath)
 	newLocalPath := sf.getLocalDataPath(newPath)
+
+	if _, err := os.Stat(oldLocalPath); err != nil {
+		return nil
+	}
 
 	if err := os.MkdirAll(filepath.Dir(newLocalPath), 0755); err != nil {
 		return errors.Wrap(err, "failed to create parent directory")
@@ -367,6 +551,7 @@ func (sf *StagingFS) RenameDir(oldPath, newPath string) error {
 		return errors.Wrap(err, "failed to rename local directory")
 	}
 
+	_ = syncNow
 	return nil
 }
 
@@ -376,13 +561,14 @@ func (sf *StagingFS) Delete(path string) error {
 		return err
 	}
 
+	// Remove from cached items if present
+	sf.cacheMutex.Lock()
+	delete(sf.cachedItems, path)
+	sf.cacheMutex.Unlock()
+
 	localPath := sf.getLocalDataPath(path)
 
-	// Track size before removal
-	if info, err := os.Stat(localPath); err == nil {
-		sf.subtractDataSize(info.Size())
-	}
-
+	sf.removePathSize(path) // must be called before os.Remove for stat fallback
 	if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
 		return errors.Wrap(err, "failed to delete local file")
 	}
@@ -440,6 +626,10 @@ func (sf *StagingFS) SyncAll() error {
 	sf.currentSize = 0
 	sf.sizeMutex.Unlock()
 
+	sf.pathSizesMu.Lock()
+	sf.pathSizes = make(map[string]int64)
+	sf.pathSizesMu.Unlock()
+
 	return os.MkdirAll(dataPath, 0755)
 }
 
@@ -475,7 +665,7 @@ func (sf *StagingFS) SyncOld(gracePeriod time.Duration) error {
 func (sf *StagingFS) registerDefaultHandler() {
 	handler := func(meta *StagingMetadata) error {
 		switch meta.Action {
-		case ActionUpload:
+		case ActionUpload, ActionBulkUpload:
 			// Upload file to iRODS in parallel
 			localPath := sf.getLocalDataPath(meta.Path)
 
@@ -586,6 +776,11 @@ func (sf *StagingFS) syncOldItems(gracePeriod time.Duration) {
 			continue
 		}
 
+		// Skip files that currently have open write handles to avoid syncing mid-write
+		if sf.hasOpenRef(meta.Path) {
+			continue
+		}
+
 		if err := sf.sm.syncOne(meta); err != nil {
 			meta.SyncFailCount++
 			log.Warnf("background sync failed for %s (%s), attempt %d: %v", meta.Path, meta.Action, meta.SyncFailCount, err)
@@ -604,18 +799,173 @@ func (sf *StagingFS) syncOldItems(gracePeriod time.Duration) {
 			continue
 		}
 
-		// Clean up local file after successful sync
-		localPath := sf.getLocalDataPath(meta.Path)
-		if info, err := os.Stat(localPath); err == nil {
-			sf.subtractDataSize(info.Size())
+		// BulkUpload: delete local file immediately after sync (no caching).
+		// Guard: a concurrent StageForBulkUpload may have already written a new file to
+		// this staging path while syncOne was running.  Only delete if no new metadata
+		// entry was registered in the meantime.
+		if meta.Action == ActionBulkUpload {
+			if sf.sm.Get(meta.Path) == nil {
+				localPath := sf.getLocalDataPath(meta.Path)
+				sf.removePathSize(meta.Path)
+				os.Remove(localPath)
+			}
+		} else {
+			sf.transitionToCached(meta)
 		}
-		os.Remove(localPath)
 	}
+}
+
+// transitionToCached moves a successfully synced file into the cached items map
+func (sf *StagingFS) transitionToCached(meta *StagingMetadata) {
+	// Only files with local data can be cached
+	if meta.Action != ActionUpload {
+		return
+	}
+
+	// If a new dirty entry was registered for this path while syncOne was running
+	// (e.g. a concurrent OpenForWrite), adding a stale cache entry would be misleading.
+	// The next sync cycle will re-cache correctly once the new writes are synced.
+	if sf.sm.Get(meta.Path) != nil {
+		return
+	}
+
+	localPath := sf.getLocalDataPath(meta.Path)
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return
+	}
+
+	// Large files are not worth caching locally — delete immediately after sync
+	if info.Size() > sf.maxCacheFileSize {
+		sf.removePathSize(meta.Path) // must be called before os.Remove for stat fallback
+		os.Remove(localPath)
+		return
+	}
+
+	now := time.Now()
+	cached := &StagingMetadata{
+		Path:           meta.Path,
+		Action:         meta.Action,
+		IsNew:          meta.IsNew,
+		CreatedAt:      meta.CreatedAt,
+		LastModifiedAt: meta.LastModifiedAt,
+		FileState:      StagingFileCached,
+		LastAccessedAt: now,
+	}
+
+	sf.cacheMutex.Lock()
+	sf.cachedItems[meta.Path] = cached
+	sf.cacheMutex.Unlock()
+
+	// Proactively evict old cached files if total size exceeds the quota
+	sf.sizeMutex.Lock()
+	overflow := sf.currentSize - sf.maxSize
+	sf.sizeMutex.Unlock()
+	if overflow > 0 {
+		sf.evictCachedOldest(overflow)
+	}
+}
+
+// GetCachedItems returns all files currently kept as read cache
+func (sf *StagingFS) GetCachedItems() map[string]*StagingMetadata {
+	sf.cacheMutex.Lock()
+	defer sf.cacheMutex.Unlock()
+
+	result := make(map[string]*StagingMetadata, len(sf.cachedItems))
+	for k, v := range sf.cachedItems {
+		result[k] = v
+	}
+	return result
 }
 
 // GetLocalDataPath returns the local file path for an iRODS path (exported for external use)
 func (sf *StagingFS) GetLocalDataPath(path string) string {
 	return sf.getLocalDataPath(path)
+}
+
+// EvictCachedFile removes a file from the cached items and deletes the local copy.
+// This is called after a bulk upload (UploadFile/UploadFileParallel) so the freshly-uploaded
+// data does not leave a stale local cache entry. Only affects StagingFileCached entries;
+// dirty (pending sync) entries are left untouched.
+func (sf *StagingFS) EvictCachedFile(path string) {
+	sf.cacheMutex.Lock()
+	_, exists := sf.cachedItems[path]
+	if exists {
+		delete(sf.cachedItems, path)
+	}
+	sf.cacheMutex.Unlock()
+
+	if !exists {
+		return
+	}
+
+	localPath := sf.getLocalDataPath(path)
+	sf.removePathSize(path) // must be called before os.Remove for stat fallback
+	os.Remove(localPath)
+}
+
+// StageForBulkUpload copies localPath into the staging directory under irodsPath and registers
+// it as ActionBulkUpload. The background sync worker uploads it to iRODS and then immediately
+// deletes the local copy (unlike ActionUpload which keeps the file as a read cache).
+func (sf *StagingFS) StageForBulkUpload(localPath, irodsPath string) error {
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return errors.Wrap(err, "failed to stat source file")
+	}
+
+	if err := sf.ensureQuota(info.Size()); err != nil {
+		return err
+	}
+
+	// Evict any existing cached entry for this path
+	sf.EvictCachedFile(irodsPath)
+
+	stagingPath := sf.getLocalDataPath(irodsPath)
+	if err := os.MkdirAll(filepath.Dir(stagingPath), 0755); err != nil {
+		return errors.Wrap(err, "failed to create staging directory")
+	}
+
+	if err := copyFile(localPath, stagingPath); err != nil {
+		return errors.Wrap(err, "failed to copy file to staging")
+	}
+
+	sf.setPathSize(irodsPath, info.Size())
+
+	if err := sf.sm.CreateBulkUpload(irodsPath); err != nil {
+		os.Remove(stagingPath)
+		sf.removePathSize(irodsPath)
+		return errors.Wrap(err, "failed to register bulk upload in staging")
+	}
+
+	return nil
+}
+
+// copyFile copies src to dst atomically via a temp file in the same directory.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	tmp := dst + ".tmp"
+	out, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+
+	return os.Rename(tmp, dst)
 }
 
 // GetLocalFileSize returns the size of the local staged file, or -1 if not found
@@ -685,6 +1035,10 @@ func (sf *StagingFS) Clear() error {
 	sf.currentSize = 0
 	sf.sizeMutex.Unlock()
 
+	sf.pathSizesMu.Lock()
+	sf.pathSizes = make(map[string]int64)
+	sf.pathSizesMu.Unlock()
+
 	// Recreate data directory
 	return os.MkdirAll(dataPath, 0755)
 }
@@ -708,16 +1062,192 @@ func (sf *StagingFS) GetAvailableDataSize() int64 {
 	return sf.maxSize - sf.currentSize
 }
 
-// checkQuota checks if adding size bytes would exceed the quota
-func (sf *StagingFS) checkQuota(size int64) error {
+// ensureQuota ensures there is room for size additional bytes.
+// If not, it evicts cached files (oldest by LastAccessedAt first),
+// then force-syncs and deletes pending staging files (oldest by LastModifiedAt first).
+func (sf *StagingFS) ensureQuota(size int64) error {
 	sf.sizeMutex.Lock()
-	defer sf.sizeMutex.Unlock()
+	overflow := (sf.currentSize + size) - sf.maxSize
+	sf.sizeMutex.Unlock()
 
-	if sf.currentSize+size > sf.maxSize {
-		return errors.Errorf("staging quota exceeded: current %d + requested %d > max %d",
-			sf.currentSize, size, sf.maxSize)
+	if overflow <= 0 {
+		return nil
 	}
-	return nil
+
+	overflow -= sf.evictCachedOldest(overflow)
+	if overflow <= 0 {
+		return nil
+	}
+
+	overflow -= sf.forceSyncOldest(overflow)
+	if overflow <= 0 {
+		return nil
+	}
+
+	sf.sizeMutex.Lock()
+	current := sf.currentSize
+	sf.sizeMutex.Unlock()
+
+	return errors.Errorf("staging quota exceeded: current %d + requested %d > max %d",
+		current, size, sf.maxSize)
+}
+
+// evictCachedOldest removes the oldest cached files (by LastAccessedAt) until needed bytes are freed.
+// Returns the number of bytes freed.
+func (sf *StagingFS) evictCachedOldest(needed int64) int64 {
+	sf.cacheMutex.Lock()
+	type kv struct {
+		path string
+		meta *StagingMetadata
+	}
+	items := make([]kv, 0, len(sf.cachedItems))
+	for p, m := range sf.cachedItems {
+		items = append(items, kv{p, m})
+	}
+	sf.cacheMutex.Unlock()
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].meta.LastAccessedAt.Before(items[j].meta.LastAccessedAt)
+	})
+
+	var freed int64
+	for _, item := range items {
+		if freed >= needed {
+			break
+		}
+
+		sf.cacheMutex.Lock()
+		_, exists := sf.cachedItems[item.path]
+		if exists {
+			delete(sf.cachedItems, item.path)
+		}
+		sf.cacheMutex.Unlock()
+
+		if !exists {
+			continue
+		}
+
+		localPath := sf.getLocalDataPath(item.path)
+		freed += sf.getFileSize(item.path)
+		sf.removePathSize(item.path)
+		os.Remove(localPath)
+	}
+	return freed
+}
+
+// forceSyncOldest force-syncs the oldest pending upload files (by LastModifiedAt) and
+// deletes their local copies to free space. Only files with no open refs are synced.
+// Returns the number of bytes freed.
+func (sf *StagingFS) forceSyncOldest(needed int64) int64 {
+	all := sf.sm.GetAll()
+
+	type kv struct {
+		path string
+		meta *StagingMetadata
+	}
+	var items []kv
+	for p, m := range all {
+		if (m.Action == ActionUpload || m.Action == ActionBulkUpload) && !sf.hasOpenRef(p) {
+			items = append(items, kv{p, m})
+		}
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].meta.LastModifiedAt.Before(items[j].meta.LastModifiedAt)
+	})
+
+	var freed int64
+	for _, item := range items {
+		if freed >= needed {
+			break
+		}
+
+		if err := sf.sm.syncOne(item.meta); err != nil {
+			log.Warnf("force-sync failed for %s during quota eviction: %v", item.path, err)
+			if sf.config.OnSyncError != nil {
+				sf.config.OnSyncError(item.meta, err)
+			}
+			continue
+		}
+
+		// Guard: a concurrent write may have re-opened or re-registered this path
+		if sf.hasOpenRef(item.path) || sf.sm.Get(item.path) != nil {
+			continue
+		}
+
+		localPath := sf.getLocalDataPath(item.path)
+		freed += sf.getFileSize(item.path)
+		sf.removePathSize(item.path)
+		os.Remove(localPath)
+	}
+	return freed
+}
+
+// setPathSize sets the tracked size for path and adjusts the global counter by the delta.
+// Each call to setPathSize is idempotent with respect to the global total: only the delta
+// from the previously-recorded size is applied, so calling it multiple times (Close after
+// Truncate, etc.) never double-counts.
+func (sf *StagingFS) setPathSize(path string, size int64) {
+	sf.pathSizesMu.Lock()
+	old := sf.pathSizes[path]
+	sf.pathSizes[path] = size
+	sf.pathSizesMu.Unlock()
+	sf.AdjustDataSize(size - old)
+}
+
+// removePathSize removes path from per-path tracking and subtracts its size from the global
+// counter. If the path was not tracked (e.g. files from a previous session), it falls back
+// to stat-ing the local file. Must be called BEFORE the file is deleted so the fallback stat
+// can still find it.
+func (sf *StagingFS) removePathSize(path string) {
+	sf.pathSizesMu.Lock()
+	old, exists := sf.pathSizes[path]
+	delete(sf.pathSizes, path)
+	sf.pathSizesMu.Unlock()
+
+	if exists {
+		sf.subtractDataSize(old)
+	} else {
+		localPath := sf.getLocalDataPath(path)
+		if info, err := os.Stat(localPath); err == nil {
+			sf.subtractDataSize(info.Size())
+		}
+	}
+}
+
+// getFileSize returns the tracked size for path, falling back to stat if not in pathSizes.
+func (sf *StagingFS) getFileSize(path string) int64 {
+	sf.pathSizesMu.Lock()
+	size, exists := sf.pathSizes[path]
+	sf.pathSizesMu.Unlock()
+	if exists {
+		return size
+	}
+	localPath := sf.getLocalDataPath(path)
+	if info, err := os.Stat(localPath); err == nil {
+		return info.Size()
+	}
+	return 0
+}
+
+// NotifyFileClosed is called when a write handle for path is closed. It reads the actual
+// file size from disk and updates per-path tracking so the global counter reflects all
+// bytes written via WriteAt since the handle was opened.
+func (sf *StagingFS) NotifyFileClosed(path string) {
+	localPath := sf.getLocalDataPath(path)
+	if info, err := os.Stat(localPath); err == nil {
+		sf.setPathSize(path, info.Size())
+	}
+}
+
+// AdjustDataSize adjusts the tracked total data size by delta bytes.
+// Positive delta = new bytes written (not previously counted); negative = bytes removed.
+func (sf *StagingFS) AdjustDataSize(delta int64) {
+	if delta > 0 {
+		sf.addDataSize(delta)
+	} else if delta < 0 {
+		sf.subtractDataSize(-delta)
+	}
 }
 
 // addDataSize adds to the tracked data size

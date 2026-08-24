@@ -71,7 +71,7 @@ func TestStagingFSCreateAndWrite(t *testing.T) {
 	data := []byte("hello world")
 
 	// Open for write
-	f, err := sf.OpenForWrite(path)
+	f, err := sf.OpenForWrite(path, false)
 	if err != nil {
 		t.Fatalf("Failed to open file for writing: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestStagingFSOpenForWriteCreatesNew(t *testing.T) {
 	path := "/newfile.txt"
 
 	// OpenForWrite on non-existing file in staging will create it
-	f, err := sf.OpenForWrite(path)
+	f, err := sf.OpenForWrite(path, false)
 	if err != nil {
 		t.Fatalf("Failed to open file for writing: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestStagingFSSyncAll(t *testing.T) {
 	data := []byte("test data")
 
 	// Open for write
-	f, err := sf.OpenForWrite(path)
+	f, err := sf.OpenForWrite(path, false)
 	if err != nil {
 		t.Fatalf("Failed to open file for writing: %v", err)
 	}
