@@ -132,11 +132,7 @@ func (c *IRODSFSClientBuffered) Sync() error {
 		return nil
 	}
 
-	logger := c.logger.WithFields(log.Fields{
-		"method": "Sync",
-	})
-
-	logger.Info("syncing all staged data to iRODS")
+	c.logger.Info("syncing all staged data to iRODS")
 
 	if err := c.staging.SyncAll(); err != nil {
 		return errors.Wrap(err, "failed to sync staged data")
