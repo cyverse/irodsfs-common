@@ -27,10 +27,7 @@ type VPathManager struct {
 
 // NewVPathManager creates a new VPathManager
 func NewVPathManager(fsClient irods.IRODSFSClient, inodeManager *inode.InodeManager, pathMappings []VPathMapping) (*VPathManager, error) {
-	logger := log.WithFields(log.Fields{
-		"package":  "vpath",
-		"function": "NewVPathManager",
-	})
+	logger := log.WithFields(log.Fields{})
 
 	manager := &VPathManager{
 		inodeManager: inodeManager,
@@ -119,11 +116,7 @@ func (manager *VPathManager) build() error {
 
 // buildMapping builds a single virtual path mapping
 func (manager *VPathManager) buildMapping(mapping *VPathMapping) error {
-	logger := log.WithFields(log.Fields{
-		"package":  "vpath",
-		"struct":   "VPathManager",
-		"function": "buildMapping",
-	})
+	logger := log.WithFields(log.Fields{})
 
 	logger.Infof("Building a VPath Entry %q", mapping.IRODSPath)
 
