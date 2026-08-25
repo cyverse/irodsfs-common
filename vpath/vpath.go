@@ -40,7 +40,7 @@ func NewVPathManager(fsClient irods.IRODSFSClient, inodeManager *inode.InodeMana
 	err := manager.build()
 	if err != nil {
 		buildErr := errors.Wrapf(err, "failed to build a hierarchy")
-		logger.Errorf("%+v", buildErr)
+		logger.Error(buildErr)
 		return nil, buildErr
 	}
 
@@ -186,8 +186,9 @@ func (manager *VPathManager) buildMapping(mapping *VPathMapping) error {
 						return nil
 					}
 
-					logger.WithError(err).Errorf("failed to find dir %q for mounting", mapping.IRODSPath)
-					return errors.Wrapf(err, "failed to find dir %q for mounting", mapping.IRODSPath)
+					werr := errors.Wrapf(err, "failed to find dir %q for mounting", mapping.IRODSPath)
+					logger.Error(werr)
+					return werr
 				}
 			} else {
 				// file not found
@@ -197,8 +198,9 @@ func (manager *VPathManager) buildMapping(mapping *VPathMapping) error {
 					return nil
 				}
 
-				logger.WithError(err).Errorf("failed to find file %q for mounting", mapping.IRODSPath)
-				return errors.Wrapf(err, "failed to find file %q for mounting", mapping.IRODSPath)
+				werr := errors.Wrapf(err, "failed to find file %q for mounting", mapping.IRODSPath)
+				logger.Error(werr)
+				return werr
 			}
 		} else {
 			// server error
@@ -255,8 +257,9 @@ func (manager *VPathManager) buildMapping(mapping *VPathMapping) error {
 			manager.addToParentDir(entry, parentDirs[len(parentDirs)-1])
 		}
 	} else {
-		logger.Errorf("failed to build a mapping for path %q", mapping.IRODSPath)
-		return errors.Newf("failed to build a mapping for path %q", mapping.IRODSPath)
+		werr := errors.Newf("failed to build a mapping for path %q", mapping.IRODSPath)
+		logger.Error(werr)
+		return werr
 	}
 
 	return nil
