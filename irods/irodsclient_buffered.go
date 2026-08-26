@@ -516,6 +516,9 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 		if err != nil {
 			return nil, err
 		}
+		if invalidateErr := c.invalidateFileCacheBlocksHint(path, entry.Size); invalidateErr != nil {
+			logger.Warnf("failed to invalidate cache when opening file for write: %v", invalidateErr)
+		}
 
 		if openMode.IsRead() {
 			f, stagingErr := c.staging.OpenForReadWrite(path, false)
@@ -583,6 +586,7 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 	if err != nil {
 		return nil, err
 	}
+	c.validateFileCacheForOpen(path, handle, logger)
 
 	handleLogger := logger.WithFields(log.Fields{
 		"handle_id": handle.GetID(),
@@ -650,6 +654,9 @@ func (c *IRODSFSClientBuffered) OpenFileBulk(path string, mode string) (IRODSFSF
 		if err != nil {
 			return nil, err
 		}
+		if invalidateErr := c.invalidateFileCacheBlocksHint(path, entry.Size); invalidateErr != nil {
+			logger.Warnf("failed to invalidate cache when opening file for write: %v", invalidateErr)
+		}
 
 		if openMode.IsRead() {
 			f, stagingErr := c.staging.OpenForReadWrite(path, true)
@@ -693,10 +700,20 @@ func (c *IRODSFSClientBuffered) OpenFileBulk(path string, mode string) (IRODSFSF
 		logger.Warnf("staging quota exceeded, falling back to direct iRODS write for %q", path)
 	}
 
-	return c.client.OpenFile(path, mode)
+	handle, err := c.client.OpenFile(path, mode)
+	if err != nil {
+		return nil, err
+	}
+	c.validateFileCacheForOpen(path, handle, logger)
+	return handle, nil
 }
 
 func (c *IRODSFSClientBuffered) TruncateFile(path string, size int64) error {
+	logger := c.logger.WithField("path", path)
+	if err := c.invalidateFileCacheBlocks(path); err != nil {
+		logger.Warnf("failed to invalidate cache before truncating file: %v", err)
+	}
+
 	if c.staging != nil {
 		meta := c.staging.Get(path)
 		if meta != nil && meta.Action == stagingfs.ActionUpload {
@@ -704,6 +721,29 @@ func (c *IRODSFSClientBuffered) TruncateFile(path string, size int64) error {
 		}
 	}
 	return c.client.TruncateFile(path, size)
+}
+
+func (c *IRODSFSClientBuffered) validateFileCacheForOpen(path string, handle IRODSFSFileHandle, logger *log.Entry) {
+	entry := handle.GetEntry()
+	if entry == nil {
+		return
+	}
+
+	if handle.IsWriteMode() {
+		if err := c.invalidateFileCacheBlocksHint(path, entry.Size); err != nil {
+			logger.Warnf("failed to invalidate cache when opening file for write: %v", err)
+		}
+	} else if handle.IsReadMode() {
+		c.validateFileCacheFreshness(path, entry, logger)
+	}
+}
+
+func (c *IRODSFSClientBuffered) validateFileCacheFreshness(path string, entry *irodsclient_fs.Entry, logger *log.Entry) {
+	if !c.isCacheFileFresh(path, entry) {
+		if err := c.invalidateFileCacheBlocksHint(path, entry.Size); err != nil {
+			logger.Warnf("failed to invalidate stale cache: %v", err)
+		}
+	}
 }
 
 // shouldCacheFile reports whether a complete file is small enough for the block cache.
@@ -1339,6 +1379,7 @@ func (h *IRODSFSClientBufferedFileHandle) ReadAt(buffer []byte, offset int64) (i
 	if offset >= entry.Size {
 		return 0, io.EOF
 	}
+	h.client.validateFileCacheFreshness(h.irodsPath, entry, h.logger)
 
 	// Clamp read to file size
 	readLen := int64(len(buffer))
