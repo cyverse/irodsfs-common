@@ -21,6 +21,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const DefaultMaxCacheFileSize = 10 * 1024 * 1024 * 1024 // 10GB
+
 // IRODSFSClientBufferedConfig holds configuration for IRODSFSClientBuffered
 type IRODSFSClientBufferedConfig struct {
 	BlockSize int // Block size for read cache in bytes (default: 4MB)
@@ -38,13 +40,14 @@ type IRODSFSClientBufferedConfig struct {
 // IRODSFSClientBuffered wraps IRODSFSClient with block-level read-through caching
 // and local staging for write/readwrite modes.
 type IRODSFSClientBuffered struct {
-	id      string
-	fs      *irodsclient_fs.FileSystem
-	client  *IRODSFSClientDirect
-	cache   *cache.MemoryCacheManager
-	helper  *util.FileBlockHelper
-	staging *stagingfs.StagingFS
-	logger  *log.Entry
+	id               string
+	fs               *irodsclient_fs.FileSystem
+	client           *IRODSFSClientDirect
+	maxCacheFileSize int64
+	cache            *cache.MemoryCacheManager
+	helper           *util.FileBlockHelper
+	staging          *stagingfs.StagingFS
+	logger           *log.Entry
 
 	cacheHit  uint64
 	cacheMiss uint64
@@ -66,6 +69,11 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 	blockSize := config.BlockSize
 	if blockSize <= 0 {
 		blockSize = 4 * 1024 * 1024
+	}
+
+	maxCacheFileSize := config.MaxCacheFileSize
+	if maxCacheFileSize == 0 {
+		maxCacheFileSize = DefaultMaxCacheFileSize
 	}
 
 	// Create direct client
@@ -105,13 +113,14 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 	})
 
 	return &IRODSFSClientBuffered{
-		id:      clientID,
-		fs:      fs,
-		client:  directClient,
-		cache:   cache,
-		helper:  util.NewFileBlockHelper(blockSize),
-		staging: staging,
-		logger:  logger,
+		id:               clientID,
+		fs:               fs,
+		client:           directClient,
+		maxCacheFileSize: maxCacheFileSize,
+		cache:            cache,
+		helper:           util.NewFileBlockHelper(blockSize),
+		staging:          staging,
+		logger:           logger,
 	}, nil
 }
 
@@ -697,6 +706,18 @@ func (c *IRODSFSClientBuffered) TruncateFile(path string, size int64) error {
 	return c.client.TruncateFile(path, size)
 }
 
+// shouldCacheFile reports whether a complete file is small enough for the block cache.
+// A file must fit both the configured per-file limit and the cache itself.
+func (c *IRODSFSClientBuffered) shouldCacheFile(fileSize int64) bool {
+	maxSize := c.maxCacheFileSize
+	cacheMaxSize := c.cache.GetMaxSize()
+	if cacheMaxSize < maxSize {
+		maxSize = cacheMaxSize
+	}
+
+	return maxSize > 0 && fileSize <= maxSize
+}
+
 // checkAllBlocksCached returns true if every block of the file is present in the memory cache.
 func (c *IRODSFSClientBuffered) checkAllBlocksCached(irodsPath string, fileSize int64) bool {
 	if fileSize <= 0 {
@@ -765,6 +786,10 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 	if err != nil {
 		return errors.Wrap(err, "failed to stat file for cache check")
 	}
+	if !c.shouldCacheFile(entry.Size) {
+		_ = c.invalidateFileCacheBlocksHint(irodsPath, entry.Size)
+		return nil
+	}
 
 	if c.checkAllBlocksCached(irodsPath, entry.Size) {
 		if c.isCacheFileFresh(irodsPath, entry) {
@@ -828,6 +853,11 @@ func (c *IRODSFSClientBuffered) DownloadFile(irodsPath string, localPath string,
 	entry, err := c.client.Stat(irodsPath)
 	if err != nil {
 		return errors.Wrap(err, "failed to stat file")
+	}
+	if !c.shouldCacheFile(entry.Size) {
+		_ = c.invalidateFileCacheBlocksHint(irodsPath, entry.Size)
+		_, err = c.client.fs.DownloadFileWithCallback(irodsPath, "", c.helper.GetBlockSize(), 3, writeCallback, transferCallback)
+		return err
 	}
 
 	if c.checkAllBlocksCached(irodsPath, entry.Size) {
@@ -894,6 +924,11 @@ func (c *IRODSFSClientBuffered) DownloadFileParallel(irodsPath string, localPath
 	if err != nil {
 		return errors.Wrap(err, "failed to stat file")
 	}
+	if !c.shouldCacheFile(entry.Size) {
+		_ = c.invalidateFileCacheBlocksHint(irodsPath, entry.Size)
+		_, err = c.client.fs.DownloadFileParallelWithCallback(irodsPath, "", c.helper.GetBlockSize(), taskNum*3, writeCallback, taskNum, transferCallback)
+		return err
+	}
 
 	if c.checkAllBlocksCached(irodsPath, entry.Size) {
 		if c.isCacheFileFresh(irodsPath, entry) {
@@ -944,6 +979,11 @@ func (c *IRODSFSClientBuffered) DownloadFileWithCallback(irodsPath string, block
 		entry, err := c.client.Stat(irodsPath)
 		if err != nil {
 			return errors.Wrap(err, "failed to stat file")
+		}
+		if !c.shouldCacheFile(entry.Size) {
+			_ = c.invalidateFileCacheBlocksHint(irodsPath, entry.Size)
+			_, err = c.fs.DownloadFileWithCallback(irodsPath, "", blockSize, numBlocks, blockReadyCallback, transferCallback)
+			return err
 		}
 
 		if c.checkAllBlocksCached(irodsPath, entry.Size) {
@@ -1038,6 +1078,11 @@ func (c *IRODSFSClientBuffered) DownloadFileParallelWithCallback(irodsPath strin
 		entry, err := c.client.Stat(irodsPath)
 		if err != nil {
 			return errors.Wrap(err, "failed to stat file")
+		}
+		if !c.shouldCacheFile(entry.Size) {
+			_ = c.invalidateFileCacheBlocksHint(irodsPath, entry.Size)
+			_, err = c.fs.DownloadFileParallelWithCallback(irodsPath, "", blockSize, numBlocks, blockReadyCallback, taskNum, transferCallback)
+			return err
 		}
 
 		if c.checkAllBlocksCached(irodsPath, entry.Size) {
