@@ -118,8 +118,8 @@ func (manager *VPathManager) build() error {
 	return nil
 }
 
-// GetInodeIDForVirtualEntry returns inode id for a virtual entry.
-func (manager *VPathManager) GetInodeIDForVirtualEntry(path string) (uint64, error) {
+// CreateOrGetInodeIDForVirtualEntry returns inode id for a virtual entry.
+func (manager *VPathManager) CreateOrGetInodeIDForVirtualEntry(path string) (uint64, error) {
 	// First try with read lock
 	manager.mutex.RLock()
 	if id, ok := manager.virtualEntryIDMap[path]; ok {
@@ -131,6 +131,29 @@ func (manager *VPathManager) GetInodeIDForVirtualEntry(path string) (uint64, err
 	// Need to create new entry, use write lock
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()
+
+	// Double-check after acquiring write lock (another goroutine might have created it)
+	if id, ok := manager.virtualEntryIDMap[path]; ok {
+		return id, nil
+	}
+
+	// Create a new and save for reuse
+	id := inode.VirtualEntryIDStart + manager.currentVirtualEntryIDInc
+	if !inode.IsVirtualEntryID(id) {
+		return 0, errors.Newf("virtual inode ID overflow: no more IDs available for path %q", path)
+	}
+	manager.currentVirtualEntryIDInc++
+	manager.virtualEntryIDMap[path] = id
+	manager.reverseVirtualEntryIDMap[id] = path
+	return id, nil
+}
+
+// internal function
+func (manager *VPathManager) createOrGetInodeIDForVirtualEntry(path string) (uint64, error) {
+	// First try
+	if id, ok := manager.virtualEntryIDMap[path]; ok {
+		return id, nil
+	}
 
 	// Double-check after acquiring write lock (another goroutine might have created it)
 	if id, ok := manager.virtualEntryIDMap[path]; ok {
@@ -167,7 +190,7 @@ func (manager *VPathManager) buildMapping(mapping *VPathMapping) error {
 				return errors.Newf("failed to create a virtual dir entry %q, entry already exists", parentDir)
 			}
 		} else {
-			inodeID, err := manager.GetInodeIDForVirtualEntry(parentDir)
+			inodeID, err := manager.createOrGetInodeIDForVirtualEntry(parentDir)
 			if err != nil {
 				return err
 			}
