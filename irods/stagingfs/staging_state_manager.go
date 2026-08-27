@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 	"github.com/dgraph-io/badger/v3"
 )
 
@@ -205,6 +206,37 @@ func (sm *StagingStateManager) waitForLockedDescendants(root string) {
 		}
 		sm.pathConds[blocker].Wait()
 	}
+}
+
+// drainPendingDeletes synchronously applies deferred file deletions below root.
+// It returns false when another staged action still makes the directory logically
+// non-empty. The caller must hold sm.mu and a subtree lock for root.
+func (sm *StagingStateManager) drainPendingDeletes(root string) (bool, error) {
+	var deletes []*StagingMetadata
+	for metadataPath, meta := range sm.metadata {
+		if metadataPath != root && pathInSubtree(metadataPath, root) && meta.Action == ActionDelete {
+			copy := *meta
+			deletes = append(deletes, &copy)
+		}
+	}
+
+	for _, meta := range deletes {
+		if sm.ActionHandler != nil {
+			if err := sm.ActionHandler(meta); err != nil {
+				return false, errors.Wrapf(err, "handler failed for DELETE action on %s before RMDIR", meta.Path)
+			}
+		}
+		if err := sm.deleteMetadata(meta.Path); err != nil {
+			return false, err
+		}
+	}
+
+	for metadataPath := range sm.metadata {
+		if metadataPath != root && pathInSubtree(metadataPath, root) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // Create marks a path as newly created
@@ -534,27 +566,33 @@ func (sm *StagingStateManager) Rmdir(path string, recurse bool, force bool) (boo
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	if recurse {
-		// Block new work anywhere below path before waiting for handlers that are
-		// already running. This closes the gap where another child sync could start
-		// while recursive RMDIR is waiting for the previous one.
-		sm.waitForSubtreeUnlocked(path)
-		sm.lockedSubtrees[path] = true
-		defer func() {
-			delete(sm.lockedSubtrees, path)
-			if sm.pathConds[path] != nil {
-				sm.pathConds[path].Broadcast()
-			}
-		}()
-		sm.waitForLockedDescendants(path)
-	} else {
-		sm.waitForPathsUnlocked(path)
-	}
+	// Block new work anywhere below path before waiting for handlers that are
+	// already running. Non-recursive RMDIR also needs this barrier because rm -rf
+	// reaches FUSE as individual unlinks followed by an ordinary rmdir syscall.
+	sm.waitForSubtreeUnlocked(path)
+	sm.lockedSubtrees[path] = true
+	defer func() {
+		delete(sm.lockedSubtrees, path)
+		if sm.pathConds[path] != nil {
+			sm.pathConds[path].Broadcast()
+		}
+	}()
+	sm.waitForLockedDescendants(path)
 
 	meta, exists := sm.metadata[path]
 
 	if exists && !sm.isValidAction(meta.Action, ActionRmdir) {
 		return false, errors.Newf("cannot remove directory %s: invalid action transition from %s to RMDIR", path, meta.Action)
+	}
+
+	if !recurse {
+		empty, err := sm.drainPendingDeletes(path)
+		if err != nil {
+			return false, err
+		}
+		if !empty {
+			return false, irodsclient_types.NewCollectionNotEmptyError(path)
+		}
 	}
 
 	if !exists {

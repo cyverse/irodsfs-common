@@ -3,7 +3,94 @@ package stagingfs
 import (
 	"testing"
 	"time"
+
+	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 )
+
+func TestNonRecursiveRmdirDrainsDeleteQueuedBehindUpload(t *testing.T) {
+	sm := NewStagingStateManager()
+	childPath := "/dir/file.txt"
+	if err := sm.Create(childPath); err != nil {
+		t.Fatalf("Failed to stage child: %v", err)
+	}
+	uploadMeta := *sm.Get(childPath)
+
+	uploadStarted := make(chan struct{})
+	releaseUpload := make(chan struct{})
+	var actions []ActionType
+	sm.RegisterActionHandler(func(meta *StagingMetadata) error {
+		actions = append(actions, meta.Action)
+		if meta.Action == ActionUpload {
+			close(uploadStarted)
+			<-releaseUpload
+		}
+		return nil
+	})
+
+	uploadDone := make(chan error, 1)
+	go func() {
+		uploadDone <- sm.syncOne(&uploadMeta)
+	}()
+	select {
+	case <-uploadStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Child upload did not start")
+	}
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		deleteDone <- sm.DeleteWithForce(childPath, false)
+	}()
+	close(releaseUpload)
+	if err := <-uploadDone; err != nil {
+		t.Fatalf("Child upload failed: %v", err)
+	}
+	if err := <-deleteDone; err != nil {
+		t.Fatalf("Child delete failed: %v", err)
+	}
+	if meta := sm.Get(childPath); meta == nil || meta.Action != ActionDelete {
+		t.Fatalf("Expected pending DELETE after upload, got %+v", meta)
+	}
+
+	if _, err := sm.Rmdir("/dir", false, false); err != nil {
+		t.Fatalf("Non-recursive Rmdir failed: %v", err)
+	}
+	want := []ActionType{ActionUpload, ActionDelete, ActionRmdir}
+	if len(actions) != len(want) {
+		t.Fatalf("Expected actions %v, got %v", want, actions)
+	}
+	for i := range want {
+		if actions[i] != want[i] {
+			t.Fatalf("Expected actions %v, got %v", want, actions)
+		}
+	}
+	if meta := sm.Get(childPath); meta != nil {
+		t.Fatalf("Expected child metadata to be removed, got %+v", meta)
+	}
+}
+
+func TestNonRecursiveRmdirRejectsPendingNonDeleteChild(t *testing.T) {
+	sm := NewStagingStateManager()
+	if err := sm.Create("/dir/file.txt"); err != nil {
+		t.Fatalf("Failed to stage child: %v", err)
+	}
+
+	handlerCalled := false
+	sm.RegisterActionHandler(func(meta *StagingMetadata) error {
+		handlerCalled = true
+		return nil
+	})
+	_, err := sm.Rmdir("/dir", false, false)
+	if !irodsclient_types.IsCollectionNotEmptyError(err) {
+		t.Fatalf("Expected collection-not-empty error, got %v", err)
+	}
+	if handlerCalled {
+		t.Fatal("Backend handler must not run while a non-delete child remains")
+	}
+	if meta := sm.Get("/dir/file.txt"); meta == nil || meta.Action != ActionUpload {
+		t.Fatalf("Expected pending child upload to remain, got %+v", meta)
+	}
+}
 
 func TestRecursiveRmdirWaitsForInFlightChildSync(t *testing.T) {
 	sm := NewStagingStateManager()
