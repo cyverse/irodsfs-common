@@ -9,6 +9,7 @@ import (
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 	"github.com/cyverse/irodsfs-common/irods/cache"
+	"github.com/cyverse/irodsfs-common/irods/inode"
 	"github.com/cyverse/irodsfs-common/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
@@ -96,6 +97,21 @@ func newTestLogger() *log.Entry {
 	return log.NewEntry(log.StandardLogger())
 }
 
+func TestBufferedClientReusesIssuedStagingInodeID(t *testing.T) {
+	inodeManager := inode.NewInodeManager()
+	issuedID, err := inodeManager.CreateOrGetInodeIDForStagingEntry("/test/file.dat")
+	require.NoError(t, err)
+
+	entry := &irodsclient_fs.Entry{
+		ID:   12345,
+		Path: "/test/file.dat",
+	}
+	client := &IRODSFSClientBuffered{inodeManager: inodeManager}
+	client.reuseStagingInodeID(entry)
+
+	assert.Equal(t, int64(issuedID), entry.ID)
+}
+
 // --- IRODSFSClientBufferedFileHandle Tests ---
 
 func TestBufferedFileHandleReadAtCacheHit(t *testing.T) {
@@ -108,7 +124,7 @@ func TestBufferedFileHandleReadAtCacheHit(t *testing.T) {
 	mock := newMockFileHandle("/test/file.dat", data, irodsclient_types.FileOpenModeReadOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		client:    &IRODSFSClientBuffered{logger: newTestLogger()},
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
 		irodsPath: "/test/file.dat",
@@ -140,7 +156,7 @@ func TestBufferedFileHandleReadAtCrossBock(t *testing.T) {
 	mock := newMockFileHandle("/test/cross.dat", data, irodsclient_types.FileOpenModeReadOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		client:    &IRODSFSClientBuffered{logger: newTestLogger()},
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
 		irodsPath: "/test/cross.dat",
@@ -166,7 +182,7 @@ func TestBufferedFileHandleReadAtPartialLastBlock(t *testing.T) {
 	mock := newMockFileHandle("/test/partial.dat", data, irodsclient_types.FileOpenModeReadOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		client:    &IRODSFSClientBuffered{logger: newTestLogger()},
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
 		irodsPath: "/test/partial.dat",
@@ -192,7 +208,7 @@ func TestBufferedFileHandleReadAtBeyondEOF(t *testing.T) {
 	mock := newMockFileHandle("/test/short.dat", data, irodsclient_types.FileOpenModeReadOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		client:    &IRODSFSClientBuffered{logger: newTestLogger()},
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
 		irodsPath: "/test/short.dat",
@@ -217,7 +233,7 @@ func TestBufferedFileHandleReadAtClampToFileSize(t *testing.T) {
 	mock := newMockFileHandle("/test/clamp.dat", data, irodsclient_types.FileOpenModeReadOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		client:    &IRODSFSClientBuffered{logger: newTestLogger()},
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
 		irodsPath: "/test/clamp.dat",
@@ -243,7 +259,7 @@ func TestBufferedFileHandleWriteAtInvalidatesCache(t *testing.T) {
 	mock := newMockFileHandle("/test/write.dat", data, irodsclient_types.FileOpenModeReadWrite)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		client:    &IRODSFSClientBuffered{logger: newTestLogger()},
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
 		irodsPath: "/test/write.dat",
@@ -280,7 +296,7 @@ func TestBufferedFileHandleTruncateInvalidatesCache(t *testing.T) {
 	mock := newMockFileHandle("/test/trunc.dat", data, irodsclient_types.FileOpenModeReadWrite)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		client:    &IRODSFSClientBuffered{logger: newTestLogger()},
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
 		irodsPath: "/test/trunc.dat",
@@ -310,7 +326,7 @@ func TestBufferedFileHandleReadNotWriteMode(t *testing.T) {
 	mock := newMockFileHandle("/test/wo.dat", data, irodsclient_types.FileOpenModeWriteOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		client:    &IRODSFSClientBuffered{logger: newTestLogger()},
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
 		irodsPath: "/test/wo.dat",

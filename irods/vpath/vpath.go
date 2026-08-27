@@ -15,25 +15,29 @@ import (
 
 // VPathManager is a struct that manages virtual paths.
 type VPathManager struct {
-	inodeManager *inode.InodeManager
 	// path mappings given by user
 	pathMappings []VPathMapping
 	// entries is a map holding vpath entries.
 	// Key is a vpath, value is an entry
-	entries  map[string]*VPathEntry
-	fsClient irods.IRODSFSClient
-	mutex    sync.RWMutex
+	entries                  map[string]*VPathEntry
+	currentVirtualEntryIDInc uint64
+	virtualEntryIDMap        map[string]uint64
+	reverseVirtualEntryIDMap map[uint64]string
+	fsClient                 irods.IRODSFSClient
+	mutex                    sync.RWMutex
 }
 
 // NewVPathManager creates a new VPathManager
-func NewVPathManager(fsClient irods.IRODSFSClient, inodeManager *inode.InodeManager, pathMappings []VPathMapping) (*VPathManager, error) {
+func NewVPathManager(fsClient irods.IRODSFSClient, pathMappings []VPathMapping) (*VPathManager, error) {
 	logger := log.WithFields(log.Fields{})
 
 	manager := &VPathManager{
-		inodeManager: inodeManager,
-		pathMappings: pathMappings,
-		entries:      map[string]*VPathEntry{},
-		fsClient:     fsClient,
+		pathMappings:             pathMappings,
+		entries:                  map[string]*VPathEntry{},
+		currentVirtualEntryIDInc: 0,
+		virtualEntryIDMap:        map[string]uint64{},
+		reverseVirtualEntryIDMap: map[uint64]string{},
+		fsClient:                 fsClient,
 	}
 
 	logger.Info("Building a hierarchy")
@@ -114,6 +118,36 @@ func (manager *VPathManager) build() error {
 	return nil
 }
 
+// GetInodeIDForVirtualEntry returns inode id for a virtual entry.
+func (manager *VPathManager) GetInodeIDForVirtualEntry(path string) (uint64, error) {
+	// First try with read lock
+	manager.mutex.RLock()
+	if id, ok := manager.virtualEntryIDMap[path]; ok {
+		manager.mutex.RUnlock()
+		return id, nil
+	}
+	manager.mutex.RUnlock()
+
+	// Need to create new entry, use write lock
+	manager.mutex.Lock()
+	defer manager.mutex.Unlock()
+
+	// Double-check after acquiring write lock (another goroutine might have created it)
+	if id, ok := manager.virtualEntryIDMap[path]; ok {
+		return id, nil
+	}
+
+	// Create a new and save for reuse
+	id := inode.VirtualEntryIDStart + manager.currentVirtualEntryIDInc
+	if !inode.IsVirtualEntryID(id) {
+		return 0, errors.Newf("virtual inode ID overflow: no more IDs available for path %q", path)
+	}
+	manager.currentVirtualEntryIDInc++
+	manager.virtualEntryIDMap[path] = id
+	manager.reverseVirtualEntryIDMap[id] = path
+	return id, nil
+}
+
 // buildMapping builds a single virtual path mapping
 func (manager *VPathManager) buildMapping(mapping *VPathMapping) error {
 	logger := log.WithFields(log.Fields{})
@@ -133,7 +167,7 @@ func (manager *VPathManager) buildMapping(mapping *VPathMapping) error {
 				return errors.Newf("failed to create a virtual dir entry %q, entry already exists", parentDir)
 			}
 		} else {
-			inodeID, err := manager.inodeManager.GetInodeIDForVirtualEntry(parentDir)
+			inodeID, err := manager.GetInodeIDForVirtualEntry(parentDir)
 			if err != nil {
 				return err
 			}

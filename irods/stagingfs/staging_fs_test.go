@@ -393,6 +393,46 @@ func TestStagingFSRmdirExistingDir(t *testing.T) {
 	}
 }
 
+func TestStagingFSRmdirDropsPendingChildActions(t *testing.T) {
+	tmpDir := t.TempDir()
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: tmpDir,
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+
+	childPath := "/existingdir/test.txt"
+	if err := sf.Delete(childPath); err != nil {
+		t.Fatalf("Failed to stage child deletion: %v", err)
+	}
+	staleChild := *sf.sm.Get(childPath)
+
+	var actions []ActionType
+	sf.RegisterActionHandler(func(meta *StagingMetadata) error {
+		actions = append(actions, meta.Action)
+		return nil
+	})
+
+	if err := sf.Rmdir("/existingdir"); err != nil {
+		t.Fatalf("Failed to remove directory: %v", err)
+	}
+	if meta := sf.sm.Get(childPath); meta != nil {
+		t.Fatalf("Expected child metadata to be removed, got %+v", meta)
+	}
+
+	// Simulate a background pass that captured the child before Rmdir removed
+	// its metadata. It must not replay DELETE after recursive RMDIR already
+	// removed the child in the backend.
+	if err := sf.sm.syncOne(&staleChild); err != nil {
+		t.Fatalf("Failed to discard stale child action: %v", err)
+	}
+	if len(actions) != 1 || actions[0] != ActionRmdir {
+		t.Fatalf("Expected only RMDIR, got actions %v", actions)
+	}
+}
+
 func TestStagingFSRenameDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &StagingFSConfig{

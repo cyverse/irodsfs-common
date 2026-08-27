@@ -15,6 +15,7 @@ import (
 	irodsclient_metrics "github.com/cyverse/go-irodsclient/irods/metrics"
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 	"github.com/cyverse/irodsfs-common/irods/cache"
+	"github.com/cyverse/irodsfs-common/irods/inode"
 	"github.com/cyverse/irodsfs-common/irods/stagingfs"
 	"github.com/cyverse/irodsfs-common/util"
 	"github.com/rs/xid"
@@ -38,13 +39,14 @@ type IRODSFSClientBufferedConfig struct {
 // IRODSFSClientBuffered wraps IRODSFSClient with block-level read-through caching
 // and local staging for write/readwrite modes.
 type IRODSFSClientBuffered struct {
-	id      string
-	fs      *irodsclient_fs.FileSystem
-	client  *IRODSFSClientDirect
-	cache   *cache.MemoryCacheManager
-	helper  *util.FileBlockHelper
-	staging *stagingfs.StagingFS
-	logger  *log.Entry
+	id           string
+	fs           *irodsclient_fs.FileSystem
+	client       *IRODSFSClientDirect
+	cache        *cache.MemoryCacheManager
+	helper       *util.FileBlockHelper
+	staging      *stagingfs.StagingFS
+	inodeManager *inode.InodeManager
+	logger       *log.Entry
 
 	cacheHit  uint64
 	cacheMiss uint64
@@ -99,23 +101,45 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 		}
 	}
 
+	var inodeManager *inode.InodeManager
+	if config.StagingRootPath != "" {
+		if config.UsePersistence {
+			inodeManager, err = inode.NewInodeManagerWithPersistence(config.StagingRootPath)
+			if err != nil {
+				if staging != nil {
+					staging.Close()
+				}
+				directClient.Release()
+				return nil, errors.Wrap(err, "failed to create inode manager")
+			}
+		} else {
+			inodeManager = inode.NewInodeManager()
+		}
+	}
+
 	clientID := xid.New().String()
 	logger := fs.GetLogger().WithFields(log.Fields{
 		"fsclient_buffered_id": clientID,
 	})
 
 	return &IRODSFSClientBuffered{
-		id:      clientID,
-		fs:      fs,
-		client:  directClient,
-		cache:   cache,
-		helper:  util.NewFileBlockHelper(blockSize),
-		staging: staging,
-		logger:  logger,
+		id:           clientID,
+		fs:           fs,
+		client:       directClient,
+		cache:        cache,
+		inodeManager: inodeManager,
+		helper:       util.NewFileBlockHelper(blockSize),
+		staging:      staging,
+		logger:       logger,
 	}, nil
 }
 
 func (c *IRODSFSClientBuffered) Release() {
+	if c.inodeManager != nil {
+		c.inodeManager.Close()
+		c.inodeManager = nil
+	}
+
 	if c.staging != nil {
 		c.staging.Close()
 		c.staging = nil
@@ -187,6 +211,7 @@ func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, e
 	// Build a map for quick lookup and modification
 	entryMap := make(map[string]*irodsclient_fs.Entry)
 	for _, e := range entries {
+		c.reuseStagingInodeID(e)
 		entryMap[e.Path] = e
 	}
 
@@ -201,15 +226,23 @@ func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, e
 		switch meta.Action {
 		case stagingfs.ActionUpload:
 			if meta.IsNew {
+				inodeID, err := c.inodeManager.CreateOrGetInodeIDForStagingEntry(meta.Path)
+				if err != nil {
+					return nil, err
+				}
+
 				// New file created locally — add to listing
 				size := c.staging.GetLocalFileSize(meta.Path)
 				if size < 0 {
 					size = 0
 				}
+
 				entryMap[meta.Path] = &irodsclient_fs.Entry{
+					ID:         int64(inodeID),
 					Type:       irodsclient_fs.FileEntry,
 					Name:       path.Base(meta.Path),
 					Path:       meta.Path,
+					Owner:      c.fs.GetAccount().ClientUser,
 					Size:       size,
 					CreateTime: meta.CreatedAt,
 					ModifyTime: meta.LastModifiedAt,
@@ -230,10 +263,17 @@ func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, e
 			delete(entryMap, meta.Path)
 
 		case stagingfs.ActionMkdir:
+			inodeID, err := c.inodeManager.CreateOrGetInodeIDForStagingEntry(meta.Path)
+			if err != nil {
+				return nil, err
+			}
+
 			entryMap[meta.Path] = &irodsclient_fs.Entry{
+				ID:         int64(inodeID),
 				Type:       irodsclient_fs.DirectoryEntry,
 				Name:       path.Base(meta.Path),
 				Path:       meta.Path,
+				Owner:      c.fs.GetAccount().ClientUser,
 				Size:       0,
 				CreateTime: meta.CreatedAt,
 				ModifyTime: meta.LastModifiedAt,
@@ -244,17 +284,31 @@ func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, e
 			delete(entryMap, meta.Path)
 
 		case stagingfs.ActionRename:
+			if err := c.inodeManager.RenameStagingEntry(meta.OldPath, meta.Path); err != nil {
+				return nil, err
+			}
+			inodeID, err := c.inodeManager.CreateOrGetInodeIDForStagingEntry(meta.Path)
+			if err != nil {
+				return nil, err
+			}
+
 			// Remove old path from this dir if present
 			if path.Dir(meta.OldPath) == dirPath {
 				delete(entryMap, meta.OldPath)
 			}
-			// Add new path entry if not already from iRODS
-			if _, ok := entryMap[meta.Path]; !ok {
+
+			// Add a new path entry, or retain the issued staging inode if the
+			// renamed entry is already visible in iRODS.
+			if entry, ok := entryMap[meta.Path]; ok {
+				entry.ID = int64(inodeID)
+			} else {
 				now := time.Now()
 				entryMap[meta.Path] = &irodsclient_fs.Entry{
+					ID:         int64(inodeID),
 					Type:       irodsclient_fs.FileEntry,
 					Name:       path.Base(meta.Path),
 					Path:       meta.Path,
+					Owner:      c.fs.GetAccount().ClientUser,
 					Size:       0,
 					CreateTime: now,
 					ModifyTime: meta.LastModifiedAt,
@@ -263,15 +317,28 @@ func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, e
 			}
 
 		case stagingfs.ActionRenameDir:
+			if err := c.inodeManager.RenameStagingEntryTree(meta.OldPath, meta.Path); err != nil {
+				return nil, err
+			}
+			inodeID, err := c.inodeManager.CreateOrGetInodeIDForStagingEntry(meta.Path)
+			if err != nil {
+				return nil, err
+			}
+
 			if path.Dir(meta.OldPath) == dirPath {
 				delete(entryMap, meta.OldPath)
 			}
-			if _, ok := entryMap[meta.Path]; !ok {
+
+			if entry, ok := entryMap[meta.Path]; ok {
+				entry.ID = int64(inodeID)
+			} else {
 				now := time.Now()
 				entryMap[meta.Path] = &irodsclient_fs.Entry{
+					ID:         int64(inodeID),
 					Type:       irodsclient_fs.DirectoryEntry,
 					Name:       path.Base(meta.Path),
 					Path:       meta.Path,
+					Owner:      c.fs.GetAccount().ClientUser,
 					Size:       0,
 					CreateTime: now,
 					ModifyTime: meta.LastModifiedAt,
@@ -314,10 +381,16 @@ func (c *IRODSFSClientBuffered) Stat(filePath string) (*irodsclient_fs.Entry, er
 				}
 
 				if meta.IsNew {
+					inodeID, err := c.inodeManager.CreateOrGetInodeIDForStagingEntry(filePath)
+					if err != nil {
+						return nil, err
+					}
 					return &irodsclient_fs.Entry{
+						ID:         int64(inodeID),
 						Type:       irodsclient_fs.FileEntry,
 						Name:       path.Base(filePath),
 						Path:       filePath,
+						Owner:      c.fs.GetAccount().ClientUser,
 						Size:       size,
 						CreateTime: meta.CreatedAt,
 						ModifyTime: meta.LastModifiedAt,
@@ -332,13 +405,20 @@ func (c *IRODSFSClientBuffered) Stat(filePath string) (*irodsclient_fs.Entry, er
 				}
 				entry.Size = size
 				entry.ModifyTime = meta.LastModifiedAt
+				c.reuseStagingInodeID(entry)
 				return entry, nil
 
 			case stagingfs.ActionMkdir:
+				inodeID, err := c.inodeManager.CreateOrGetInodeIDForStagingEntry(filePath)
+				if err != nil {
+					return nil, err
+				}
 				return &irodsclient_fs.Entry{
+					ID:         int64(inodeID),
 					Type:       irodsclient_fs.DirectoryEntry,
 					Name:       path.Base(filePath),
 					Path:       filePath,
+					Owner:      c.fs.GetAccount().ClientUser,
 					Size:       0,
 					CreateTime: meta.CreatedAt,
 					ModifyTime: meta.LastModifiedAt,
@@ -353,7 +433,12 @@ func (c *IRODSFSClientBuffered) Stat(filePath string) (*irodsclient_fs.Entry, er
 		}
 	}
 
-	return c.client.Stat(filePath)
+	entry, err := c.client.Stat(filePath)
+	if err != nil {
+		return nil, err
+	}
+	c.reuseStagingInodeID(entry)
+	return entry, nil
 }
 
 func (c *IRODSFSClientBuffered) ExistsDir(dirPath string) bool {
@@ -419,7 +504,13 @@ func (c *IRODSFSClientBuffered) MakeDir(irodsPath string, recurse bool) error {
 
 func (c *IRODSFSClientBuffered) RenameDirToDir(srcPath string, destPath string) error {
 	if c.staging != nil {
-		return c.staging.RenameDir(srcPath, destPath)
+		if err := c.staging.RenameDir(srcPath, destPath); err != nil {
+			return err
+		}
+		if err := c.inodeManager.RenameStagingEntryTree(srcPath, destPath); err != nil {
+			return errors.Wrap(err, "failed to rename staging inode entries")
+		}
+		return nil
 	}
 	return c.client.RenameDirToDir(srcPath, destPath)
 }
@@ -429,10 +520,22 @@ func (c *IRODSFSClientBuffered) RenameFileToFile(srcPath string, destPath string
 		if err := c.staging.Rename(srcPath, destPath); err != nil {
 			return err
 		}
+		if err := c.inodeManager.RenameStagingEntry(srcPath, destPath); err != nil {
+			return errors.Wrap(err, "failed to rename staging inode entry")
+		}
 		c.invalidateFileCacheBlocks(srcPath)
 		return nil
 	}
 	return c.client.RenameFileToFile(srcPath, destPath)
+}
+
+func (c *IRODSFSClientBuffered) reuseStagingInodeID(entry *irodsclient_fs.Entry) {
+	if entry == nil || c.inodeManager == nil {
+		return
+	}
+	if inodeID, ok := c.inodeManager.GetInodeIDForStagingEntry(entry.Path); ok {
+		entry.ID = int64(inodeID)
+	}
 }
 
 func (c *IRODSFSClientBuffered) CreateFile(path string, mode string) (IRODSFSFileHandle, error) {

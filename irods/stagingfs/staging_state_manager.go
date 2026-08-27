@@ -512,12 +512,20 @@ func (sm *StagingStateManager) Rmdir(path string) (bool, error) {
 				return false, errors.Wrap(err, "handler failed for immediate RMDIR sync")
 			}
 		}
+
+		// Recursive removal of the collection also removes every data object and
+		// subcollection below it. Drop their deferred staging actions so the
+		// background worker does not try to delete or upload paths that no longer
+		// exist in iRODS.
+		if err := sm.deleteMetadataTree(path); err != nil {
+			return false, err
+		}
 		return true, nil
 	}
 
 	if meta.IsNew {
-		// MKDIR → RMDIR: remove metadata
-		if err := sm.deleteMetadata(path); err != nil {
+		// MKDIR → RMDIR: remove the directory and all locally-created children.
+		if err := sm.deleteMetadataTree(path); err != nil {
 			return false, err
 		}
 		return false, nil
@@ -546,8 +554,8 @@ func (sm *StagingStateManager) Rmdir(path string) (bool, error) {
 		}
 	}
 
-	// Remove metadata
-	if err := sm.deleteMetadata(path); err != nil {
+	// Recursive RMDIR already handled every descendant in iRODS.
+	if err := sm.deleteMetadataTree(path); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -587,6 +595,16 @@ func (sm *StagingStateManager) syncOne(meta *StagingMetadata) error {
 		sm.pathConds[meta.Path].Wait()
 	}
 
+	// GetAll/SyncOld operate on snapshots. A recursive RMDIR may have removed
+	// this child while the snapshot was waiting to be processed. In that case
+	// the requested backend operation was already covered by the directory
+	// removal and must not be replayed.
+	current := sm.metadata[meta.Path]
+	if current == nil || current.LastModifiedAt.After(meta.LastModifiedAt) {
+		sm.mu.Unlock()
+		return nil
+	}
+
 	// Lock the path for this sync
 	sm.lockedPaths[meta.Path] = true
 	if sm.pathConds[meta.Path] == nil {
@@ -615,7 +633,7 @@ func (sm *StagingStateManager) syncOne(meta *StagingMetadata) error {
 	// for the next sync cycle rather than deleting the fresh registration.
 	sm.mu.Lock()
 
-	current := sm.metadata[meta.Path]
+	current = sm.metadata[meta.Path]
 	var deleteErr error
 	if current != nil && !current.LastModifiedAt.After(meta.LastModifiedAt) {
 		deleteErr = sm.deleteMetadata(meta.Path)
@@ -779,6 +797,20 @@ func (sm *StagingStateManager) deleteMetadata(path string) error {
 	return sm.db.Update(func(txn *badger.Txn) error {
 		return txn.Delete(key)
 	})
+}
+
+// deleteMetadataTree removes metadata for root and all of its descendants.
+// The caller must hold sm.mu.
+func (sm *StagingStateManager) deleteMetadataTree(root string) error {
+	prefix := strings.TrimRight(root, "/") + "/"
+	for metadataPath := range sm.metadata {
+		if metadataPath == root || strings.HasPrefix(metadataPath, prefix) {
+			if err := sm.deleteMetadata(metadataPath); err != nil {
+				return errors.Wrapf(err, "failed to delete staging metadata for %s", metadataPath)
+			}
+		}
+	}
+	return nil
 }
 
 // deleteMetadataPublic removes metadata with locking (for external callers)
