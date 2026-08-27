@@ -10,11 +10,34 @@ import (
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 	"github.com/cyverse/irodsfs-common/irods/cache"
 	"github.com/cyverse/irodsfs-common/irods/inode"
+	"github.com/cyverse/irodsfs-common/irods/stagingfs"
 	"github.com/cyverse/irodsfs-common/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAddImpliedStagingDirectories(t *testing.T) {
+	now := time.Now()
+	entries := map[string]*irodsclient_fs.Entry{}
+	metadata := map[string]*stagingfs.StagingMetadata{
+		"/repo/.git/hooks/pre-merge-commit.sample": {
+			Path:           "/repo/.git/hooks/pre-merge-commit.sample",
+			Action:         stagingfs.ActionUpload,
+			IsNew:          true,
+			CreatedAt:      now,
+			LastModifiedAt: now,
+		},
+	}
+
+	err := addImpliedStagingDirectories(entries, metadata, "/repo/.git", "test-user", inode.NewInodeManager())
+	require.NoError(t, err)
+	entry, exists := entries["/repo/.git/hooks"]
+	require.True(t, exists)
+	assert.Equal(t, irodsclient_fs.DirectoryEntry, entry.Type)
+	assert.Equal(t, "hooks", entry.Name)
+	assert.Equal(t, "test-user", entry.Owner)
+}
 
 // mockFileHandle implements IRODSFSFileHandle for testing
 type mockFileHandle struct {

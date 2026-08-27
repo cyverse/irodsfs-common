@@ -3,10 +3,64 @@ package stagingfs
 import (
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	irodsclient_common "github.com/cyverse/go-irodsclient/irods/common"
 )
+
+func TestStagingFSCloseWaitsForBackgroundWorker(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+		SyncInterval:  time.Millisecond,
+		GracePeriod:   time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	sf.RegisterActionHandler(func(meta *StagingMetadata) error {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		return nil
+	})
+	if err := sf.Mkdir("/dir"); err != nil {
+		t.Fatalf("Failed to stage directory: %v", err)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Background worker did not start")
+	}
+
+	closed := make(chan error, 1)
+	go func() {
+		closed <- sf.Close()
+	}()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned while background worker was active: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return after background worker exited")
+	}
+}
 
 // MockStagingClient implements StagingClient for testing
 type MockStagingClient struct {

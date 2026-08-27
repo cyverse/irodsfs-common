@@ -62,6 +62,7 @@ type StagingFS struct {
 	client           StagingClient
 	stopCh           chan struct{}
 	stopOnce         sync.Once
+	workerWg         sync.WaitGroup
 	sizeMutex        sync.Mutex
 	currentSize      int64 // current total staged data size (dirty + cached)
 	maxSize          int64 // max allowed data size
@@ -729,6 +730,9 @@ func (sf *StagingFS) Close() error {
 	sf.stopOnce.Do(func() {
 		close(sf.stopCh)
 	})
+	// The worker may already be inside syncOldItems when stopCh is closed.
+	// Keep the backend client and staging state alive until that pass exits.
+	sf.workerWg.Wait()
 
 	if err := sf.SyncAll(); err != nil {
 		log.Warnf("failed to sync all staged data on close: %v", err)
@@ -760,7 +764,9 @@ func (sf *StagingFS) startBackgroundWorker() {
 		gracePeriod = 10 * time.Second
 	}
 
+	sf.workerWg.Add(1)
 	go func() {
+		defer sf.workerWg.Done()
 		ticker := time.NewTicker(syncInterval)
 		defer ticker.Stop()
 
@@ -882,7 +888,8 @@ func (sf *StagingFS) GetCachedItems() map[string]*StagingMetadata {
 
 	result := make(map[string]*StagingMetadata, len(sf.cachedItems))
 	for k, v := range sf.cachedItems {
-		result[k] = v
+		copy := *v
+		result[k] = &copy
 	}
 	return result
 }

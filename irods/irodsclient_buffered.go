@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -225,6 +226,22 @@ func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, e
 
 	// Apply staging state
 	allMeta := c.staging.GetAll()
+	// Successfully uploaded files move from pending metadata into cachedItems.
+	// Keep them visible until the backend directory listing catches up.
+	for cachedPath, cachedMeta := range c.staging.GetCachedItems() {
+		if _, pending := allMeta[cachedPath]; !pending {
+			allMeta[cachedPath] = cachedMeta
+		}
+	}
+
+	// A directory's own MKDIR may finish before uploads below it. If the backend
+	// listing is stale during that window, expose the first staged descendant as
+	// an implied directory. Otherwise a recursive rm never descends into it, and
+	// the unseen upload can recreate a child after rm has finished walking.
+	if err := addImpliedStagingDirectories(entryMap, allMeta, dirPath, c.fs.GetAccount().ClientUser, c.inodeManager); err != nil {
+		return nil, err
+	}
+
 	for _, meta := range allMeta {
 		entryDir := path.Dir(meta.Path)
 		if entryDir != dirPath {
@@ -232,7 +249,7 @@ func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, e
 		}
 
 		switch meta.Action {
-		case stagingfs.ActionUpload:
+		case stagingfs.ActionUpload, stagingfs.ActionBulkUpload:
 			if meta.IsNew {
 				inodeID, err := c.inodeManager.CreateOrGetInodeIDForStagingEntry(meta.Path)
 				if err != nil {
@@ -370,6 +387,44 @@ func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, e
 		result = append(result, e)
 	}
 	return result, nil
+}
+
+func addImpliedStagingDirectories(entryMap map[string]*irodsclient_fs.Entry, allMeta map[string]*stagingfs.StagingMetadata, dirPath string, owner string, inodeManager *inode.InodeManager) error {
+	prefix := strings.TrimSuffix(dirPath, "/") + "/"
+	for _, meta := range allMeta {
+		if meta.Action == stagingfs.ActionDelete || meta.Action == stagingfs.ActionRmdir {
+			continue
+		}
+
+		if !strings.HasPrefix(meta.Path, prefix) {
+			continue
+		}
+		rel := strings.TrimPrefix(meta.Path, prefix)
+		parts := strings.SplitN(rel, "/", 2)
+		if len(parts) < 2 {
+			continue
+		}
+
+		childPath := path.Join(dirPath, parts[0])
+		if _, exists := entryMap[childPath]; exists {
+			continue
+		}
+		inodeID, inodeErr := inodeManager.CreateOrGetInodeIDForStagingEntry(childPath)
+		if inodeErr != nil {
+			return inodeErr
+		}
+		entryMap[childPath] = &irodsclient_fs.Entry{
+			ID:         int64(inodeID),
+			Type:       irodsclient_fs.DirectoryEntry,
+			Name:       parts[0],
+			Path:       childPath,
+			Owner:      owner,
+			CreateTime: meta.CreatedAt,
+			ModifyTime: meta.LastModifiedAt,
+			AccessTime: meta.LastModifiedAt,
+		}
+	}
+	return nil
 }
 
 func (c *IRODSFSClientBuffered) Stat(filePath string) (*irodsclient_fs.Entry, error) {
