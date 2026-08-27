@@ -92,6 +92,48 @@ func TestNonRecursiveRmdirRejectsPendingNonDeleteChild(t *testing.T) {
 	}
 }
 
+func TestRmdirNewDirectoryAttemptsBackendRemoval(t *testing.T) {
+	sm := NewStagingStateManager()
+	if err := sm.Mkdir("/dir"); err != nil {
+		t.Fatalf("Failed to stage directory: %v", err)
+	}
+
+	var captured *StagingMetadata
+	sm.RegisterActionHandler(func(meta *StagingMetadata) error {
+		copy := *meta
+		captured = &copy
+		return nil
+	})
+
+	synced, err := sm.Rmdir("/dir", false, false)
+	if err != nil {
+		t.Fatalf("Rmdir failed: %v", err)
+	}
+	if !synced {
+		t.Fatal("Expected immediate backend removal")
+	}
+	if captured == nil || captured.Action != ActionRmdir || captured.Path != "/dir" {
+		t.Fatalf("Expected backend RMDIR for /dir, got %+v", captured)
+	}
+	if meta := sm.Get("/dir"); meta != nil {
+		t.Fatalf("Expected directory metadata removed, got %+v", meta)
+	}
+}
+
+func TestRmdirNewDirectoryIgnoresBackendNotFound(t *testing.T) {
+	sm := NewStagingStateManager()
+	if err := sm.Mkdir("/dir"); err != nil {
+		t.Fatalf("Failed to stage directory: %v", err)
+	}
+	sm.RegisterActionHandler(func(meta *StagingMetadata) error {
+		return irodsclient_types.NewFileNotFoundError(meta.Path)
+	})
+
+	if _, err := sm.Rmdir("/dir", false, false); err != nil {
+		t.Fatalf("Expected absent backend directory to be ignored, got %v", err)
+	}
+}
+
 func TestRecursiveRmdirWaitsForInFlightChildSync(t *testing.T) {
 	sm := NewStagingStateManager()
 	firstPath := "/dir/first.txt"

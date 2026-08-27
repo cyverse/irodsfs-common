@@ -233,6 +233,11 @@ func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, e
 			allMeta[cachedPath] = cachedMeta
 		}
 	}
+	for cachedPath, cachedMeta := range c.staging.GetCachedDirs() {
+		if _, pending := allMeta[cachedPath]; !pending {
+			allMeta[cachedPath] = cachedMeta
+		}
+	}
 
 	// A directory's own MKDIR may finish before uploads below it. If the backend
 	// listing is stale during that window, expose the first staged descendant as

@@ -636,11 +636,28 @@ func (sm *StagingStateManager) Rmdir(path string, recurse bool, force bool) (boo
 	}
 
 	if meta.IsNew {
-		// MKDIR → RMDIR: remove the directory and all locally-created children.
+		// Upload and recursive MKDIR operations can create this collection in iRODS
+		// before its own staged MKDIR is processed. Attempt backend removal even
+		// though the metadata still says IsNew; absence is the only safe no-op.
+		if sm.ActionHandler != nil {
+			err := sm.ActionHandler(&StagingMetadata{
+				Path:           path,
+				Action:         ActionRmdir,
+				Recurse:        recurse,
+				Force:          force,
+				IsNew:          false,
+				CreatedAt:      meta.CreatedAt,
+				LastModifiedAt: time.Now(),
+			})
+			if err != nil && !irodsclient_types.IsFileNotFoundError(err) {
+				return false, errors.Wrap(err, "handler failed for new-directory RMDIR sync")
+			}
+		}
+
 		if err := sm.deleteMetadataTree(path); err != nil {
 			return false, err
 		}
-		return false, nil
+		return true, nil
 	}
 
 	// Existing directory with MKDIR metadata → immediate RMDIR

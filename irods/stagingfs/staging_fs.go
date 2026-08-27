@@ -71,6 +71,7 @@ type StagingFS struct {
 	failedItems      map[string]*StagingMetadata // items that exceeded max retry count
 	cacheMutex       sync.Mutex
 	cachedItems      map[string]*StagingMetadata // files that are synced and kept as read cache
+	cachedDirs       map[string]*StagingMetadata // directories synced while backend listings may still be stale
 	refMu            sync.Mutex
 	openRefs         map[string]int // path → number of open write handles; sync skips these paths
 	handlesMu        sync.Mutex
@@ -126,6 +127,7 @@ func NewStagingFS(config *StagingFSConfig) (*StagingFS, error) {
 		maxCacheFileSize: maxCacheFileSize,
 		failedItems:      make(map[string]*StagingMetadata),
 		cachedItems:      make(map[string]*StagingMetadata),
+		cachedDirs:       make(map[string]*StagingMetadata),
 		openRefs:         make(map[string]int),
 		handles:          make(map[string][]PathHolder),
 		pathSizes:        make(map[string]int64),
@@ -197,6 +199,7 @@ func NewStagingFSWithPersistence(config *StagingFSConfig) (*StagingFS, error) {
 		maxCacheFileSize: maxCacheFileSize,
 		failedItems:      make(map[string]*StagingMetadata),
 		cachedItems:      make(map[string]*StagingMetadata),
+		cachedDirs:       make(map[string]*StagingMetadata),
 		openRefs:         make(map[string]int),
 		handles:          make(map[string][]PathHolder),
 		pathSizes:        make(map[string]int64),
@@ -494,6 +497,14 @@ func (sf *StagingFS) RenameDir(oldPath, newPath string) error {
 			sf.cachedItems[updated] = cached
 		}
 	}
+	for p, cached := range sf.cachedDirs {
+		if p == oldPath || strings.HasPrefix(p, oldPrefix) {
+			delete(sf.cachedDirs, p)
+			updated := newPath + p[len(oldPath):]
+			cached.Path = updated
+			sf.cachedDirs[updated] = cached
+		}
+	}
 	sf.cacheMutex.Unlock()
 
 	// Update per-path size tracking under oldPath
@@ -607,6 +618,14 @@ func (sf *StagingFS) Rmdir(path string, recurse bool, force bool) error {
 	if err != nil {
 		return err
 	}
+
+	sf.cacheMutex.Lock()
+	for cachedPath := range sf.cachedDirs {
+		if pathInSubtree(cachedPath, path) {
+			delete(sf.cachedDirs, cachedPath)
+		}
+	}
+	sf.cacheMutex.Unlock()
 
 	localPath := sf.getLocalDataPath(path)
 	if err := os.RemoveAll(localPath); err != nil && !os.IsNotExist(err) {
@@ -832,6 +851,15 @@ func (sf *StagingFS) syncOldItems(gracePeriod time.Duration) {
 
 // transitionToCached moves a successfully synced file into the cached items map
 func (sf *StagingFS) transitionToCached(meta *StagingMetadata) {
+	if meta.Action == ActionMkdir {
+		copy := *meta
+		copy.FileState = StagingFileCached
+		sf.cacheMutex.Lock()
+		sf.cachedDirs[meta.Path] = &copy
+		sf.cacheMutex.Unlock()
+		return
+	}
+
 	// Only files with local data can be cached
 	if meta.Action != ActionUpload {
 		return
@@ -888,6 +916,20 @@ func (sf *StagingFS) GetCachedItems() map[string]*StagingMetadata {
 
 	result := make(map[string]*StagingMetadata, len(sf.cachedItems))
 	for k, v := range sf.cachedItems {
+		copy := *v
+		result[k] = &copy
+	}
+	return result
+}
+
+// GetCachedDirs returns directories recently synced by staging. These entries
+// keep directory traversal complete while the backend listing cache catches up.
+func (sf *StagingFS) GetCachedDirs() map[string]*StagingMetadata {
+	sf.cacheMutex.Lock()
+	defer sf.cacheMutex.Unlock()
+
+	result := make(map[string]*StagingMetadata, len(sf.cachedDirs))
+	for k, v := range sf.cachedDirs {
 		copy := *v
 		result[k] = &copy
 	}

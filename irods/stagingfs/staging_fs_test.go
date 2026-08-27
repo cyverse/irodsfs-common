@@ -62,6 +62,29 @@ func TestStagingFSCloseWaitsForBackgroundWorker(t *testing.T) {
 	}
 }
 
+func TestBackgroundMkdirRemainsVisibleAsCachedDirectory(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	if err := sf.Mkdir("/repo/empty"); err != nil {
+		t.Fatalf("Failed to stage directory: %v", err)
+	}
+	sf.syncOldItems(0)
+
+	if meta := sf.Get("/repo/empty"); meta != nil {
+		t.Fatalf("Expected pending MKDIR metadata to be synced, got %+v", meta)
+	}
+	if cached := sf.GetCachedDirs()["/repo/empty"]; cached == nil || cached.Action != ActionMkdir {
+		t.Fatalf("Expected synced directory visibility cache, got %+v", cached)
+	}
+}
+
 // MockStagingClient implements StagingClient for testing
 type MockStagingClient struct {
 	removeFileForce  bool
