@@ -636,15 +636,18 @@ func (sm *StagingStateManager) Rmdir(path string, recurse bool, force bool) (boo
 	}
 
 	if meta.IsNew {
-		// Upload and recursive MKDIR operations can create this collection in iRODS
-		// before its own staged MKDIR is processed. Attempt backend removal even
-		// though the metadata still says IsNew; absence is the only safe no-op.
+		// Upload and recursive MKDIR operations can create this collection and
+		// descendants in iRODS before its own staged MKDIR is processed. This is a
+		// cancellation of a staging-created subtree, so clean it up recursively and
+		// bypass trash regardless of the ordinary rmdir syscall options. A regular
+		// non-recursive delete can otherwise fail with EXEC_CMD_ERROR when an upload
+		// implicitly created the collection or a same-named trash entry exists.
 		if sm.ActionHandler != nil {
 			err := sm.ActionHandler(&StagingMetadata{
 				Path:           path,
 				Action:         ActionRmdir,
-				Recurse:        recurse,
-				Force:          force,
+				Recurse:        true,
+				Force:          true,
 				IsNew:          false,
 				CreatedAt:      meta.CreatedAt,
 				LastModifiedAt: time.Now(),

@@ -115,6 +115,9 @@ func TestRmdirNewDirectoryAttemptsBackendRemoval(t *testing.T) {
 	if captured == nil || captured.Action != ActionRmdir || captured.Path != "/dir" {
 		t.Fatalf("Expected backend RMDIR for /dir, got %+v", captured)
 	}
+	if !captured.Recurse || !captured.Force {
+		t.Fatalf("Expected staging-created directory cleanup with recurse/force, got %+v", captured)
+	}
 	if meta := sm.Get("/dir"); meta != nil {
 		t.Fatalf("Expected directory metadata removed, got %+v", meta)
 	}
