@@ -9,7 +9,13 @@ import (
 )
 
 // MockStagingClient implements StagingClient for testing
-type MockStagingClient struct{}
+type MockStagingClient struct {
+	removeFileForce  bool
+	removeFileCalled bool
+	removeDirRecurse bool
+	removeDirForce   bool
+	removeDirCalled  bool
+}
 
 func (m *MockStagingClient) DownloadFileParallel(irodsPath string, localPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error {
 	return nil
@@ -19,9 +25,58 @@ func (m *MockStagingClient) UploadFileParallel(localPath string, irodsPath strin
 }
 func (m *MockStagingClient) RenameFileToFile(srcPath string, destPath string) error { return nil }
 func (m *MockStagingClient) RenameDirToDir(srcPath string, destPath string) error   { return nil }
-func (m *MockStagingClient) RemoveFile(path string, force bool) error               { return nil }
-func (m *MockStagingClient) MakeDir(path string, recurse bool) error                { return nil }
-func (m *MockStagingClient) RemoveDir(path string, recurse bool, force bool) error  { return nil }
+func (m *MockStagingClient) RemoveFile(path string, force bool) error {
+	m.removeFileCalled = true
+	m.removeFileForce = force
+	return nil
+}
+func (m *MockStagingClient) MakeDir(path string, recurse bool) error { return nil }
+func (m *MockStagingClient) RemoveDir(path string, recurse bool, force bool) error {
+	m.removeDirCalled = true
+	m.removeDirRecurse = recurse
+	m.removeDirForce = force
+	return nil
+}
+
+func TestStagingFSDeletePreservesForce(t *testing.T) {
+	client := &MockStagingClient{}
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        client,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+
+	if err := sf.DeleteWithForce("/existing.txt", true); err != nil {
+		t.Fatalf("Failed to stage file deletion: %v", err)
+	}
+	if err := sf.SyncAll(); err != nil {
+		t.Fatalf("Failed to sync file deletion: %v", err)
+	}
+	if !client.removeFileCalled || !client.removeFileForce {
+		t.Fatalf("Expected RemoveFile force=true, called=%v force=%v", client.removeFileCalled, client.removeFileForce)
+	}
+}
+
+func TestStagingFSRmdirPreservesOptions(t *testing.T) {
+	client := &MockStagingClient{}
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        client,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+
+	if err := sf.Rmdir("/existingdir", false, true); err != nil {
+		t.Fatalf("Failed to remove directory: %v", err)
+	}
+	if !client.removeDirCalled || client.removeDirRecurse || !client.removeDirForce {
+		t.Fatalf("Expected RemoveDir recurse=false force=true, called=%v recurse=%v force=%v",
+			client.removeDirCalled, client.removeDirRecurse, client.removeDirForce)
+	}
+}
 
 func TestStagingFSCreate(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -333,7 +388,7 @@ func TestStagingFSMkdirThenRmdir(t *testing.T) {
 		t.Fatalf("Failed to create directory: %v", err)
 	}
 
-	err = sf.Rmdir(path)
+	err = sf.Rmdir(path, true, true)
 	if err != nil {
 		t.Fatalf("Failed to remove directory: %v", err)
 	}
@@ -370,7 +425,7 @@ func TestStagingFSRmdirExistingDir(t *testing.T) {
 	})
 
 	// Rmdir on existing directory (no prior metadata)
-	err = sf.Rmdir(path)
+	err = sf.Rmdir(path, true, true)
 	if err != nil {
 		t.Fatalf("Failed to remove directory: %v", err)
 	}
@@ -415,7 +470,7 @@ func TestStagingFSRmdirDropsPendingChildActions(t *testing.T) {
 		return nil
 	})
 
-	if err := sf.Rmdir("/existingdir"); err != nil {
+	if err := sf.Rmdir("/existingdir", true, true); err != nil {
 		t.Fatalf("Failed to remove directory: %v", err)
 	}
 	if meta := sf.sm.Get(childPath); meta != nil {

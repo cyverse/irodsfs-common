@@ -41,41 +41,41 @@ type SyncErrorHandler func(meta *StagingMetadata, err error)
 
 // StagingFSConfig holds configuration for StagingFS
 type StagingFSConfig struct {
-	LocalRootPath string           // Local base directory for staging (e.g., /staging)
-	Client        StagingClient    // Backend storage client
-	SyncInterval  time.Duration    // How often the background worker runs (default: 5s)
-	GracePeriod   time.Duration    // Items older than this are synced (default: 10s)
+	LocalRootPath    string           // Local base directory for staging (e.g., /staging)
+	Client           StagingClient    // Backend storage client
+	SyncInterval     time.Duration    // How often the background worker runs (default: 5s)
+	GracePeriod      time.Duration    // Items older than this are synced (default: 10s)
 	MaxDataSize      int64            // Max total disk usage for staged data (default: 10GB, 0 = use default)
 	MaxCacheFileSize int64            // Files larger than this are not kept as read cache after sync (default: 1GB, 0 = cache all)
 	OnSyncError      SyncErrorHandler // Called when background sync fails for an item (optional)
 }
 
-const DefaultMaxDataSize = 10 * 1024 * 1024 * 1024      // 10GB
-const DefaultMaxCacheFileSize = 1 * 1024 * 1024 * 1024  // 1GB
+const DefaultMaxDataSize = 10 * 1024 * 1024 * 1024     // 10GB
+const DefaultMaxCacheFileSize = 1 * 1024 * 1024 * 1024 // 1GB
 
 const MaxSyncFailCount = 3
 
 // StagingFS manages local file staging and metadata tracking
 type StagingFS struct {
-	config      *StagingFSConfig
-	sm          *StagingStateManager
-	client      StagingClient
-	stopCh      chan struct{}
-	stopOnce    sync.Once
+	config           *StagingFSConfig
+	sm               *StagingStateManager
+	client           StagingClient
+	stopCh           chan struct{}
+	stopOnce         sync.Once
 	sizeMutex        sync.Mutex
 	currentSize      int64 // current total staged data size (dirty + cached)
 	maxSize          int64 // max allowed data size
 	maxCacheFileSize int64 // files larger than this skip the read cache after sync
-	failedMutex sync.Mutex
-	failedItems map[string]*StagingMetadata // items that exceeded max retry count
-	cacheMutex  sync.Mutex
-	cachedItems map[string]*StagingMetadata // files that are synced and kept as read cache
-	refMu       sync.Mutex
-	openRefs    map[string]int // path → number of open write handles; sync skips these paths
-	handlesMu   sync.Mutex
-	handles     map[string][]PathHolder // path → open write handles (for rename path propagation)
-	pathSizesMu sync.Mutex
-	pathSizes   map[string]int64 // per-path tracked sizes for accurate currentSize accounting
+	failedMutex      sync.Mutex
+	failedItems      map[string]*StagingMetadata // items that exceeded max retry count
+	cacheMutex       sync.Mutex
+	cachedItems      map[string]*StagingMetadata // files that are synced and kept as read cache
+	refMu            sync.Mutex
+	openRefs         map[string]int // path → number of open write handles; sync skips these paths
+	handlesMu        sync.Mutex
+	handles          map[string][]PathHolder // path → open write handles (for rename path propagation)
+	pathSizesMu      sync.Mutex
+	pathSizes        map[string]int64 // per-path tracked sizes for accurate currentSize accounting
 }
 
 // NewStagingFS creates a new StagingFS with memory-only state manager
@@ -117,17 +117,17 @@ func NewStagingFS(config *StagingFSConfig) (*StagingFS, error) {
 	}
 
 	sf := &StagingFS{
-		config:      config,
-		sm:          sm,
-		client:      config.Client,
+		config:           config,
+		sm:               sm,
+		client:           config.Client,
 		stopCh:           make(chan struct{}),
 		maxSize:          maxSize,
 		maxCacheFileSize: maxCacheFileSize,
-		failedItems: make(map[string]*StagingMetadata),
-		cachedItems: make(map[string]*StagingMetadata),
-		openRefs:    make(map[string]int),
-		handles:     make(map[string][]PathHolder),
-		pathSizes:   make(map[string]int64),
+		failedItems:      make(map[string]*StagingMetadata),
+		cachedItems:      make(map[string]*StagingMetadata),
+		openRefs:         make(map[string]int),
+		handles:          make(map[string][]PathHolder),
+		pathSizes:        make(map[string]int64),
 	}
 
 	sf.currentSize = sf.computeDataDirSize()
@@ -188,17 +188,17 @@ func NewStagingFSWithPersistence(config *StagingFSConfig) (*StagingFS, error) {
 	}
 
 	sf := &StagingFS{
-		config:      config,
-		sm:          sm,
-		client:      config.Client,
+		config:           config,
+		sm:               sm,
+		client:           config.Client,
 		stopCh:           make(chan struct{}),
 		maxSize:          maxSize,
 		maxCacheFileSize: maxCacheFileSize,
-		failedItems: make(map[string]*StagingMetadata),
-		cachedItems: make(map[string]*StagingMetadata),
-		openRefs:    make(map[string]int),
-		handles:     make(map[string][]PathHolder),
-		pathSizes:   make(map[string]int64),
+		failedItems:      make(map[string]*StagingMetadata),
+		cachedItems:      make(map[string]*StagingMetadata),
+		openRefs:         make(map[string]int),
+		handles:          make(map[string][]PathHolder),
+		pathSizes:        make(map[string]int64),
 	}
 
 	sf.currentSize = sf.computeDataDirSize()
@@ -561,7 +561,12 @@ func (sf *StagingFS) RenameDir(oldPath, newPath string) error {
 
 // Delete deletes a file
 func (sf *StagingFS) Delete(path string) error {
-	if err := sf.sm.Delete(path); err != nil {
+	return sf.DeleteWithForce(path, false)
+}
+
+// DeleteWithForce deletes a file and preserves the force option for sync.
+func (sf *StagingFS) DeleteWithForce(path string, force bool) error {
+	if err := sf.sm.DeleteWithForce(path, force); err != nil {
 		return err
 	}
 
@@ -588,16 +593,16 @@ func (sf *StagingFS) Mkdir(path string) error {
 
 	localPath := sf.getLocalDataPath(path)
 	if err := os.MkdirAll(localPath, 0755); err != nil {
-		sf.sm.Rmdir(path) // Cleanup on error
+		sf.sm.Rmdir(path, true, true) // Cleanup on error
 		return errors.Wrap(err, "failed to create local directory")
 	}
 
 	return nil
 }
 
-// Rmdir removes a directory
-func (sf *StagingFS) Rmdir(path string) error {
-	syncNow, err := sf.sm.Rmdir(path)
+// RmdirWithOptions removes a directory and preserves its removal options for sync.
+func (sf *StagingFS) Rmdir(path string, recurse bool, force bool) error {
+	syncNow, err := sf.sm.Rmdir(path, recurse, force)
 	if err != nil {
 		return err
 	}
@@ -691,7 +696,7 @@ func (sf *StagingFS) registerDefaultHandler() {
 
 		case ActionDelete:
 			// Delete file from iRODS
-			if err := sf.client.RemoveFile(meta.Path, false); err != nil {
+			if err := sf.client.RemoveFile(meta.Path, meta.Force); err != nil {
 				return errors.Wrapf(err, "failed to delete file in iRODS: %s", meta.Path)
 			}
 
@@ -703,7 +708,7 @@ func (sf *StagingFS) registerDefaultHandler() {
 
 		case ActionRmdir:
 			// Remove directory from iRODS
-			if err := sf.client.RemoveDir(meta.Path, true, false); err != nil {
+			if err := sf.client.RemoveDir(meta.Path, meta.Recurse, meta.Force); err != nil {
 				return errors.Wrapf(err, "failed to remove directory in iRODS: %s", meta.Path)
 			}
 		}

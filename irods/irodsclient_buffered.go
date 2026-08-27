@@ -487,7 +487,7 @@ func (c *IRODSFSClientBuffered) ExistsFile(filePath string) bool {
 
 func (c *IRODSFSClientBuffered) RemoveFile(irodsPath string, force bool) error {
 	if c.staging != nil {
-		if err := c.staging.Delete(irodsPath); err != nil {
+		if err := c.staging.DeleteWithForce(irodsPath, force); err != nil {
 			return err
 		}
 		c.invalidateFileCacheBlocks(irodsPath)
@@ -498,7 +498,7 @@ func (c *IRODSFSClientBuffered) RemoveFile(irodsPath string, force bool) error {
 
 func (c *IRODSFSClientBuffered) RemoveDir(irodsPath string, recurse bool, force bool) error {
 	if c.staging != nil {
-		return c.staging.Rmdir(irodsPath)
+		return c.staging.Rmdir(irodsPath, recurse, force)
 	}
 	return c.client.RemoveDir(irodsPath, recurse, force)
 }

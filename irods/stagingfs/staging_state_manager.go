@@ -75,6 +75,8 @@ type StagingMetadata struct {
 	Path           string           // Current path
 	OldPath        string           // Old path (for RENAME actions)
 	Action         ActionType       // Final action
+	Recurse        bool             // Recursive directory removal
+	Force          bool             // Force file or directory removal
 	IsNew          bool             // Is this a new file?
 	CreatedAt      time.Time        // Creation time
 	LastModifiedAt time.Time        // Last modification time
@@ -85,31 +87,123 @@ type StagingMetadata struct {
 
 // StagingStateManager manages staging metadata for async uploads
 type StagingStateManager struct {
-	metadata      map[string]*StagingMetadata
-	lockedPaths   map[string]bool       // Paths locked during sync operations
-	pathConds     map[string]*sync.Cond // Per-path condition variables
-	db            *badger.DB
-	mu            sync.RWMutex
-	ActionHandler ActionHandler
+	metadata       map[string]*StagingMetadata
+	lockedPaths    map[string]bool       // Paths locked during sync operations
+	lockedSubtrees map[string]bool       // Directory trees locked during recursive operations
+	pathConds      map[string]*sync.Cond // Per-path condition variables
+	db             *badger.DB
+	mu             sync.RWMutex
+	ActionHandler  ActionHandler
 }
 
 // NewStagingStateManager creates a new manager (memory only)
 func NewStagingStateManager() *StagingStateManager {
 	return &StagingStateManager{
-		metadata:    make(map[string]*StagingMetadata),
-		lockedPaths: make(map[string]bool),
-		pathConds:   make(map[string]*sync.Cond),
-		db:          nil,
+		metadata:       make(map[string]*StagingMetadata),
+		lockedPaths:    make(map[string]bool),
+		lockedSubtrees: make(map[string]bool),
+		pathConds:      make(map[string]*sync.Cond),
+		db:             nil,
 	}
 }
 
 // NewStagingStateManagerWithPersistence creates a new manager with Badger persistence
 func NewStagingStateManagerWithPersistence(db *badger.DB) *StagingStateManager {
 	return &StagingStateManager{
-		metadata:    make(map[string]*StagingMetadata),
-		lockedPaths: make(map[string]bool),
-		pathConds:   make(map[string]*sync.Cond),
-		db:          db,
+		metadata:       make(map[string]*StagingMetadata),
+		lockedPaths:    make(map[string]bool),
+		lockedSubtrees: make(map[string]bool),
+		pathConds:      make(map[string]*sync.Cond),
+		db:             db,
+	}
+}
+
+// pathInSubtree reports whether path is root itself or one of its descendants.
+func pathInSubtree(path string, root string) bool {
+	cleanRoot := strings.TrimRight(root, "/")
+	if cleanRoot == "" {
+		return strings.HasPrefix(path, "/")
+	}
+	return path == cleanRoot || strings.HasPrefix(path, cleanRoot+"/")
+}
+
+// blockingLock returns the condition key for a lock preventing work on path.
+// The caller must hold sm.mu.
+func (sm *StagingStateManager) blockingLock(path string) string {
+	if sm.lockedPaths[path] {
+		return path
+	}
+	for root := range sm.lockedSubtrees {
+		if pathInSubtree(path, root) {
+			return root
+		}
+	}
+	return ""
+}
+
+// waitForPathsUnlocked waits until no exact-path or ancestor subtree lock blocks
+// any of paths. The caller must hold sm.mu.
+func (sm *StagingStateManager) waitForPathsUnlocked(paths ...string) {
+	for {
+		blocker := ""
+		for _, path := range paths {
+			if blocker = sm.blockingLock(path); blocker != "" {
+				break
+			}
+		}
+		if blocker == "" {
+			return
+		}
+		if sm.pathConds[blocker] == nil {
+			sm.pathConds[blocker] = sync.NewCond(&sm.mu)
+		}
+		sm.pathConds[blocker].Wait()
+	}
+}
+
+// waitForSubtreeUnlocked waits until root does not overlap another recursive
+// operation and its exact path is not syncing. The caller must hold sm.mu.
+func (sm *StagingStateManager) waitForSubtreeUnlocked(root string) {
+	for {
+		blocker := ""
+		if sm.lockedPaths[root] {
+			blocker = root
+		} else {
+			for lockedRoot := range sm.lockedSubtrees {
+				if pathInSubtree(root, lockedRoot) || pathInSubtree(lockedRoot, root) {
+					blocker = lockedRoot
+					break
+				}
+			}
+		}
+		if blocker == "" {
+			return
+		}
+		if sm.pathConds[blocker] == nil {
+			sm.pathConds[blocker] = sync.NewCond(&sm.mu)
+		}
+		sm.pathConds[blocker].Wait()
+	}
+}
+
+// waitForLockedDescendants waits for sync handlers already running below root.
+// A subtree lock must be held before calling this so no new descendant sync can start.
+func (sm *StagingStateManager) waitForLockedDescendants(root string) {
+	for {
+		blocker := ""
+		for path := range sm.lockedPaths {
+			if pathInSubtree(path, root) {
+				blocker = path
+				break
+			}
+		}
+		if blocker == "" {
+			return
+		}
+		if sm.pathConds[blocker] == nil {
+			sm.pathConds[blocker] = sync.NewCond(&sm.mu)
+		}
+		sm.pathConds[blocker].Wait()
 	}
 }
 
@@ -118,13 +212,8 @@ func (sm *StagingStateManager) Create(path string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// Wait for path to be unlocked if it's locked during sync
-	for sm.lockedPaths[path] {
-		if sm.pathConds[path] == nil {
-			sm.pathConds[path] = sync.NewCond(&sm.mu)
-		}
-		sm.pathConds[path].Wait()
-	}
+	// Wait for exact-path sync or a recursive operation on an ancestor.
+	sm.waitForPathsUnlocked(path)
 
 	now := time.Now()
 	meta := &StagingMetadata{
@@ -142,12 +231,7 @@ func (sm *StagingStateManager) CreateBulkUpload(path string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	for sm.lockedPaths[path] {
-		if sm.pathConds[path] == nil {
-			sm.pathConds[path] = sync.NewCond(&sm.mu)
-		}
-		sm.pathConds[path].Wait()
-	}
+	sm.waitForPathsUnlocked(path)
 
 	now := time.Now()
 	meta := &StagingMetadata{
@@ -165,13 +249,8 @@ func (sm *StagingStateManager) Modify(path string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// Wait for path to be unlocked if it's locked during sync
-	for sm.lockedPaths[path] {
-		if sm.pathConds[path] == nil {
-			sm.pathConds[path] = sync.NewCond(&sm.mu)
-		}
-		sm.pathConds[path].Wait()
-	}
+	// Wait for exact-path sync or a recursive operation on an ancestor.
+	sm.waitForPathsUnlocked(path)
 
 	meta, exists := sm.metadata[path]
 
@@ -203,17 +282,8 @@ func (sm *StagingStateManager) Rename(oldPath, newPath string) (bool, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// Wait for both paths to be unlocked if they're locked during sync
-	for sm.lockedPaths[oldPath] || sm.lockedPaths[newPath] {
-		if sm.pathConds[oldPath] == nil {
-			sm.pathConds[oldPath] = sync.NewCond(&sm.mu)
-		}
-		if sm.pathConds[newPath] == nil {
-			sm.pathConds[newPath] = sync.NewCond(&sm.mu)
-		}
-		// Wait on oldPath condition (will be signaled when either path is unlocked)
-		sm.pathConds[oldPath].Wait()
-	}
+	// Wait for exact-path sync or a recursive operation on either ancestor.
+	sm.waitForPathsUnlocked(oldPath, newPath)
 
 	meta, exists := sm.metadata[oldPath]
 
@@ -321,16 +391,8 @@ func (sm *StagingStateManager) RenameDir(oldPath, newPath string) (bool, error) 
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// Wait for both paths to be unlocked if they're locked during sync
-	for sm.lockedPaths[oldPath] || sm.lockedPaths[newPath] {
-		if sm.pathConds[oldPath] == nil {
-			sm.pathConds[oldPath] = sync.NewCond(&sm.mu)
-		}
-		if sm.pathConds[newPath] == nil {
-			sm.pathConds[newPath] = sync.NewCond(&sm.mu)
-		}
-		sm.pathConds[oldPath].Wait()
-	}
+	// Wait for exact-path sync or a recursive operation on either ancestor.
+	sm.waitForPathsUnlocked(oldPath, newPath)
 
 	meta, exists := sm.metadata[oldPath]
 
@@ -403,16 +465,16 @@ func (sm *StagingStateManager) RenameDir(oldPath, newPath string) (bool, error) 
 
 // Delete marks a path as deleted (file deletion only)
 func (sm *StagingStateManager) Delete(path string) error {
+	return sm.DeleteWithForce(path, false)
+}
+
+// DeleteWithForce marks a path as deleted and preserves the force option for sync.
+func (sm *StagingStateManager) DeleteWithForce(path string, force bool) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// Wait for path to be unlocked if it's locked during sync
-	for sm.lockedPaths[path] {
-		if sm.pathConds[path] == nil {
-			sm.pathConds[path] = sync.NewCond(&sm.mu)
-		}
-		sm.pathConds[path].Wait()
-	}
+	// Wait for exact-path sync or a recursive operation on an ancestor.
+	sm.waitForPathsUnlocked(path)
 
 	meta, exists := sm.metadata[path]
 
@@ -426,6 +488,7 @@ func (sm *StagingStateManager) Delete(path string) error {
 		meta = &StagingMetadata{
 			Path:           path,
 			Action:         ActionDelete,
+			Force:          force,
 			IsNew:          false,
 			CreatedAt:      now,
 			LastModifiedAt: now,
@@ -439,6 +502,7 @@ func (sm *StagingStateManager) Delete(path string) error {
 		return nil
 	} else {
 		meta.Action = ActionDelete
+		meta.Force = force
 		meta.LastModifiedAt = time.Now()
 	}
 
@@ -450,13 +514,8 @@ func (sm *StagingStateManager) Mkdir(path string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// Wait for path to be unlocked if it's locked during sync
-	for sm.lockedPaths[path] {
-		if sm.pathConds[path] == nil {
-			sm.pathConds[path] = sync.NewCond(&sm.mu)
-		}
-		sm.pathConds[path].Wait()
-	}
+	// Wait for exact-path sync or a recursive operation on an ancestor.
+	sm.waitForPathsUnlocked(path)
 
 	now := time.Now()
 	meta := &StagingMetadata{
@@ -469,18 +528,27 @@ func (sm *StagingStateManager) Mkdir(path string) error {
 	return sm.persistMetadata(path, meta)
 }
 
-// Rmdir marks a directory as removed
-// Returns true if immediate sync was performed (for existing directories)
-func (sm *StagingStateManager) Rmdir(path string) (bool, error) {
+// Rmdir marks a directory as removed and preserves its removal options.
+// Returns true if immediate sync was performed (for existing directories).
+func (sm *StagingStateManager) Rmdir(path string, recurse bool, force bool) (bool, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// Wait for path to be unlocked if it's locked during sync
-	for sm.lockedPaths[path] {
-		if sm.pathConds[path] == nil {
-			sm.pathConds[path] = sync.NewCond(&sm.mu)
-		}
-		sm.pathConds[path].Wait()
+	if recurse {
+		// Block new work anywhere below path before waiting for handlers that are
+		// already running. This closes the gap where another child sync could start
+		// while recursive RMDIR is waiting for the previous one.
+		sm.waitForSubtreeUnlocked(path)
+		sm.lockedSubtrees[path] = true
+		defer func() {
+			delete(sm.lockedSubtrees, path)
+			if sm.pathConds[path] != nil {
+				sm.pathConds[path].Broadcast()
+			}
+		}()
+		sm.waitForLockedDescendants(path)
+	} else {
+		sm.waitForPathsUnlocked(path)
 	}
 
 	meta, exists := sm.metadata[path]
@@ -504,6 +572,8 @@ func (sm *StagingStateManager) Rmdir(path string) (bool, error) {
 			err := sm.ActionHandler(&StagingMetadata{
 				Path:           path,
 				Action:         ActionRmdir,
+				Recurse:        recurse,
+				Force:          force,
 				IsNew:          false,
 				CreatedAt:      time.Now(),
 				LastModifiedAt: time.Now(),
@@ -513,11 +583,15 @@ func (sm *StagingStateManager) Rmdir(path string) (bool, error) {
 			}
 		}
 
-		// Recursive removal of the collection also removes every data object and
-		// subcollection below it. Drop their deferred staging actions so the
-		// background worker does not try to delete or upload paths that no longer
-		// exist in iRODS.
-		if err := sm.deleteMetadataTree(path); err != nil {
+		if recurse {
+			// Recursive removal of the collection also removes every data object and
+			// subcollection below it. Drop their deferred staging actions so the
+			// background worker does not try to delete or upload paths that no longer
+			// exist in iRODS.
+			if err := sm.deleteMetadataTree(path); err != nil {
+				return false, err
+			}
+		} else if err := sm.deleteMetadata(path); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -545,6 +619,8 @@ func (sm *StagingStateManager) Rmdir(path string) (bool, error) {
 		err := sm.ActionHandler(&StagingMetadata{
 			Path:           path,
 			Action:         ActionRmdir,
+			Recurse:        recurse,
+			Force:          force,
 			IsNew:          false,
 			CreatedAt:      meta.CreatedAt,
 			LastModifiedAt: time.Now(),
@@ -554,8 +630,12 @@ func (sm *StagingStateManager) Rmdir(path string) (bool, error) {
 		}
 	}
 
-	// Recursive RMDIR already handled every descendant in iRODS.
-	if err := sm.deleteMetadataTree(path); err != nil {
+	if recurse {
+		// Recursive RMDIR already handled every descendant in iRODS.
+		if err := sm.deleteMetadataTree(path); err != nil {
+			return false, err
+		}
+	} else if err := sm.deleteMetadata(path); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -586,14 +666,9 @@ func (sm *StagingStateManager) GetAll() map[string]*StagingMetadata {
 // syncOne performs handler call and removes metadata for a single path with internal locking
 // Acquires and releases lock for the path
 func (sm *StagingStateManager) syncOne(meta *StagingMetadata) error {
-	// Wait for path to be unlocked if it's locked by another sync operation
+	// Wait for exact-path sync or a recursive operation on an ancestor.
 	sm.mu.Lock()
-	for sm.lockedPaths[meta.Path] {
-		if sm.pathConds[meta.Path] == nil {
-			sm.pathConds[meta.Path] = sync.NewCond(&sm.mu)
-		}
-		sm.pathConds[meta.Path].Wait()
-	}
+	sm.waitForPathsUnlocked(meta.Path)
 
 	// GetAll/SyncOld operate on snapshots. A recursive RMDIR may have removed
 	// this child while the snapshot was waiting to be processed. In that case
@@ -825,12 +900,7 @@ func (sm *StagingStateManager) WaitForSync(path string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	for sm.lockedPaths[path] {
-		if sm.pathConds[path] == nil {
-			sm.pathConds[path] = sync.NewCond(&sm.mu)
-		}
-		sm.pathConds[path].Wait()
-	}
+	sm.waitForPathsUnlocked(path)
 }
 
 // RegisterActionHandler registers a handler for operations
