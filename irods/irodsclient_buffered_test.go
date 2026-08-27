@@ -112,6 +112,32 @@ func TestBufferedClientReusesIssuedStagingInodeID(t *testing.T) {
 	assert.Equal(t, int64(issuedID), entry.ID)
 }
 
+func TestBufferedClientShouldCacheFileUsesSmallerLimit(t *testing.T) {
+	cacheMgr := newTestCacheManager(t)
+	defer cacheMgr.Release()
+
+	tests := []struct {
+		name             string
+		maxCacheFileSize int64
+		fileSize         int64
+		want             bool
+	}{
+		{name: "configured limit", maxCacheFileSize: 512 * 1024, fileSize: 512*1024 + 1, want: false},
+		{name: "cache capacity", maxCacheFileSize: 2 * 1024 * 1024, fileSize: 1024*1024 + 1, want: false},
+		{name: "boundary", maxCacheFileSize: 2 * 1024 * 1024, fileSize: 1024 * 1024, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &IRODSFSClientBuffered{
+				cache:            cacheMgr,
+				maxCacheFileSize: tt.maxCacheFileSize,
+			}
+			assert.Equal(t, tt.want, client.shouldCacheFile(tt.fileSize))
+		})
+	}
+}
+
 // --- IRODSFSClientBufferedFileHandle Tests ---
 
 func TestBufferedFileHandleReadAtCacheHit(t *testing.T) {
