@@ -1,12 +1,15 @@
 package irods
 
 import (
+	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
+	irodsclient_common "github.com/cyverse/go-irodsclient/irods/common"
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 	"github.com/cyverse/irodsfs-common/irods/cache"
 	"github.com/cyverse/irodsfs-common/irods/inode"
@@ -16,6 +19,37 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type releaseErrorStagingClient struct{}
+
+func (c *releaseErrorStagingClient) DownloadFileParallel(string, string, int, irodsclient_common.TransferTrackerCallback) error {
+	return nil
+}
+
+func (c *releaseErrorStagingClient) UploadFileParallel(string, string, int, irodsclient_common.TransferTrackerCallback) error {
+	return errors.New("iRODS unavailable")
+}
+
+func (c *releaseErrorStagingClient) RenameFileToFile(string, string) error { return nil }
+func (c *releaseErrorStagingClient) RenameDirToDir(string, string) error   { return nil }
+func (c *releaseErrorStagingClient) RemoveFile(string, bool) error         { return nil }
+func (c *releaseErrorStagingClient) MakeDir(string, bool) error            { return nil }
+func (c *releaseErrorStagingClient) RemoveDir(string, bool, bool) error    { return nil }
+
+func TestBufferedClientReleaseReturnsStagingCloseError(t *testing.T) {
+	rootPath := t.TempDir()
+	staging, err := stagingfs.NewStagingFS(&stagingfs.StagingFSConfig{
+		LocalRootPath: rootPath,
+		Client:        &releaseErrorStagingClient{},
+	})
+	require.NoError(t, err)
+	require.NoError(t, staging.Create("/pending.txt"))
+
+	client := &IRODSFSClientBuffered{staging: staging}
+	err = client.Release()
+	require.ErrorContains(t, err, "iRODS unavailable")
+	require.FileExists(t, filepath.Join(rootPath, "data", "pending.txt"))
+}
 
 func TestAddImpliedStagingDirectories(t *testing.T) {
 	now := time.Now()

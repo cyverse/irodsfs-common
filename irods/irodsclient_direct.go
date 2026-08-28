@@ -67,12 +67,14 @@ func (c *IRODSFSClientDirect) GetMetrics() *irodsclient_metrics.IRODSMetrics {
 }
 
 // Release releases resources
-func (c *IRODSFSClientDirect) Release() {
+func (c *IRODSFSClientDirect) Release() error {
 	defer util.StackTraceFromPanic(c.logger)
 
 	if c.fs != nil {
 		c.fs = nil
 	}
+
+	return nil
 }
 
 // Sync is a no-op for direct client (no staging layer)

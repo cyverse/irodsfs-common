@@ -143,21 +143,25 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 	}, nil
 }
 
-func (c *IRODSFSClientBuffered) Release() {
+func (c *IRODSFSClientBuffered) Release() error {
+	var releaseErr error
+
 	if c.inodeManager != nil {
-		c.inodeManager.Close()
+		releaseErr = errors.CombineErrors(releaseErr, c.inodeManager.Close())
 		c.inodeManager = nil
 	}
 
 	if c.staging != nil {
-		c.staging.Close()
+		releaseErr = errors.CombineErrors(releaseErr, c.staging.Close())
 		c.staging = nil
 	}
 
 	if c.client != nil {
-		c.client.Release()
+		releaseErr = errors.CombineErrors(releaseErr, c.client.Release())
 		c.client = nil
 	}
+
+	return releaseErr
 }
 
 func (c *IRODSFSClientBuffered) Sync() error {

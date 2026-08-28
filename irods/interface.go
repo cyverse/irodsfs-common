@@ -15,7 +15,7 @@ var (
 )
 
 type IRODSFSClient interface {
-	Release()
+	Release() error
 
 	GetAccount() *irodsclient_types.IRODSAccount
 	GetApplicationName() string
