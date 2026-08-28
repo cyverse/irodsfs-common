@@ -1,6 +1,7 @@
 package stagingfs
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -9,6 +10,76 @@ import (
 
 	irodsclient_common "github.com/cyverse/go-irodsclient/irods/common"
 )
+
+func TestStagingFSCloseRemovesDataAfterSuccessfulSync(t *testing.T) {
+	rootPath := filepath.Join(t.TempDir(), "staging")
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: rootPath,
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	if err := sf.Create("/synced.txt"); err != nil {
+		t.Fatalf("Failed to stage file: %v", err)
+	}
+
+	if err := sf.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	if _, err := os.Stat(rootPath); !os.IsNotExist(err) {
+		t.Fatalf("Staging root must be removed after successful sync, stat error: %v", err)
+	}
+}
+
+func TestStagingFSClosePreservesFailedDataForRecovery(t *testing.T) {
+	rootPath := filepath.Join(t.TempDir(), "staging")
+	sf, err := NewStagingFSWithPersistence(&StagingFSConfig{
+		LocalRootPath: rootPath,
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create persistent StagingFS: %v", err)
+	}
+	if err := sf.Create("/pending.txt"); err != nil {
+		t.Fatalf("Failed to stage file: %v", err)
+	}
+	localPath := sf.getLocalDataPath("/pending.txt")
+	content := []byte("pending staging data")
+	if err := os.WriteFile(localPath, content, 0644); err != nil {
+		t.Fatalf("Failed to write staged data: %v", err)
+	}
+
+	errSync := errors.New("iRODS unavailable")
+	sf.RegisterActionHandler(func(*StagingMetadata) error { return errSync })
+	if err := sf.Close(); !errors.Is(err, errSync) {
+		t.Fatalf("Close error = %v, want sync error %v", err, errSync)
+	}
+	if data, err := os.ReadFile(localPath); err != nil {
+		t.Fatalf("Failed staging data was not preserved: %v", err)
+	} else if string(data) != string(content) {
+		t.Fatalf("Preserved staging data = %q, want %q", data, content)
+	}
+
+	restored, err := NewStagingFSWithPersistence(&StagingFSConfig{
+		LocalRootPath: rootPath,
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to reopen preserved staging data: %v", err)
+	}
+	if meta := restored.Get("/pending.txt"); meta == nil || meta.Action != ActionUpload {
+		t.Fatalf("Restored staging metadata = %+v, want pending upload", meta)
+	}
+	if data, err := os.ReadFile(localPath); err != nil {
+		t.Fatalf("Failed to read restored staging data: %v", err)
+	} else if string(data) != string(content) {
+		t.Fatalf("Restored staging data = %q, want %q", data, content)
+	}
+	if err := restored.Close(); err != nil {
+		t.Fatalf("Failed to sync and close restored staging data: %v", err)
+	}
+}
 
 func TestStagingFSCloseWaitsForBackgroundWorker(t *testing.T) {
 	sf, err := NewStagingFS(&StagingFSConfig{

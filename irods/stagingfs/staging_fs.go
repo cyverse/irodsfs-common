@@ -753,19 +753,31 @@ func (sf *StagingFS) Close() error {
 	// Keep the backend client and staging state alive until that pass exits.
 	sf.workerWg.Wait()
 
-	if err := sf.SyncAll(); err != nil {
-		log.WithError(err).Warnf("failed to sync all staged data on close")
+	syncErr := sf.SyncAll()
+	if syncErr != nil {
+		log.WithError(syncErr).Warnf("failed to sync all staged data on close; preserving staging data")
 	}
 
+	var dbCloseErr error
 	if sf.sm.db != nil {
 		if err := sf.sm.db.Close(); err != nil {
-			return err
+			dbCloseErr = err
 		}
 	}
 
-	// Remove staging directory after successful sync and DB close
+	if syncErr != nil {
+		return errors.CombineErrors(syncErr, dbCloseErr)
+	}
+	if dbCloseErr != nil {
+		return dbCloseErr
+	}
+
+	// Remove staging data only after every pending operation was synced and
+	// the persistent metadata database was closed successfully.
 	if sf.config.LocalRootPath != "" {
-		os.RemoveAll(sf.config.LocalRootPath)
+		if err := os.RemoveAll(sf.config.LocalRootPath); err != nil {
+			return errors.Wrap(err, "failed to remove staging directory after sync")
+		}
 	}
 
 	return nil
