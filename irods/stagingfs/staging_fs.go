@@ -802,49 +802,54 @@ func (sf *StagingFS) startBackgroundWorker() {
 
 // syncOldItems syncs items individually, reporting errors via callback without stopping
 func (sf *StagingFS) syncOldItems(gracePeriod time.Duration) {
-	now := time.Now()
-	all := sf.sm.GetAll()
+	attempted := make(map[string]bool)
+	for {
+		processed := false
+		for _, meta := range sf.sm.getSyncCandidates(gracePeriod, false) {
+			if attempted[meta.OperationID] {
+				continue
+			}
+			attempted[meta.OperationID] = true
+			processed = true
 
-	for _, meta := range all {
-		if now.Sub(meta.LastModifiedAt) < gracePeriod {
-			continue
-		}
-
-		// Skip files that currently have open write handles to avoid syncing mid-write
-		if sf.hasOpenRef(meta.Path) {
-			continue
-		}
-
-		if err := sf.sm.syncOne(meta); err != nil {
-			meta.SyncFailCount++
-			log.Warnf("background sync failed for %s (%s), attempt %d: %v", meta.Path, meta.Action, meta.SyncFailCount, err)
-
-			if sf.config.OnSyncError != nil {
-				sf.config.OnSyncError(meta, err)
+			// Skip files that currently have open write handles to avoid syncing mid-write
+			if sf.hasOpenRef(meta.Path) {
+				continue
 			}
 
-			if meta.SyncFailCount >= MaxSyncFailCount {
-				sf.failedMutex.Lock()
-				sf.failedItems[meta.Path] = meta
-				sf.failedMutex.Unlock()
+			if err := sf.sm.syncOne(meta); err != nil {
+				log.Warnf("background sync failed for %s (%s), attempt %d: %v", meta.Path, meta.Action, meta.SyncFailCount, err)
 
-				sf.sm.deleteMetadataPublic(meta.Path)
+				if sf.config.OnSyncError != nil {
+					sf.config.OnSyncError(meta, err)
+				}
+
+				if meta.SyncFailCount >= MaxSyncFailCount {
+					sf.failedMutex.Lock()
+					sf.failedItems[meta.Path] = meta
+					sf.failedMutex.Unlock()
+
+					sf.sm.markOperationBlockedPublic(meta.OperationID)
+				}
+				continue
 			}
-			continue
+
+			// BulkUpload: delete local file immediately after sync (no caching).
+			// Guard: a concurrent StageForBulkUpload may have already written a new file to
+			// this staging path while syncOne was running. Only delete if no new metadata
+			// entry was registered in the meantime.
+			if meta.Action == ActionBulkUpload {
+				if sf.sm.Get(meta.Path) == nil {
+					localPath := sf.getLocalDataPath(meta.Path)
+					sf.removePathSize(meta.Path)
+					os.Remove(localPath)
+				}
+			} else {
+				sf.transitionToCached(meta)
+			}
 		}
-
-		// BulkUpload: delete local file immediately after sync (no caching).
-		// Guard: a concurrent StageForBulkUpload may have already written a new file to
-		// this staging path while syncOne was running.  Only delete if no new metadata
-		// entry was registered in the meantime.
-		if meta.Action == ActionBulkUpload {
-			if sf.sm.Get(meta.Path) == nil {
-				localPath := sf.getLocalDataPath(meta.Path)
-				sf.removePathSize(meta.Path)
-				os.Remove(localPath)
-			}
-		} else {
-			sf.transitionToCached(meta)
+		if !processed {
+			return
 		}
 	}
 }
@@ -1039,13 +1044,11 @@ func (sf *StagingFS) GetLocalFileSize(path string) int64 {
 // IsRenamedFrom checks if the given path was renamed away by any staging entry.
 // Returns true if some entry has OldPath == path (meaning this path no longer exists).
 func (sf *StagingFS) IsRenamedFrom(path string) bool {
-	all := sf.sm.GetAll()
-	for _, meta := range all {
-		if meta.OldPath == path && (meta.Action == ActionRename || meta.Action == ActionRenameDir) {
-			return true
-		}
-	}
-	return false
+	return sf.sm.IsRenamedFrom(path)
+}
+
+func (sf *StagingFS) GetPendingRenames() []*StagingMetadata {
+	return sf.sm.GetPendingRenames()
 }
 
 // Get retrieves metadata for a path
@@ -1073,8 +1076,9 @@ func (sf *StagingFS) GetFailedItems() map[string]*StagingMetadata {
 // ClearFailedItems removes all failed items
 func (sf *StagingFS) ClearFailedItems() {
 	sf.failedMutex.Lock()
-	defer sf.failedMutex.Unlock()
 	sf.failedItems = make(map[string]*StagingMetadata)
+	sf.failedMutex.Unlock()
+	sf.sm.retryBlockedOperations()
 }
 
 // Clear clears all metadata and local files

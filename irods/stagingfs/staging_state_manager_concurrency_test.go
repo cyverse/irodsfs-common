@@ -1,10 +1,9 @@
 package stagingfs
 
 import (
+	"errors"
 	"testing"
 	"time"
-
-	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 )
 
 func TestNonRecursiveRmdirDrainsDeleteQueuedBehindUpload(t *testing.T) {
@@ -55,6 +54,12 @@ func TestNonRecursiveRmdirDrainsDeleteQueuedBehindUpload(t *testing.T) {
 	if _, err := sm.Rmdir("/dir", false, false); err != nil {
 		t.Fatalf("Non-recursive Rmdir failed: %v", err)
 	}
+	if len(actions) != 1 {
+		t.Fatalf("Expected RMDIR and DELETE to remain deferred, got %v", actions)
+	}
+	if err := sm.SyncAll(); err != nil {
+		t.Fatalf("Failed to sync queued removals: %v", err)
+	}
 	want := []ActionType{ActionUpload, ActionDelete, ActionRmdir}
 	if len(actions) != len(want) {
 		t.Fatalf("Expected actions %v, got %v", want, actions)
@@ -69,7 +74,7 @@ func TestNonRecursiveRmdirDrainsDeleteQueuedBehindUpload(t *testing.T) {
 	}
 }
 
-func TestNonRecursiveRmdirRejectsPendingNonDeleteChild(t *testing.T) {
+func TestNonRecursiveRmdirCancelsPendingNewChild(t *testing.T) {
 	sm := NewStagingStateManager()
 	if err := sm.Create("/dir/file.txt"); err != nil {
 		t.Fatalf("Failed to stage child: %v", err)
@@ -80,23 +85,22 @@ func TestNonRecursiveRmdirRejectsPendingNonDeleteChild(t *testing.T) {
 		handlerCalled = true
 		return nil
 	})
-	_, err := sm.Rmdir("/dir", false, false)
-	if !irodsclient_types.IsCollectionNotEmptyError(err) {
-		t.Fatalf("Expected collection-not-empty error, got %v", err)
+	if _, err := sm.Rmdir("/dir", false, false); err != nil {
+		t.Fatalf("Failed to queue RMDIR: %v", err)
 	}
 	if handlerCalled {
 		t.Fatal("Backend handler must not run while a non-delete child remains")
 	}
-	if meta := sm.Get("/dir/file.txt"); meta == nil || meta.Action != ActionUpload {
-		t.Fatalf("Expected pending child upload to remain, got %+v", meta)
+	if meta := sm.Get("/dir/file.txt"); meta != nil {
+		t.Fatalf("Expected pending child upload to be canceled, got %+v", meta)
+	}
+	if meta := sm.Get("/dir"); meta == nil || meta.Action != ActionRmdir {
+		t.Fatalf("Expected queued RMDIR, got %+v", meta)
 	}
 }
 
-func TestRmdirNewDirectoryAttemptsBackendRemoval(t *testing.T) {
+func TestRmdirExistingDirectoryQueuesBackendRemoval(t *testing.T) {
 	sm := NewStagingStateManager()
-	if err := sm.Mkdir("/dir"); err != nil {
-		t.Fatalf("Failed to stage directory: %v", err)
-	}
 
 	var captured *StagingMetadata
 	sm.RegisterActionHandler(func(meta *StagingMetadata) error {
@@ -109,31 +113,125 @@ func TestRmdirNewDirectoryAttemptsBackendRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Rmdir failed: %v", err)
 	}
-	if !synced {
-		t.Fatal("Expected immediate backend removal")
+	if synced {
+		t.Fatal("RMDIR must not sync inline")
+	}
+	if captured != nil {
+		t.Fatalf("Backend handler ran before sync: %+v", captured)
+	}
+	queued := sm.Get("/dir")
+	if queued == nil || queued.Action != ActionRmdir || queued.Recurse || queued.Force {
+		t.Fatalf("Expected queued RMDIR preserving options, got %+v", queued)
+	}
+	if err := sm.SyncAll(); err != nil {
+		t.Fatalf("Failed to sync RMDIR: %v", err)
 	}
 	if captured == nil || captured.Action != ActionRmdir || captured.Path != "/dir" {
 		t.Fatalf("Expected backend RMDIR for /dir, got %+v", captured)
 	}
-	if !captured.Recurse || !captured.Force {
-		t.Fatalf("Expected staging-created directory cleanup with recurse/force, got %+v", captured)
+}
+
+func TestRmdirFailureRemainsQueuedForRetry(t *testing.T) {
+	sm := NewStagingStateManager()
+	wantErr := errors.New("backend removal failed")
+	sm.RegisterActionHandler(func(meta *StagingMetadata) error { return wantErr })
+
+	if _, err := sm.Rmdir("/dir", false, false); err != nil {
+		t.Fatalf("Failed to queue RMDIR: %v", err)
 	}
-	if meta := sm.Get("/dir"); meta != nil {
-		t.Fatalf("Expected directory metadata removed, got %+v", meta)
+	if err := sm.SyncAll(); !errors.Is(err, wantErr) {
+		t.Fatalf("Expected backend error, got %v", err)
+	}
+	if meta := sm.Get("/dir"); meta == nil || meta.Action != ActionRmdir {
+		t.Fatalf("Expected failed RMDIR to remain queued, got %+v", meta)
 	}
 }
 
-func TestRmdirNewDirectoryIgnoresBackendNotFound(t *testing.T) {
+func TestRmdirSubtreeGetsPriorityAndSyncsDeepestFirst(t *testing.T) {
 	sm := NewStagingStateManager()
-	if err := sm.Mkdir("/dir"); err != nil {
-		t.Fatalf("Failed to stage directory: %v", err)
+	if err := sm.Delete("/dir/sub/file.txt"); err != nil {
+		t.Fatalf("Failed to queue child delete: %v", err)
 	}
-	sm.RegisterActionHandler(func(meta *StagingMetadata) error {
-		return irodsclient_types.NewFileNotFoundError(meta.Path)
-	})
-
+	if _, err := sm.Rmdir("/dir/sub", false, false); err != nil {
+		t.Fatalf("Failed to queue child RMDIR: %v", err)
+	}
 	if _, err := sm.Rmdir("/dir", false, false); err != nil {
-		t.Fatalf("Expected absent backend directory to be ignored, got %v", err)
+		t.Fatalf("Failed to queue parent RMDIR: %v", err)
+	}
+	if err := sm.Create("/unrelated.txt"); err != nil {
+		t.Fatalf("Failed to queue unrelated upload: %v", err)
+	}
+
+	var actions []string
+	sm.RegisterActionHandler(func(meta *StagingMetadata) error {
+		actions = append(actions, meta.Action.String()+":"+meta.Path)
+		return nil
+	})
+	if err := sm.SyncOld(time.Hour); err != nil {
+		t.Fatalf("Failed priority sync: %v", err)
+	}
+
+	want := []string{
+		"DELETE:/dir/sub/file.txt",
+		"RMDIR:/dir/sub",
+		"RMDIR:/dir",
+	}
+	if len(actions) != len(want) {
+		t.Fatalf("Expected %v, got %v", want, actions)
+	}
+	for i := range want {
+		if actions[i] != want[i] {
+			t.Fatalf("Expected %v, got %v", want, actions)
+		}
+	}
+	if meta := sm.Get("/unrelated.txt"); meta == nil || meta.Action != ActionUpload {
+		t.Fatalf("Expected unrelated upload to retain its grace period, got %+v", meta)
+	}
+}
+
+func TestRenameDirRunsBeforeMovedDescendantWork(t *testing.T) {
+	sm := NewStagingStateManager()
+	if err := sm.Modify("/old/file.txt"); err != nil {
+		t.Fatalf("Failed to queue existing-file upload: %v", err)
+	}
+	if _, err := sm.RenameDir("/old", "/new"); err != nil {
+		t.Fatalf("Failed to queue directory rename: %v", err)
+	}
+
+	var actions []string
+	sm.RegisterActionHandler(func(meta *StagingMetadata) error {
+		actions = append(actions, meta.Action.String()+":"+meta.Path)
+		return nil
+	})
+	if err := sm.SyncOld(time.Hour); err != nil {
+		t.Fatalf("Failed priority sync: %v", err)
+	}
+	want := []string{"RENAME_DIR:/new", "UPLOAD:/new/file.txt"}
+	if len(actions) != len(want) || actions[0] != want[0] || actions[1] != want[1] {
+		t.Fatalf("Expected %v, got %v", want, actions)
+	}
+}
+
+func TestModifiedFileRenameQueuesRenameThenUpload(t *testing.T) {
+	sm := NewStagingStateManager()
+	if err := sm.Modify("/old.txt"); err != nil {
+		t.Fatalf("Failed to queue modification: %v", err)
+	}
+	if _, err := sm.Rename("/old.txt", "/new.txt"); err != nil {
+		t.Fatalf("Failed to queue rename: %v", err)
+	}
+
+	var actions []string
+	sm.RegisterActionHandler(func(meta *StagingMetadata) error {
+		actions = append(actions, meta.Action.String()+":"+meta.Path)
+		return nil
+	})
+	if err := sm.SyncAll(); err != nil {
+		t.Fatalf("Failed to sync rename and upload: %v", err)
+	}
+	want := []string{"RENAME:/new.txt", "UPLOAD:/new.txt"}
+	if len(actions) != len(want) || actions[0] != want[0] || actions[1] != want[1] {
+		t.Fatalf("Expected %v, got %v", want, actions)
 	}
 }
 
@@ -223,8 +321,8 @@ func TestRecursiveRmdirWaitsForInFlightChildSync(t *testing.T) {
 
 	select {
 	case <-rmdirStarted:
+		t.Fatal("Rmdir backend handler ran inline")
 	default:
-		t.Fatal("Rmdir backend handler was not called")
 	}
 	select {
 	case <-secondStarted:
@@ -233,5 +331,13 @@ func TestRecursiveRmdirWaitsForInFlightChildSync(t *testing.T) {
 	}
 	if meta := sm.Get(secondPath); meta != nil {
 		t.Fatalf("Expected pending child metadata to be removed, got %+v", meta)
+	}
+	if err := sm.SyncAll(); err != nil {
+		t.Fatalf("Failed to sync queued RMDIR: %v", err)
+	}
+	select {
+	case <-rmdirStarted:
+	default:
+		t.Fatal("Rmdir backend handler was not called during sync")
 	}
 }

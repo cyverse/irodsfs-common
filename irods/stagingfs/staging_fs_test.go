@@ -149,6 +149,12 @@ func TestStagingFSRmdirPreservesOptions(t *testing.T) {
 	if err := sf.Rmdir("/existingdir", false, true); err != nil {
 		t.Fatalf("Failed to remove directory: %v", err)
 	}
+	if client.removeDirCalled {
+		t.Fatal("RemoveDir must be deferred to sync")
+	}
+	if err := sf.SyncAll(); err != nil {
+		t.Fatalf("Failed to sync directory removal: %v", err)
+	}
 	if !client.removeDirCalled || client.removeDirRecurse || !client.removeDirForce {
 		t.Fatalf("Expected RemoveDir recurse=false force=true, called=%v recurse=%v force=%v",
 			client.removeDirCalled, client.removeDirRecurse, client.removeDirForce)
@@ -470,10 +476,15 @@ func TestStagingFSMkdirThenRmdir(t *testing.T) {
 		t.Fatalf("Failed to remove directory: %v", err)
 	}
 
-	// Verify metadata is removed (MKDIR → RMDIR removes metadata)
-	meta := sf.sm.Get(path)
-	if meta != nil {
-		t.Errorf("Expected metadata to be removed, but got %v", meta)
+	// A never-synced empty directory has no backend work and is canceled locally.
+	if meta := sf.sm.Get(path); meta != nil {
+		t.Fatalf("Expected MKDIR to be canceled, got %v", meta)
+	}
+	if err := sf.SyncAll(); err != nil {
+		t.Fatalf("Failed to sync RMDIR: %v", err)
+	}
+	if meta := sf.sm.Get(path); meta != nil {
+		t.Errorf("Expected metadata removed after sync, got %v", meta)
 	}
 }
 
@@ -491,7 +502,7 @@ func TestStagingFSRmdirExistingDir(t *testing.T) {
 
 	path := "/existingdir"
 
-	// Register handler to verify it's called immediately
+	// Register handler to verify it is deferred until sync.
 	handlerCalled := false
 	var capturedMeta *StagingMetadata
 
@@ -507,9 +518,17 @@ func TestStagingFSRmdirExistingDir(t *testing.T) {
 		t.Fatalf("Failed to remove directory: %v", err)
 	}
 
-	// Verify handler was called immediately
+	if handlerCalled {
+		t.Fatal("Expected existing-directory RMDIR to be queued")
+	}
+	if meta := sf.sm.Get(path); meta == nil || meta.Action != ActionRmdir {
+		t.Fatalf("Expected queued RMDIR metadata, got %v", meta)
+	}
+	if err := sf.SyncAll(); err != nil {
+		t.Fatalf("Failed to sync RMDIR: %v", err)
+	}
 	if !handlerCalled {
-		t.Errorf("Expected handler to be called immediately for existing directory RMDIR")
+		t.Fatal("Expected handler during sync")
 	}
 	if capturedMeta.Action != ActionRmdir {
 		t.Errorf("Expected ActionRmdir, got %v", capturedMeta.Action)
@@ -518,9 +537,7 @@ func TestStagingFSRmdirExistingDir(t *testing.T) {
 		t.Errorf("Expected IsNew=false for existing directory")
 	}
 
-	// Verify metadata is removed after sync
-	meta := sf.sm.Get(path)
-	if meta != nil {
+	if meta := sf.sm.Get(path); meta != nil {
 		t.Errorf("Expected metadata to be removed after immediate sync, but got %v", meta)
 	}
 }
@@ -559,6 +576,9 @@ func TestStagingFSRmdirDropsPendingChildActions(t *testing.T) {
 	// removed the child in the backend.
 	if err := sf.sm.syncOne(&staleChild); err != nil {
 		t.Fatalf("Failed to discard stale child action: %v", err)
+	}
+	if err := sf.SyncAll(); err != nil {
+		t.Fatalf("Failed to sync recursive RMDIR: %v", err)
 	}
 	if len(actions) != 1 || actions[0] != ActionRmdir {
 		t.Fatalf("Expected only RMDIR, got actions %v", actions)
@@ -621,7 +641,7 @@ func TestStagingFSRenameDirExisting(t *testing.T) {
 	oldPath := "/existingdir"
 	newPath := "/newpath"
 
-	// Register handler to verify it's called immediately
+	// Register handler to verify it is deferred until sync.
 	handlerCalled := false
 	var capturedMeta *StagingMetadata
 
@@ -637,9 +657,17 @@ func TestStagingFSRenameDirExisting(t *testing.T) {
 		t.Fatalf("Failed to rename directory: %v", err)
 	}
 
-	// Verify handler was called immediately
+	if handlerCalled {
+		t.Fatal("Expected existing-directory RENAME_DIR to be queued")
+	}
+	if meta := sf.sm.Get(newPath); meta == nil || meta.Action != ActionRenameDir {
+		t.Fatalf("Expected queued RENAME_DIR metadata, got %v", meta)
+	}
+	if err := sf.SyncAll(); err != nil {
+		t.Fatalf("Failed to sync RENAME_DIR: %v", err)
+	}
 	if !handlerCalled {
-		t.Errorf("Expected handler to be called immediately for existing directory RENAME")
+		t.Fatal("Expected handler during sync")
 	}
 	if capturedMeta.Action != ActionRenameDir {
 		t.Errorf("Expected ActionRenameDir, got %v", capturedMeta.Action)

@@ -247,9 +247,51 @@ func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, e
 		return nil, err
 	}
 
+	// RENAME may be a predecessor of the latest logical operation at the same
+	// path (for example RENAME -> UPLOAD). Apply those DAG nodes explicitly so
+	// the old name is hidden and the new name remains visible while sync waits.
+	for _, meta := range c.staging.GetPendingRenames() {
+		if path.Dir(meta.OldPath) == dirPath {
+			delete(entryMap, meta.OldPath)
+		}
+		if path.Dir(meta.Path) != dirPath {
+			continue
+		}
+		if meta.Action == stagingfs.ActionRenameDir {
+			if err := c.inodeManager.RenameStagingEntryTree(meta.OldPath, meta.Path); err != nil {
+				return nil, err
+			}
+		} else if err := c.inodeManager.RenameStagingEntry(meta.OldPath, meta.Path); err != nil {
+			return nil, err
+		}
+		inodeID, err := c.inodeManager.CreateOrGetInodeIDForStagingEntry(meta.Path)
+		if err != nil {
+			return nil, err
+		}
+		entryType := irodsclient_fs.FileEntry
+		if meta.Action == stagingfs.ActionRenameDir {
+			entryType = irodsclient_fs.DirectoryEntry
+		}
+		now := time.Now()
+		entryMap[meta.Path] = &irodsclient_fs.Entry{
+			ID:         int64(inodeID),
+			Type:       entryType,
+			Name:       path.Base(meta.Path),
+			Path:       meta.Path,
+			Owner:      c.fs.GetAccount().ClientUser,
+			Size:       max(c.staging.GetLocalFileSize(meta.Path), 0),
+			CreateTime: now,
+			ModifyTime: meta.LastModifiedAt,
+			AccessTime: meta.LastModifiedAt,
+		}
+	}
+
 	for _, meta := range allMeta {
 		entryDir := path.Dir(meta.Path)
 		if entryDir != dirPath {
+			continue
+		}
+		if meta.Action == stagingfs.ActionRename || meta.Action == stagingfs.ActionRenameDir {
 			continue
 		}
 
@@ -1384,7 +1426,10 @@ func (c *IRODSFSClientBuffered) storeCacheFileMeta(irodsPath string, entry *irod
 	buf := make([]byte, 16)
 	binary.LittleEndian.PutUint64(buf[0:8], uint64(entry.Size))
 	binary.LittleEndian.PutUint64(buf[8:16], uint64(entry.ModifyTime.UnixNano()))
-	if _, err := c.cache.PutCopy(c.makeCacheKey(irodsPath, -1), buf, false); err != nil {
+	// The freshness stamp must be visible before a subsequent read validates
+	// the cached blocks. Waiting here also commits any data blocks queued before
+	// the stamp, so a fresh stamp can never point at blocks that are not visible.
+	if _, err := c.cache.PutCopy(c.makeCacheKey(irodsPath, -1), buf, true); err != nil {
 		c.logger.Warnf("failed to store cache meta for %q: %v", irodsPath, err)
 	}
 }

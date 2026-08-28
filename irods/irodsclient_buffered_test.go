@@ -173,7 +173,7 @@ func TestBufferedFileHandleReadAtCacheHit(t *testing.T) {
 	mock := newMockFileHandle("/test/file.dat", data, irodsclient_types.FileOpenModeReadOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		client:    &IRODSFSClientBuffered{cache: cacheMgr, logger: newTestLogger()},
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, helper: helper, logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
 		irodsPath: "/test/file.dat",
@@ -184,6 +184,7 @@ func TestBufferedFileHandleReadAtCacheHit(t *testing.T) {
 	// Pre-populate cache for block 0 (simulating a previous read)
 	cacheKey := handle.makeCacheKey(0)
 	cacheMgr.PutCopy(cacheKey, data, true)
+	handle.client.storeCacheFileMeta(handle.irodsPath, mock.entry)
 
 	// Modify the underlying data — if cache works, we should still get original
 	mock.data = []byte("XXXXXXXXXXXXXXXX")
@@ -205,7 +206,7 @@ func TestBufferedFileHandleReadAtCrossBock(t *testing.T) {
 	mock := newMockFileHandle("/test/cross.dat", data, irodsclient_types.FileOpenModeReadOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		client:    &IRODSFSClientBuffered{cache: cacheMgr, logger: newTestLogger()},
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, helper: helper, logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
 		irodsPath: "/test/cross.dat",
@@ -231,7 +232,7 @@ func TestBufferedFileHandleReadAtPartialLastBlock(t *testing.T) {
 	mock := newMockFileHandle("/test/partial.dat", data, irodsclient_types.FileOpenModeReadOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		client:    &IRODSFSClientBuffered{cache: cacheMgr, logger: newTestLogger()},
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, helper: helper, logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
 		irodsPath: "/test/partial.dat",
@@ -257,7 +258,7 @@ func TestBufferedFileHandleReadAtBeyondEOF(t *testing.T) {
 	mock := newMockFileHandle("/test/short.dat", data, irodsclient_types.FileOpenModeReadOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		client:    &IRODSFSClientBuffered{cache: cacheMgr, logger: newTestLogger()},
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, helper: helper, logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
 		irodsPath: "/test/short.dat",
@@ -282,7 +283,7 @@ func TestBufferedFileHandleReadAtClampToFileSize(t *testing.T) {
 	mock := newMockFileHandle("/test/clamp.dat", data, irodsclient_types.FileOpenModeReadOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		client:    &IRODSFSClientBuffered{cache: cacheMgr, logger: newTestLogger()},
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, helper: helper, logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
 		irodsPath: "/test/clamp.dat",
@@ -308,7 +309,7 @@ func TestBufferedFileHandleWriteAtInvalidatesCache(t *testing.T) {
 	mock := newMockFileHandle("/test/write.dat", data, irodsclient_types.FileOpenModeReadWrite)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		client:    &IRODSFSClientBuffered{cache: cacheMgr, logger: newTestLogger()},
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, helper: helper, logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
 		irodsPath: "/test/write.dat",
@@ -345,7 +346,7 @@ func TestBufferedFileHandleTruncateInvalidatesCache(t *testing.T) {
 	mock := newMockFileHandle("/test/trunc.dat", data, irodsclient_types.FileOpenModeReadWrite)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		client:    &IRODSFSClientBuffered{cache: cacheMgr, logger: newTestLogger()},
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, helper: helper, logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
 		irodsPath: "/test/trunc.dat",
@@ -375,7 +376,7 @@ func TestBufferedFileHandleReadNotWriteMode(t *testing.T) {
 	mock := newMockFileHandle("/test/wo.dat", data, irodsclient_types.FileOpenModeWriteOnly)
 
 	handle := &IRODSFSClientBufferedFileHandle{
-		client:    &IRODSFSClientBuffered{cache: cacheMgr, logger: newTestLogger()},
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, helper: helper, logger: newTestLogger()},
 		handle:    mock,
 		cache:     cacheMgr,
 		irodsPath: "/test/wo.dat",

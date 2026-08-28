@@ -1,14 +1,15 @@
 package stagingfs
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/cockroachdb/errors"
-	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 	"github.com/dgraph-io/badger/v3"
 )
 
@@ -73,22 +74,25 @@ func (s StagingFileState) String() string {
 
 // StagingMetadata represents the state of a staged file
 type StagingMetadata struct {
-	Path           string           // Current path
-	OldPath        string           // Old path (for RENAME actions)
-	Action         ActionType       // Final action
-	Recurse        bool             // Recursive directory removal
-	Force          bool             // Force file or directory removal
-	IsNew          bool             // Is this a new file?
-	CreatedAt      time.Time        // Creation time
-	LastModifiedAt time.Time        // Last modification time
-	SyncFailCount  int              // Number of consecutive sync failures
-	FileState      StagingFileState // Whether local file is dirty or cached
-	LastAccessedAt time.Time        // Last time the cached file was accessed (for eviction)
+	OperationID     string           // ID of the latest DAG operation for this logical path
+	Path            string           // Current path
+	OldPath         string           // Old path (for RENAME actions)
+	Action          ActionType       // Final action
+	Recurse         bool             // Recursive directory removal
+	Force           bool             // Force file or directory removal
+	IsNew           bool             // Is this a new file?
+	CreatedAt       time.Time        // Creation time
+	LastModifiedAt  time.Time        // Last modification time
+	SyncFailCount   int              // Number of consecutive sync failures
+	BackendMayExist bool             // A completed descendant operation may have created this directory remotely
+	FileState       StagingFileState // Whether local file is dirty or cached
+	LastAccessedAt  time.Time        // Last time the cached file was accessed (for eviction)
 }
 
 // StagingStateManager manages staging metadata for async uploads
 type StagingStateManager struct {
 	metadata       map[string]*StagingMetadata
+	dag            *OperationDAG
 	lockedPaths    map[string]bool       // Paths locked during sync operations
 	lockedSubtrees map[string]bool       // Directory trees locked during recursive operations
 	pathConds      map[string]*sync.Cond // Per-path condition variables
@@ -101,6 +105,7 @@ type StagingStateManager struct {
 func NewStagingStateManager() *StagingStateManager {
 	return &StagingStateManager{
 		metadata:       make(map[string]*StagingMetadata),
+		dag:            newOperationDAG(),
 		lockedPaths:    make(map[string]bool),
 		lockedSubtrees: make(map[string]bool),
 		pathConds:      make(map[string]*sync.Cond),
@@ -112,6 +117,7 @@ func NewStagingStateManager() *StagingStateManager {
 func NewStagingStateManagerWithPersistence(db *badger.DB) *StagingStateManager {
 	return &StagingStateManager{
 		metadata:       make(map[string]*StagingMetadata),
+		dag:            newOperationDAG(),
 		lockedPaths:    make(map[string]bool),
 		lockedSubtrees: make(map[string]bool),
 		pathConds:      make(map[string]*sync.Cond),
@@ -208,37 +214,6 @@ func (sm *StagingStateManager) waitForLockedDescendants(root string) {
 	}
 }
 
-// drainPendingDeletes synchronously applies deferred file deletions below root.
-// It returns false when another staged action still makes the directory logically
-// non-empty. The caller must hold sm.mu and a subtree lock for root.
-func (sm *StagingStateManager) drainPendingDeletes(root string) (bool, error) {
-	var deletes []*StagingMetadata
-	for metadataPath, meta := range sm.metadata {
-		if metadataPath != root && pathInSubtree(metadataPath, root) && meta.Action == ActionDelete {
-			copy := *meta
-			deletes = append(deletes, &copy)
-		}
-	}
-
-	for _, meta := range deletes {
-		if sm.ActionHandler != nil {
-			if err := sm.ActionHandler(meta); err != nil {
-				return false, errors.Wrapf(err, "handler failed for DELETE action on %s before RMDIR", meta.Path)
-			}
-		}
-		if err := sm.deleteMetadata(meta.Path); err != nil {
-			return false, err
-		}
-	}
-
-	for metadataPath := range sm.metadata {
-		if metadataPath != root && pathInSubtree(metadataPath, root) {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
 // Create marks a path as newly created
 func (sm *StagingStateManager) Create(path string) error {
 	sm.mu.Lock()
@@ -285,6 +260,18 @@ func (sm *StagingStateManager) Modify(path string) error {
 	sm.waitForPathsUnlocked(path)
 
 	meta, exists := sm.metadata[path]
+	if exists && meta.Action == ActionRename {
+		now := time.Now()
+		uploadMeta := &StagingMetadata{
+			Path:           path,
+			OldPath:        meta.OldPath,
+			Action:         ActionUpload,
+			IsNew:          false,
+			CreatedAt:      meta.CreatedAt,
+			LastModifiedAt: now,
+		}
+		return sm.enqueueOperation(path, uploadMeta, []string{meta.OperationID}, true)
+	}
 
 	if exists && !sm.isValidAction(meta.Action, ActionUpload) {
 		return errors.Newf("cannot modify %s: invalid action transition from %s to UPLOAD", path, meta.Action)
@@ -308,8 +295,9 @@ func (sm *StagingStateManager) Modify(path string) error {
 	return sm.persistMetadata(path, meta)
 }
 
-// Rename renames a file
-// Returns true if immediate sync was performed (for existing files)
+// Rename queues a file rename. A never-synced file only needs its pending upload
+// moved to the new logical path. Existing files retain an explicit RENAME action
+// so the background worker can order it ahead of later work at the new path.
 func (sm *StagingStateManager) Rename(oldPath, newPath string) (bool, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -319,177 +307,133 @@ func (sm *StagingStateManager) Rename(oldPath, newPath string) (bool, error) {
 
 	meta, exists := sm.metadata[oldPath]
 
-	if !exists {
-		// Existing file without metadata → immediate RENAME
-		// Lock both paths during sync
-		sm.lockedPaths[oldPath] = true
-		sm.lockedPaths[newPath] = true
-		// Unlock after sync completes and signal waiting goroutines
-		defer func() {
-			delete(sm.lockedPaths, oldPath)
-			delete(sm.lockedPaths, newPath)
-			if sm.pathConds[oldPath] != nil {
-				sm.pathConds[oldPath].Broadcast()
-			}
-			if sm.pathConds[newPath] != nil {
-				sm.pathConds[newPath].Broadcast()
-			}
-		}()
-
-		// Call handler immediately
-		if sm.ActionHandler != nil {
-			err := sm.ActionHandler(&StagingMetadata{
-				Path:    newPath,
-				OldPath: oldPath,
-				Action:  ActionRename,
-				IsNew:   false,
-			})
-			if err != nil {
-				return false, errors.Wrap(err, "handler failed for immediate RENAME sync")
-			}
-		}
-		return true, nil
-	}
-
-	// IsNew=false and Action=ActionUpload (modified)
-	if !meta.IsNew && meta.Action == ActionUpload {
-		// Perform preceding action (PUT) then RENAME
-		// Lock both paths during sync
-		sm.lockedPaths[oldPath] = true
-		sm.lockedPaths[newPath] = true
-		// Unlock after sync completes and signal waiting goroutines
-		defer func() {
-			delete(sm.lockedPaths, oldPath)
-			delete(sm.lockedPaths, newPath)
-			if sm.pathConds[oldPath] != nil {
-				sm.pathConds[oldPath].Broadcast()
-			}
-			if sm.pathConds[newPath] != nil {
-				sm.pathConds[newPath].Broadcast()
-			}
-		}()
-
-		// Call handler for PUT and RENAME
-		if sm.ActionHandler != nil {
-			// First call PUT action
-			err := sm.ActionHandler(&StagingMetadata{
-				Path:   oldPath,
-				Action: ActionUpload,
-				IsNew:  false,
-			})
-			if err != nil {
-				return false, errors.Wrap(err, "handler failed for PUT action before RENAME")
-			}
-
-			// Then call RENAME action
-			err = sm.ActionHandler(&StagingMetadata{
-				Path:    newPath,
-				OldPath: oldPath,
-				Action:  ActionRename,
-				IsNew:   false,
-			})
-			if err != nil {
-				return false, errors.Wrap(err, "handler failed for RENAME action")
-			}
-		}
-
-		// Remove metadata
+	if exists && meta.IsNew {
+		meta.Path = newPath
+		meta.LastModifiedAt = time.Now()
 		if err := sm.deleteMetadata(oldPath); err != nil {
 			return false, err
 		}
-		return true, nil
+		meta.OperationID = ""
+		if err := sm.persistMetadata(newPath, meta); err != nil {
+			return false, err
+		}
+		return false, nil
 	}
 
-	// IsNew=true case: change path only
-	meta.Path = newPath
-	meta.LastModifiedAt = time.Now()
-
-	delete(sm.metadata, oldPath)
-	sm.metadata[newPath] = meta
-
-	if err := sm.deleteMetadata(oldPath); err != nil {
+	now := time.Now()
+	dependencies := make([]string, 0)
+	uploadAfterRename := false
+	if exists {
+		switch meta.Action {
+		case ActionUpload:
+			uploadAfterRename = true
+			if op := sm.dag.get(meta.OperationID); op != nil {
+				dependencies = append(dependencies, op.Dependencies...)
+			}
+			if err := sm.deleteMetadata(oldPath); err != nil {
+				return false, err
+			}
+		case ActionRename:
+			dependencies = append(dependencies, meta.OperationID)
+			if err := sm.detachMetadataUnlocked(oldPath); err != nil {
+				return false, err
+			}
+		default:
+			return false, errors.Newf("cannot rename %s: pending %s action", oldPath, meta.Action)
+		}
+	}
+	renameMeta := &StagingMetadata{
+		Path:           newPath,
+		OldPath:        oldPath,
+		Action:         ActionRename,
+		IsNew:          false,
+		CreatedAt:      now,
+		LastModifiedAt: now,
+	}
+	if exists && meta.CreatedAt.Before(renameMeta.CreatedAt) {
+		renameMeta.CreatedAt = meta.CreatedAt
+	}
+	if err := sm.enqueueOperation(newPath, renameMeta, dependencies, true); err != nil {
 		return false, err
 	}
-	if err := sm.persistMetadata(newPath, meta); err != nil {
-		return false, err
+	if uploadAfterRename {
+		renameID := sm.metadata[newPath].OperationID
+		uploadMeta := &StagingMetadata{
+			Path:           newPath,
+			OldPath:        oldPath,
+			Action:         ActionUpload,
+			IsNew:          false,
+			CreatedAt:      meta.CreatedAt,
+			LastModifiedAt: now,
+		}
+		if err := sm.enqueueOperation(newPath, uploadMeta, []string{renameID}, true); err != nil {
+			return false, err
+		}
 	}
-
 	return false, nil
 }
 
-// RenameDir renames a directory
-// Returns true if immediate sync was performed (for existing directories)
+// RenameDir queues a backend directory rename and moves all pending descendant
+// work to the new logical subtree. For a never-synced directory no backend
+// rename is necessary; only its local metadata paths are moved.
 func (sm *StagingStateManager) RenameDir(oldPath, newPath string) (bool, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// Wait for exact-path sync or a recursive operation on either ancestor.
-	sm.waitForPathsUnlocked(oldPath, newPath)
+	// Stop new work from entering either tree while in-flight work drains.
+	sm.waitForSubtreeUnlocked(oldPath)
+	sm.waitForSubtreeUnlocked(newPath)
+	sm.lockedSubtrees[oldPath] = true
+	sm.lockedSubtrees[newPath] = true
+	defer func() {
+		delete(sm.lockedSubtrees, oldPath)
+		delete(sm.lockedSubtrees, newPath)
+		if sm.pathConds[oldPath] != nil {
+			sm.pathConds[oldPath].Broadcast()
+		}
+		if sm.pathConds[newPath] != nil {
+			sm.pathConds[newPath].Broadcast()
+		}
+	}()
+	sm.waitForLockedDescendants(oldPath)
+	sm.waitForLockedDescendants(newPath)
 
 	meta, exists := sm.metadata[oldPath]
-
-	if !exists {
-		// Existing directory without metadata → immediate RENAME
-		sm.lockedPaths[oldPath] = true
-		sm.lockedPaths[newPath] = true
-		defer func() {
-			delete(sm.lockedPaths, oldPath)
-			delete(sm.lockedPaths, newPath)
-			if sm.pathConds[oldPath] != nil {
-				sm.pathConds[oldPath].Broadcast()
-			}
-			if sm.pathConds[newPath] != nil {
-				sm.pathConds[newPath].Broadcast()
-			}
-		}()
-
-		// Call handler immediately
-		if sm.ActionHandler != nil {
-			err := sm.ActionHandler(&StagingMetadata{
-				Path:    newPath,
-				OldPath: oldPath,
-				Action:  ActionRenameDir,
-				IsNew:   false,
-			})
-			if err != nil {
-				return false, errors.Wrap(err, "handler failed for immediate RENAME_DIR sync")
-			}
-		}
-		return true, nil
-	}
-
-	// IsNew=true case: change path and update all children
 	now := time.Now()
-	meta.Path = newPath
-	meta.LastModifiedAt = now
+	newDirectory := exists && meta.IsNew
 
-	delete(sm.metadata, oldPath)
-	sm.metadata[newPath] = meta
-
-	if err := sm.deleteMetadata(oldPath); err != nil {
-		return false, err
-	}
-	if err := sm.persistMetadata(newPath, meta); err != nil {
-		return false, err
-	}
-
-	// Update all child entries under oldPath
-	oldPrefix := oldPath + "/"
-	for childPath, childMeta := range sm.metadata {
-		if strings.HasPrefix(childPath, oldPrefix) {
-			newChildPath := newPath + "/" + childPath[len(oldPrefix):]
-			childMeta.Path = newChildPath
-			childMeta.LastModifiedAt = now
-			if childMeta.OldPath != "" && strings.HasPrefix(childMeta.OldPath, oldPrefix) {
-				childMeta.OldPath = newPath + "/" + childMeta.OldPath[len(oldPrefix):]
-			}
-
-			delete(sm.metadata, childPath)
-			sm.metadata[newChildPath] = childMeta
-
-			sm.deleteMetadata(childPath)
-			sm.persistMetadata(newChildPath, childMeta)
+	if newDirectory {
+		if err := sm.rebaseSubtreeUnlocked(oldPath, newPath, "", ""); err != nil {
+			return false, err
 		}
+		return false, nil
+	}
+	dependencies := make([]string, 0, 1)
+	excludeOperationID := ""
+	if exists && meta.Action == ActionRenameDir {
+		dependencies = append(dependencies, meta.OperationID)
+		excludeOperationID = meta.OperationID
+		if err := sm.detachMetadataUnlocked(oldPath); err != nil {
+			return false, err
+		}
+	} else if exists {
+		return false, errors.Newf("cannot rename directory %s: pending %s action", oldPath, meta.Action)
+	}
+
+	renameMeta := &StagingMetadata{
+		Path:           newPath,
+		OldPath:        oldPath,
+		Action:         ActionRenameDir,
+		IsNew:          false,
+		CreatedAt:      now,
+		LastModifiedAt: now,
+	}
+	if err := sm.enqueueOperation(newPath, renameMeta, dependencies, true); err != nil {
+		return false, err
+	}
+	renameID := sm.metadata[newPath].OperationID
+	if err := sm.rebaseSubtreeUnlocked(oldPath, newPath, renameID, excludeOperationID); err != nil {
+		return false, err
 	}
 
 	return false, nil
@@ -509,6 +453,18 @@ func (sm *StagingStateManager) DeleteWithForce(path string, force bool) error {
 	sm.waitForPathsUnlocked(path)
 
 	meta, exists := sm.metadata[path]
+	if exists && meta.Action == ActionRename {
+		now := time.Now()
+		deleteMeta := &StagingMetadata{
+			Path:           path,
+			Action:         ActionDelete,
+			Force:          force,
+			IsNew:          false,
+			CreatedAt:      meta.CreatedAt,
+			LastModifiedAt: now,
+		}
+		return sm.enqueueOperation(path, deleteMeta, []string{meta.OperationID}, true)
+	}
 
 	if exists && !sm.isValidAction(meta.Action, ActionDelete) {
 		return errors.Newf("cannot delete %s: invalid action transition from %s to DELETE", path, meta.Action)
@@ -560,8 +516,9 @@ func (sm *StagingStateManager) Mkdir(path string) error {
 	return sm.persistMetadata(path, meta)
 }
 
-// Rmdir marks a directory as removed and preserves its removal options.
-// Returns true if immediate sync was performed (for existing directories).
+// Rmdir queues a directory removal. It never calls the backend inline. Pending
+// work in the subtree is collapsed before the RMDIR is persisted so background
+// sync can process only the operations required to make the collection empty.
 func (sm *StagingStateManager) Rmdir(path string, recurse bool, force bool) (bool, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -580,123 +537,104 @@ func (sm *StagingStateManager) Rmdir(path string, recurse bool, force bool) (boo
 	sm.waitForLockedDescendants(path)
 
 	meta, exists := sm.metadata[path]
-
-	if exists && !sm.isValidAction(meta.Action, ActionRmdir) {
+	pendingRenameID := ""
+	if exists && meta.Action == ActionRenameDir {
+		pendingRenameID = meta.OperationID
+	} else if exists && !sm.isValidAction(meta.Action, ActionRmdir) {
 		return false, errors.Newf("cannot remove directory %s: invalid action transition from %s to RMDIR", path, meta.Action)
 	}
 
-	if !recurse {
-		empty, err := sm.drainPendingDeletes(path)
-		if err != nil {
-			return false, err
-		}
-		if !empty {
-			return false, irodsclient_types.NewCollectionNotEmptyError(path)
+	createdAt := time.Now()
+	backendMayExist := !exists || !meta.IsNew || meta.BackendMayExist
+	if exists {
+		createdAt = meta.CreatedAt
+	}
+	for _, op := range sm.dag.nodes {
+		if op.Metadata.Path != path && pathInSubtree(op.Metadata.Path, path) && !op.Metadata.IsNew {
+			backendMayExist = true
+			break
 		}
 	}
 
-	if !exists {
-		// Existing directory without metadata → immediate RMDIR
-		sm.lockedPaths[path] = true
-		defer func() {
-			delete(sm.lockedPaths, path)
-			if sm.pathConds[path] != nil {
-				sm.pathConds[path].Broadcast()
+	// A true recursive removal supersedes all work below it. For the ordinary
+	// non-recursive rmdir calls produced by rm -rf, keep DELETE and child RMDIR
+	// actions, cancel never-uploaded objects, and turn dirty existing objects
+	// into deletes.
+	if recurse {
+		if err := sm.cancelOperationSubtreeUnlocked(path, false); err != nil {
+			return false, err
+		}
+	}
+	for metadataPath, child := range sm.metadata {
+		if metadataPath == path || !pathInSubtree(metadataPath, path) {
+			continue
+		}
+		if recurse {
+			continue
+		}
+		switch child.Action {
+		case ActionUpload, ActionBulkUpload:
+			if child.IsNew {
+				if err := sm.deleteMetadata(metadataPath); err != nil {
+					return false, err
+				}
+			} else {
+				child.Action = ActionDelete
+				child.Force = force
+				child.LastModifiedAt = time.Now()
+				if err := sm.persistMetadata(metadataPath, child); err != nil {
+					return false, err
+				}
 			}
-		}()
-
-		// Call handler immediately
-		if sm.ActionHandler != nil {
-			err := sm.ActionHandler(&StagingMetadata{
-				Path:           path,
-				Action:         ActionRmdir,
-				Recurse:        recurse,
-				Force:          force,
-				IsNew:          false,
-				CreatedAt:      time.Now(),
-				LastModifiedAt: time.Now(),
-			})
-			if err != nil {
-				return false, errors.Wrap(err, "handler failed for immediate RMDIR sync")
+		case ActionMkdir:
+			if child.IsNew {
+				if err := sm.deleteMetadata(metadataPath); err != nil {
+					return false, err
+				}
 			}
 		}
-
-		if recurse {
-			// Recursive removal of the collection also removes every data object and
-			// subcollection below it. Drop their deferred staging actions so the
-			// background worker does not try to delete or upload paths that no longer
-			// exist in iRODS.
-			if err := sm.deleteMetadataTree(path); err != nil {
+	}
+	if !backendMayExist {
+		if exists && pendingRenameID == "" {
+			if err := sm.deleteMetadata(path); err != nil {
 				return false, err
 			}
-		} else if err := sm.deleteMetadata(path); err != nil {
-			return false, err
 		}
-		return true, nil
+		return false, nil
 	}
 
-	if meta.IsNew {
-		// Upload and recursive MKDIR operations can create this collection and
-		// descendants in iRODS before its own staged MKDIR is processed. This is a
-		// cancellation of a staging-created subtree, so clean it up recursively and
-		// bypass trash regardless of the ordinary rmdir syscall options. A regular
-		// non-recursive delete can otherwise fail with EXEC_CMD_ERROR when an upload
-		// implicitly created the collection or a same-named trash entry exists.
-		if sm.ActionHandler != nil {
-			err := sm.ActionHandler(&StagingMetadata{
-				Path:           path,
-				Action:         ActionRmdir,
-				Recurse:        true,
-				Force:          true,
-				IsNew:          false,
-				CreatedAt:      meta.CreatedAt,
-				LastModifiedAt: time.Now(),
-			})
-			if err != nil && !irodsclient_types.IsFileNotFoundError(err) {
-				return false, errors.Wrap(err, "handler failed for new-directory RMDIR sync")
+	if exists && pendingRenameID == "" {
+		if err := sm.deleteMetadata(path); err != nil {
+			return false, err
+		}
+	}
+	now := time.Now()
+	rmdirMeta := &StagingMetadata{
+		Path:           path,
+		Action:         ActionRmdir,
+		Recurse:        recurse,
+		Force:          force,
+		IsNew:          false,
+		CreatedAt:      createdAt,
+		LastModifiedAt: now,
+	}
+	dependencies := make([]string, 0, 1)
+	if pendingRenameID != "" {
+		dependencies = append(dependencies, pendingRenameID)
+	}
+	for metadataPath, child := range sm.metadata {
+		if metadataPath != path && pathInSubtree(metadataPath, path) {
+			dependencies = append(dependencies, child.OperationID)
+			sm.dag.markUrgent(child.OperationID)
+			if sm.db != nil {
+				_ = sm.db.Update(func(txn *badger.Txn) error { return sm.persistOperationTxn(txn, child.OperationID) })
 			}
 		}
-
-		if err := sm.deleteMetadataTree(path); err != nil {
-			return false, err
-		}
-		return true, nil
 	}
-
-	// Existing directory with MKDIR metadata → immediate RMDIR
-	sm.lockedPaths[path] = true
-	defer func() {
-		delete(sm.lockedPaths, path)
-		if sm.pathConds[path] != nil {
-			sm.pathConds[path].Broadcast()
-		}
-	}()
-
-	// Call handler immediately
-	if sm.ActionHandler != nil {
-		err := sm.ActionHandler(&StagingMetadata{
-			Path:           path,
-			Action:         ActionRmdir,
-			Recurse:        recurse,
-			Force:          force,
-			IsNew:          false,
-			CreatedAt:      meta.CreatedAt,
-			LastModifiedAt: time.Now(),
-		})
-		if err != nil {
-			return false, errors.Wrap(err, "handler failed for immediate RMDIR sync")
-		}
-	}
-
-	if recurse {
-		// Recursive RMDIR already handled every descendant in iRODS.
-		if err := sm.deleteMetadataTree(path); err != nil {
-			return false, err
-		}
-	} else if err := sm.deleteMetadata(path); err != nil {
+	if err := sm.enqueueOperation(path, rmdirMeta, dependencies, true); err != nil {
 		return false, err
 	}
-	return true, nil
+	return false, nil
 }
 
 // Get retrieves metadata for a path
@@ -721,92 +659,189 @@ func (sm *StagingStateManager) GetAll() map[string]*StagingMetadata {
 	return result
 }
 
+func (sm *StagingStateManager) IsRenamedFrom(path string) bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	for _, op := range sm.dag.nodes {
+		if op.Metadata.OldPath == path && (op.Metadata.Action == ActionRename || op.Metadata.Action == ActionRenameDir) {
+			return true
+		}
+	}
+	return false
+}
+
+func (sm *StagingStateManager) GetPendingRenames() []*StagingMetadata {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	operations := make([]*StagingOperation, 0)
+	for _, op := range sm.dag.nodes {
+		if op.Metadata.Action != ActionRename && op.Metadata.Action != ActionRenameDir {
+			continue
+		}
+		operations = append(operations, op)
+	}
+	sort.SliceStable(operations, func(i, j int) bool {
+		return operations[i].CreatedAt.Before(operations[j].CreatedAt)
+	})
+	result := make([]*StagingMetadata, 0, len(operations))
+	for _, op := range operations {
+		copyMeta := *op.Metadata
+		result = append(result, &copyMeta)
+	}
+	return result
+}
+
 // syncOne performs handler call and removes metadata for a single path with internal locking
 // Acquires and releases lock for the path
 func (sm *StagingStateManager) syncOne(meta *StagingMetadata) error {
-	// Wait for exact-path sync or a recursive operation on an ancestor.
 	sm.mu.Lock()
-	sm.waitForPathsUnlocked(meta.Path)
-
-	// GetAll/SyncOld operate on snapshots. A recursive RMDIR may have removed
-	// this child while the snapshot was waiting to be processed. In that case
-	// the requested backend operation was already covered by the directory
-	// removal and must not be replayed.
-	current := sm.metadata[meta.Path]
-	if current == nil || current.LastModifiedAt.After(meta.LastModifiedAt) {
+	directoryOperation := meta.Action == ActionRmdir || meta.Action == ActionRenameDir
+	if directoryOperation {
+		sm.waitForSubtreeUnlocked(meta.Path)
+		if meta.OldPath != "" {
+			sm.waitForSubtreeUnlocked(meta.OldPath)
+		}
+	} else {
+		sm.waitForPathsUnlocked(meta.Path, meta.OldPath)
+	}
+	op := sm.dag.get(meta.OperationID)
+	if op == nil || len(op.Dependencies) != 0 || op.State == OperationRunning {
 		sm.mu.Unlock()
 		return nil
 	}
-
-	// Lock the path for this sync
-	sm.lockedPaths[meta.Path] = true
+	op.State = OperationRunning
+	if directoryOperation {
+		sm.lockedSubtrees[meta.Path] = true
+		if meta.OldPath != "" {
+			sm.lockedSubtrees[meta.OldPath] = true
+		}
+		sm.waitForLockedDescendants(meta.Path)
+		if meta.OldPath != "" {
+			sm.waitForLockedDescendants(meta.OldPath)
+		}
+	} else {
+		sm.lockedPaths[meta.Path] = true
+		if meta.OldPath != "" {
+			sm.lockedPaths[meta.OldPath] = true
+		}
+	}
 	if sm.pathConds[meta.Path] == nil {
 		sm.pathConds[meta.Path] = sync.NewCond(&sm.mu)
 	}
+	if sm.db != nil {
+		_ = sm.db.Update(func(txn *badger.Txn) error { return sm.persistOperationTxn(txn, op.ID) })
+	}
 	sm.mu.Unlock()
 
-	// Call handler without lock (handler may take time)
 	if sm.ActionHandler != nil {
 		if err := sm.ActionHandler(meta); err != nil {
-			// Unlock on handler error
 			sm.mu.Lock()
-			delete(sm.lockedPaths, meta.Path)
-			if sm.pathConds[meta.Path] != nil {
-				sm.pathConds[meta.Path].Broadcast()
+			if live := sm.dag.get(meta.OperationID); live != nil {
+				live.State = OperationFailed
+				live.Metadata.SyncFailCount++
+				meta.SyncFailCount = live.Metadata.SyncFailCount
+				if latest := sm.metadata[live.Metadata.Path]; latest != nil && latest.OperationID == live.ID {
+					latest.SyncFailCount = live.Metadata.SyncFailCount
+				}
+				if sm.db != nil {
+					_ = sm.db.Update(func(txn *badger.Txn) error { return sm.persistOperationTxn(txn, live.ID) })
+				}
 			}
+			sm.unlockOperationUnlocked(meta)
 			sm.mu.Unlock()
 			return errors.Wrapf(err, "handler failed for %s action on %s", meta.Action, meta.Path)
 		}
 	}
 
-	// Remove from metadata with lock, but only if it hasn't been replaced by a newer
-	// operation (e.g. OpenForWrite called between our snapshot and now).
-	// We detect replacement by comparing LastModifiedAt: a concurrent Create/Modify
-	// always sets a strictly later timestamp, so if the live entry is newer we leave it
-	// for the next sync cycle rather than deleting the fresh registration.
 	sm.mu.Lock()
-
-	current = sm.metadata[meta.Path]
-	var deleteErr error
-	if current != nil && !current.LastModifiedAt.After(meta.LastModifiedAt) {
-		deleteErr = sm.deleteMetadata(meta.Path)
+	deleteErr := sm.markAncestorDirectoriesTouchedUnlocked(meta.Path)
+	if deleteErr == nil {
+		deleteErr = sm.completeOperationUnlocked(meta.OperationID, meta.Path)
 	}
-	// current==nil: already removed externally (e.g. DELETE on a new file) — nothing to do.
-	// current.LastModifiedAt > meta.LastModifiedAt: newer entry registered during upload
-	// — leave it; next sync cycle will handle it.
-
-	// Always unlock path and signal, even on error.
-	delete(sm.lockedPaths, meta.Path)
-	if sm.pathConds[meta.Path] != nil {
-		sm.pathConds[meta.Path].Broadcast()
-	}
+	sm.unlockOperationUnlocked(meta)
 	sm.mu.Unlock()
 
 	return deleteErr
 }
 
+func (sm *StagingStateManager) markAncestorDirectoriesTouchedUnlocked(path string) error {
+	for directoryPath, meta := range sm.metadata {
+		if directoryPath == path || !pathInSubtree(path, directoryPath) || meta.Action != ActionMkdir || !meta.IsNew || meta.BackendMayExist {
+			continue
+		}
+		meta.BackendMayExist = true
+		if err := sm.persistMetadata(directoryPath, meta); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (sm *StagingStateManager) unlockOperationUnlocked(meta *StagingMetadata) {
+	if meta.Action == ActionRmdir || meta.Action == ActionRenameDir {
+		delete(sm.lockedSubtrees, meta.Path)
+		if meta.OldPath != "" {
+			delete(sm.lockedSubtrees, meta.OldPath)
+		}
+	} else {
+		delete(sm.lockedPaths, meta.Path)
+		if meta.OldPath != "" {
+			delete(sm.lockedPaths, meta.OldPath)
+		}
+	}
+	if sm.pathConds[meta.Path] != nil {
+		sm.pathConds[meta.Path].Broadcast()
+	}
+	if meta.OldPath != "" && sm.pathConds[meta.OldPath] != nil {
+		sm.pathConds[meta.OldPath].Broadcast()
+	}
+}
+
+func (sm *StagingStateManager) completeOperationUnlocked(operationID string, path string) error {
+	if sm.dag.get(operationID) == nil {
+		return nil
+	}
+	sm.dag.remove(operationID)
+	latest := sm.metadata[path]
+	removeLatest := latest != nil && latest.OperationID == operationID
+	if removeLatest {
+		delete(sm.metadata, path)
+	}
+	if sm.db == nil {
+		return nil
+	}
+	return sm.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Delete([]byte(fmt.Sprintf("operation:%s", operationID))); err != nil {
+			return err
+		}
+		if removeLatest {
+			if err := txn.Delete([]byte(fmt.Sprintf("staging:%s", path))); err != nil {
+				return err
+			}
+		}
+		for id := range sm.dag.nodes {
+			if err := sm.persistOperationTxn(txn, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // SyncAll performs all pending iRODS operations and clears metadata one by one (exclusive lock)
 func (sm *StagingStateManager) SyncAll() error {
 	for {
-		sm.mu.Lock()
-
-		// Get next unprocessed item
-		var meta *StagingMetadata
-		for _, m := range sm.metadata {
-			meta = m
+		metas := sm.getSyncCandidates(0, true)
+		if len(metas) == 0 {
+			sm.mu.RLock()
+			remaining := len(sm.dag.nodes)
+			sm.mu.RUnlock()
+			if remaining != 0 {
+				return errors.Newf("operation DAG has %d blocked or cyclic nodes", remaining)
+			}
 			break
 		}
-
-		// If no more items, we're done
-		if meta == nil {
-			sm.mu.Unlock()
-			break
-		}
-
-		sm.mu.Unlock()
-
-		// Process this item (syncOne handles locking/unlocking and waiting)
-		if err := sm.syncOne(meta); err != nil {
+		if err := sm.syncOne(metas[0]); err != nil {
 			return err
 		}
 	}
@@ -816,29 +851,30 @@ func (sm *StagingStateManager) SyncAll() error {
 
 // SyncOld performs sync on items older than gracePeriod (10 seconds) with per-path locking
 func (sm *StagingStateManager) SyncOld(gracePeriod time.Duration) error {
-	sm.mu.Lock()
-
-	// Find items older than grace period — take deep copies so concurrent mutations
-	// (e.g. Rename mutating Path, Delete mutating Action) don't affect our snapshot.
-	now := time.Now()
-	var metasToSync []*StagingMetadata
-	for _, meta := range sm.metadata {
-		if now.Sub(meta.LastModifiedAt) >= gracePeriod {
-			copy := *meta
-			metasToSync = append(metasToSync, &copy)
+	for {
+		metas := sm.getSyncCandidates(gracePeriod, false)
+		if len(metas) == 0 {
+			return nil
+		}
+		for _, meta := range metas {
+			if err := sm.syncOne(meta); err != nil {
+				return err
+			}
 		}
 	}
+}
 
-	sm.mu.Unlock()
-
-	// Execute handlers for old items (syncOne handles locking/waiting/unlocking)
-	for _, meta := range metasToSync {
-		if err := sm.syncOne(meta); err != nil {
-			return err
-		}
+// getSyncCandidates returns a deterministic dependency order. Directory
+// operations and everything they block bypass the normal grace period.
+func (sm *StagingStateManager) getSyncCandidates(gracePeriod time.Duration, includeAll bool) []*StagingMetadata {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	operations := sm.dag.ready(gracePeriod, includeAll)
+	result := make([]*StagingMetadata, 0, len(operations))
+	for _, op := range operations {
+		result = append(result, op.Metadata)
 	}
-
-	return nil
+	return result
 }
 
 // Clear removes all metadata
@@ -847,16 +883,20 @@ func (sm *StagingStateManager) Clear() error {
 	defer sm.mu.Unlock()
 
 	sm.metadata = make(map[string]*StagingMetadata)
+	sm.dag = newOperationDAG()
 
 	if sm.db != nil {
 		return sm.db.Update(func(txn *badger.Txn) error {
 			opts := badger.DefaultIteratorOptions
-			opts.Prefix = []byte("staging:")
 			it := txn.NewIterator(opts)
 			defer it.Close()
 
 			for it.Rewind(); it.Valid(); it.Next() {
-				if err := txn.Delete(it.Item().Key()); err != nil {
+				key := it.Item().KeyCopy(nil)
+				if !bytes.HasPrefix(key, []byte("staging:")) && !bytes.HasPrefix(key, []byte("operation:")) {
+					continue
+				}
+				if err := txn.Delete(key); err != nil {
 					return err
 				}
 			}
@@ -876,13 +916,33 @@ func (sm *StagingStateManager) Restore() error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	return sm.db.View(func(txn *badger.Txn) error {
+	sm.metadata = make(map[string]*StagingMetadata)
+	sm.dag = newOperationDAG()
+	migrated := false
+	err := sm.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
-		opts.Prefix = []byte("staging:")
+		opts.Prefix = []byte("operation:")
 		it := txn.NewIterator(opts)
+		for it.Rewind(); it.ValidForPrefix(opts.Prefix); it.Next() {
+			item := it.Item()
+			var op StagingOperation
+			if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &op) }); err != nil {
+				it.Close()
+				return errors.Wrap(err, "failed to unmarshal staging operation")
+			}
+			sm.dag.restore(&op)
+		}
+		it.Close()
+		if err := sm.dag.validate(); err != nil {
+			return errors.Wrap(err, "failed to restore staging operation DAG")
+		}
+
+		opts = badger.DefaultIteratorOptions
+		opts.Prefix = []byte("staging:")
+		it = txn.NewIterator(opts)
 		defer it.Close()
 
-		for it.Rewind(); it.Valid(); it.Next() {
+		for it.Rewind(); it.ValidForPrefix(opts.Prefix); it.Next() {
 			item := it.Item()
 			var meta StagingMetadata
 
@@ -892,65 +952,301 @@ func (sm *StagingStateManager) Restore() error {
 				return errors.Wrap(err, "failed to unmarshal staging metadata")
 			}
 
-			sm.metadata[meta.Path] = &meta
+			if meta.OperationID != "" && sm.dag.get(meta.OperationID) != nil {
+				sm.metadata[meta.Path] = &meta
+			} else {
+				op, err := sm.dag.add(&meta, nil, false)
+				if err != nil {
+					return err
+				}
+				copyMeta := *op.Metadata
+				sm.metadata[copyMeta.Path] = &copyMeta
+				migrated = true
+			}
 		}
 
+		return nil
+	})
+	if err != nil || !migrated {
+		return err
+	}
+	return sm.db.Update(func(txn *badger.Txn) error {
+		for path, meta := range sm.metadata {
+			data, err := json.Marshal(meta)
+			if err != nil {
+				return err
+			}
+			if err := txn.Set([]byte(fmt.Sprintf("staging:%s", path)), data); err != nil {
+				return err
+			}
+		}
+		for id := range sm.dag.nodes {
+			if err := sm.persistOperationTxn(txn, id); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 }
 
 // persistMetadata saves metadata to memory and Badger
 func (sm *StagingStateManager) persistMetadata(path string, meta *StagingMetadata) error {
+	if meta.OperationID == "" || sm.dag.get(meta.OperationID) == nil {
+		meta.OperationID = ""
+		return sm.enqueueOperation(path, meta, nil, false)
+	}
 	sm.metadata[path] = meta
+	if op := sm.dag.get(meta.OperationID); op != nil {
+		copyMeta := *meta
+		op.Metadata = &copyMeta
+	}
 
 	if sm.db == nil {
 		return nil
 	}
 
-	key := []byte(fmt.Sprintf("staging:%s", path))
 	data, err := json.Marshal(meta)
 	if err != nil {
 		return errors.Wrap(err, "failed to marshal staging metadata")
 	}
-
 	return sm.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(key, data)
+		if err := txn.Set([]byte(fmt.Sprintf("staging:%s", path)), data); err != nil {
+			return err
+		}
+		return sm.persistOperationTxn(txn, meta.OperationID)
 	})
+}
+
+func (sm *StagingStateManager) enqueueOperation(path string, meta *StagingMetadata, dependencies []string, urgent bool) error {
+	rmdirParents := make([]string, 0)
+	for id, op := range sm.dag.nodes {
+		if op.Metadata.Action != ActionRenameDir && op.Metadata.Action != ActionRmdir {
+			continue
+		}
+		if pathInSubtree(path, op.Metadata.Path) {
+			if op.Metadata.Action == ActionRmdir && path != op.Metadata.Path &&
+				(meta.Action == ActionDelete || meta.Action == ActionRmdir) {
+				rmdirParents = append(rmdirParents, id)
+			} else {
+				dependencies = append(dependencies, id)
+			}
+			urgent = urgent || op.Urgent
+		}
+	}
+	op, err := sm.dag.add(meta, dependencies, urgent)
+	if err != nil {
+		return err
+	}
+	for _, parentID := range rmdirParents {
+		sm.dag.addDependency(parentID, op.ID)
+		sm.dag.markUrgent(op.ID)
+	}
+	copyMeta := *op.Metadata
+	sm.metadata[path] = &copyMeta
+	if sm.db == nil {
+		return nil
+	}
+	data, err := json.Marshal(&copyMeta)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal staging metadata")
+	}
+	return sm.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set([]byte(fmt.Sprintf("staging:%s", path)), data); err != nil {
+			return err
+		}
+		if err := sm.persistOperationTxn(txn, op.ID); err != nil {
+			return err
+		}
+		for _, parentID := range rmdirParents {
+			if err := sm.persistOperationTxn(txn, parentID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (sm *StagingStateManager) detachMetadataUnlocked(path string) error {
+	delete(sm.metadata, path)
+	if sm.db == nil {
+		return nil
+	}
+	return sm.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete([]byte(fmt.Sprintf("staging:%s", path)))
+	})
+}
+
+func (sm *StagingStateManager) rebaseSubtreeUnlocked(oldRoot string, newRoot string, dependencyID string, excludeOperationID string) error {
+	moved := make(map[string]*StagingMetadata)
+	oldKeys := make([]string, 0)
+	for path, meta := range sm.metadata {
+		if !pathInSubtree(path, oldRoot) {
+			continue
+		}
+		newPath := newRoot + path[len(strings.TrimRight(oldRoot, "/")):]
+		copyMeta := *meta
+		copyMeta.Path = newPath
+		if copyMeta.OldPath != "" && pathInSubtree(copyMeta.OldPath, oldRoot) {
+			copyMeta.OldPath = newRoot + copyMeta.OldPath[len(strings.TrimRight(oldRoot, "/")):]
+		}
+		copyMeta.LastModifiedAt = time.Now()
+		moved[newPath] = &copyMeta
+		oldKeys = append(oldKeys, path)
+	}
+	for _, path := range oldKeys {
+		delete(sm.metadata, path)
+	}
+	for path, meta := range moved {
+		sm.metadata[path] = meta
+	}
+	for id, op := range sm.dag.nodes {
+		if id == excludeOperationID {
+			continue
+		}
+		if pathInSubtree(op.Metadata.Path, oldRoot) {
+			sm.dag.rebasePath(id, oldRoot, newRoot)
+			if dependencyID != "" && id != dependencyID {
+				sm.dag.addDependency(id, dependencyID)
+				sm.dag.markUrgent(id)
+			}
+		}
+	}
+	if sm.db == nil {
+		return nil
+	}
+	return sm.db.Update(func(txn *badger.Txn) error {
+		for _, path := range oldKeys {
+			if err := txn.Delete([]byte(fmt.Sprintf("staging:%s", path))); err != nil {
+				return err
+			}
+		}
+		for path, meta := range moved {
+			data, err := json.Marshal(meta)
+			if err != nil {
+				return err
+			}
+			if err := txn.Set([]byte(fmt.Sprintf("staging:%s", path)), data); err != nil {
+				return err
+			}
+		}
+		for id := range sm.dag.nodes {
+			if err := sm.persistOperationTxn(txn, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (sm *StagingStateManager) cancelOperationSubtreeUnlocked(root string, includeRoot bool) error {
+	removedIDs := make([]string, 0)
+	for id, op := range sm.dag.nodes {
+		if pathInSubtree(op.Metadata.Path, root) && (includeRoot || op.Metadata.Path != root) {
+			removedIDs = append(removedIDs, id)
+		}
+	}
+	for _, id := range removedIDs {
+		sm.dag.remove(id)
+	}
+	removedPaths := make([]string, 0)
+	for path := range sm.metadata {
+		if pathInSubtree(path, root) && (includeRoot || path != root) {
+			removedPaths = append(removedPaths, path)
+			delete(sm.metadata, path)
+		}
+	}
+	if sm.db == nil {
+		return nil
+	}
+	return sm.db.Update(func(txn *badger.Txn) error {
+		for _, id := range removedIDs {
+			if err := txn.Delete([]byte(fmt.Sprintf("operation:%s", id))); err != nil {
+				return err
+			}
+		}
+		for _, path := range removedPaths {
+			if err := txn.Delete([]byte(fmt.Sprintf("staging:%s", path))); err != nil {
+				return err
+			}
+		}
+		for id := range sm.dag.nodes {
+			if err := sm.persistOperationTxn(txn, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (sm *StagingStateManager) persistOperationTxn(txn *badger.Txn, operationID string) error {
+	op := sm.dag.get(operationID)
+	if op == nil {
+		return nil
+	}
+	data, err := json.Marshal(op)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal staging operation")
+	}
+	return txn.Set([]byte(fmt.Sprintf("operation:%s", operationID)), data)
 }
 
 // deleteMetadata removes metadata from memory and Badger (caller must hold mu)
 func (sm *StagingStateManager) deleteMetadata(path string) error {
+	meta := sm.metadata[path]
 	delete(sm.metadata, path)
+	if meta != nil {
+		sm.dag.remove(meta.OperationID)
+	}
 
 	if sm.db == nil {
 		return nil
 	}
 
-	key := []byte(fmt.Sprintf("staging:%s", path))
 	return sm.db.Update(func(txn *badger.Txn) error {
-		return txn.Delete(key)
+		if err := txn.Delete([]byte(fmt.Sprintf("staging:%s", path))); err != nil {
+			return err
+		}
+		if meta != nil {
+			if err := txn.Delete([]byte(fmt.Sprintf("operation:%s", meta.OperationID))); err != nil {
+				return err
+			}
+		}
+		for id := range sm.dag.nodes {
+			if err := sm.persistOperationTxn(txn, id); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
-// deleteMetadataTree removes metadata for root and all of its descendants.
-// The caller must hold sm.mu.
-func (sm *StagingStateManager) deleteMetadataTree(root string) error {
-	prefix := strings.TrimRight(root, "/") + "/"
-	for metadataPath := range sm.metadata {
-		if metadataPath == root || strings.HasPrefix(metadataPath, prefix) {
-			if err := sm.deleteMetadata(metadataPath); err != nil {
-				return errors.Wrapf(err, "failed to delete staging metadata for %s", metadataPath)
-			}
-		}
-	}
-	return nil
-}
-
-// deleteMetadataPublic removes metadata with locking (for external callers)
-func (sm *StagingStateManager) deleteMetadataPublic(path string) error {
+func (sm *StagingStateManager) markOperationBlockedPublic(operationID string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	return sm.deleteMetadata(path)
+	if op := sm.dag.get(operationID); op != nil {
+		op.State = OperationBlocked
+		if sm.db != nil {
+			_ = sm.db.Update(func(txn *badger.Txn) error { return sm.persistOperationTxn(txn, operationID) })
+		}
+	}
+}
+
+func (sm *StagingStateManager) retryBlockedOperations() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	for id, op := range sm.dag.nodes {
+		if op.State != OperationBlocked {
+			continue
+		}
+		op.State = OperationQueued
+		op.Metadata.SyncFailCount = 0
+		if latest := sm.metadata[op.Metadata.Path]; latest != nil && latest.OperationID == id {
+			latest.SyncFailCount = 0
+		}
+		if sm.db != nil {
+			_ = sm.db.Update(func(txn *badger.Txn) error { return sm.persistOperationTxn(txn, id) })
+		}
+	}
 }
 
 // WaitForSync blocks until the given path is no longer being synced.
