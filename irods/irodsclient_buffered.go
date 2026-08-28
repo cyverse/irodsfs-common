@@ -658,7 +658,7 @@ func (c *IRODSFSClientBuffered) CreateFile(path string, mode string) (IRODSFSFil
 
 	// Invalidate cache before creating (file may be overwritten)
 	if err := c.invalidateFileCacheBlocks(path); err != nil {
-		logger.Warnf("failed to invalidate cache before file creation: %v", err)
+		logger.WithError(err).Warn("failed to invalidate cache before file creation")
 	}
 
 	openMode := irodsclient_types.FileOpenMode(mode)
@@ -721,7 +721,7 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 			return nil, err
 		}
 		if invalidateErr := c.invalidateFileCacheBlocksHint(path, entry.Size); invalidateErr != nil {
-			logger.Warnf("failed to invalidate cache when opening file for write: %v", invalidateErr)
+			logger.WithError(invalidateErr).Warn("failed to invalidate cache when opening file for write")
 		}
 
 		if openMode.IsRead() {
@@ -815,7 +815,7 @@ func (c *IRODSFSClientBuffered) CreateFileBulk(path string, mode string) (IRODSF
 	defer util.StackTraceFromPanic(logger)
 
 	if err := c.invalidateFileCacheBlocks(path); err != nil {
-		logger.Warnf("failed to invalidate cache before file creation: %v", err)
+		logger.WithError(err).Warn("failed to invalidate cache before file creation")
 	}
 
 	openMode := irodsclient_types.FileOpenMode(mode)
@@ -859,7 +859,7 @@ func (c *IRODSFSClientBuffered) OpenFileBulk(path string, mode string) (IRODSFSF
 			return nil, err
 		}
 		if invalidateErr := c.invalidateFileCacheBlocksHint(path, entry.Size); invalidateErr != nil {
-			logger.Warnf("failed to invalidate cache when opening file for write: %v", invalidateErr)
+			logger.WithError(invalidateErr).Warn("failed to invalidate cache when opening file for write")
 		}
 
 		if openMode.IsRead() {
@@ -915,7 +915,7 @@ func (c *IRODSFSClientBuffered) OpenFileBulk(path string, mode string) (IRODSFSF
 func (c *IRODSFSClientBuffered) TruncateFile(path string, size int64) error {
 	logger := c.logger.WithField("path", path)
 	if err := c.invalidateFileCacheBlocks(path); err != nil {
-		logger.Warnf("failed to invalidate cache before truncating file: %v", err)
+		logger.WithError(err).Warn("failed to invalidate cache before truncating file")
 	}
 
 	if c.staging != nil {
@@ -935,7 +935,7 @@ func (c *IRODSFSClientBuffered) validateFileCacheForOpen(path string, handle IRO
 
 	if handle.IsWriteMode() {
 		if err := c.invalidateFileCacheBlocksHint(path, entry.Size); err != nil {
-			logger.Warnf("failed to invalidate cache when opening file for write: %v", err)
+			logger.WithError(err).Warn("failed to invalidate cache when opening file for write")
 		}
 	} else if handle.IsReadMode() {
 		c.validateFileCacheFreshness(path, entry, logger)
@@ -945,7 +945,7 @@ func (c *IRODSFSClientBuffered) validateFileCacheForOpen(path string, handle IRO
 func (c *IRODSFSClientBuffered) validateFileCacheFreshness(path string, entry *irodsclient_fs.Entry, logger *log.Entry) {
 	if !c.isCacheFileFresh(path, entry) {
 		if err := c.invalidateFileCacheBlocksHint(path, entry.Size); err != nil {
-			logger.Warnf("failed to invalidate stale cache: %v", err)
+			logger.WithError(err).Warn("failed to invalidate stale cache")
 		}
 	}
 }
@@ -1049,7 +1049,7 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 			cacheKey := c.makeCacheKey(irodsPath, blockNum)
 			atomic.AddUint64(&c.cacheMiss, 1)
 			if _, err := c.cache.PutCopy(cacheKey, data, false); err != nil {
-				logger.Warnf("failed to cache block %d: %v", blockNum, err)
+				logger.WithError(err).Warnf("failed to cache block %d", blockNum)
 			}
 		}
 		return nil
@@ -1118,7 +1118,7 @@ func (c *IRODSFSClientBuffered) DownloadFile(irodsPath string, localPath string,
 			cacheKey := c.makeCacheKey(irodsPath, blockNum)
 			atomic.AddUint64(&c.cacheMiss, 1)
 			if _, cacheErr := c.cache.PutCopy(cacheKey, data, false); cacheErr != nil {
-				logger.Warnf("failed to cache block %d: %v", blockNum, cacheErr)
+				logger.WithError(cacheErr).Warnf("failed to cache block %d", blockNum)
 			}
 		}
 		return writeCallback(data, offset)
@@ -1188,7 +1188,7 @@ func (c *IRODSFSClientBuffered) DownloadFileParallel(irodsPath string, localPath
 			cacheKey := c.makeCacheKey(irodsPath, blockNum)
 			atomic.AddUint64(&c.cacheMiss, 1)
 			if _, cacheErr := c.cache.PutCopy(cacheKey, data, false); cacheErr != nil {
-				logger.Warnf("failed to cache block %d: %v", blockNum, cacheErr)
+				logger.WithError(cacheErr).Warnf("failed to cache block %d", blockNum)
 			}
 		}
 		return writeCallback(data, offset)
@@ -1243,7 +1243,7 @@ func (c *IRODSFSClientBuffered) DownloadFileWithCallback(irodsPath string, block
 				cacheKey := c.makeCacheKey(irodsPath, blockNum)
 				atomic.AddUint64(&c.cacheMiss, 1)
 				if _, cacheErr := c.cache.PutCopy(cacheKey, data, false); cacheErr != nil {
-					logger.Warnf("failed to cache block %d: %v", blockNum, cacheErr)
+					logger.WithError(cacheErr).Warnf("failed to cache block %d", blockNum)
 				}
 			}
 			return blockReadyCallback(data, offset)
@@ -1342,7 +1342,7 @@ func (c *IRODSFSClientBuffered) DownloadFileParallelWithCallback(irodsPath strin
 				cacheKey := c.makeCacheKey(irodsPath, blockNum)
 				atomic.AddUint64(&c.cacheMiss, 1)
 				if _, cacheErr := c.cache.PutCopy(cacheKey, data, false); cacheErr != nil {
-					logger.Warnf("failed to cache block %d: %v", blockNum, cacheErr)
+					logger.WithError(cacheErr).Warnf("failed to cache block %d", blockNum)
 				}
 			}
 			return blockReadyCallback(data, offset)
@@ -1381,7 +1381,7 @@ func (c *IRODSFSClientBuffered) UploadFile(localPath string, irodsPath string, t
 	}
 
 	if err := c.invalidateFileCacheBlocks(irodsPath); err != nil {
-		logger.Warnf("failed to invalidate cache after upload: %v", err)
+		logger.WithError(err).Warn("failed to invalidate cache after upload")
 	}
 
 	return nil
@@ -1408,7 +1408,7 @@ func (c *IRODSFSClientBuffered) UploadFileParallel(localPath string, irodsPath s
 	}
 
 	if err := c.invalidateFileCacheBlocks(irodsPath); err != nil {
-		logger.Warnf("failed to invalidate cache after upload: %v", err)
+		logger.WithError(err).Warn("failed to invalidate cache after upload")
 	}
 
 	return nil
@@ -1430,7 +1430,7 @@ func (c *IRODSFSClientBuffered) storeCacheFileMeta(irodsPath string, entry *irod
 	// the cached blocks. Waiting here also commits any data blocks queued before
 	// the stamp, so a fresh stamp can never point at blocks that are not visible.
 	if _, err := c.cache.PutCopy(c.makeCacheKey(irodsPath, -1), buf, true); err != nil {
-		c.logger.Warnf("failed to store cache meta for %q: %v", irodsPath, err)
+		c.logger.WithError(err).Warnf("failed to store cache meta for %q", irodsPath)
 	}
 }
 
@@ -1645,7 +1645,7 @@ func (h *IRODSFSClientBufferedFileHandle) ReadAt(buffer []byte, offset int64) (i
 		// Cache the full block
 		if n > 0 {
 			if _, cacheErr := h.cache.PutCopy(cacheKey, blockBuf[:n], false); cacheErr != nil {
-				h.logger.Warnf("failed to cache block %d: %v", blockNum, cacheErr)
+				h.logger.WithError((cacheErr)).Warn("failed to cache block %d", blockNum)
 			}
 			// Store freshness stamp on first cache miss so download paths can validate staleness.
 			if !h.cache.Has(h.client.makeCacheKey(h.irodsPath, -1)) {

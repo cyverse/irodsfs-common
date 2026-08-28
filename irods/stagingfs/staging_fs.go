@@ -754,7 +754,7 @@ func (sf *StagingFS) Close() error {
 	sf.workerWg.Wait()
 
 	if err := sf.SyncAll(); err != nil {
-		log.Warnf("failed to sync all staged data on close: %v", err)
+		log.WithError(err).Warnf("failed to sync all staged data on close")
 	}
 
 	if sf.sm.db != nil {
@@ -818,7 +818,7 @@ func (sf *StagingFS) syncOldItems(gracePeriod time.Duration) {
 			}
 
 			if err := sf.sm.syncOne(meta); err != nil {
-				log.Warnf("background sync failed for %s (%s), attempt %d: %v", meta.Path, meta.Action, meta.SyncFailCount, err)
+				log.WithError(err).Warnf("background sync failed for %s (%s), attempt %d", meta.Path, meta.Action, meta.SyncFailCount)
 
 				if sf.config.OnSyncError != nil {
 					sf.config.OnSyncError(meta, err)
@@ -1227,7 +1227,7 @@ func (sf *StagingFS) forceSyncOldest(needed int64) int64 {
 		}
 
 		if err := sf.sm.syncOne(item.meta); err != nil {
-			log.Warnf("force-sync failed for %s during quota eviction: %v", item.path, err)
+			log.WithError(err).Warnf("force-sync failed for %s during quota eviction", item.path)
 			if sf.config.OnSyncError != nil {
 				sf.config.OnSyncError(item.meta, err)
 			}

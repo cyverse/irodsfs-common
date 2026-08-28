@@ -189,7 +189,7 @@ func TestStagingFSCreate(t *testing.T) {
 		t.Errorf("Expected ActionUpload, got %v", meta.Action)
 	}
 	if !meta.IsNew {
-		t.Errorf("Expected IsNew=true")
+		t.Error("Expected IsNew=true")
 	}
 }
 
@@ -293,12 +293,12 @@ func TestStagingFSRenameNewFile(t *testing.T) {
 	// Verify metadata path is updated
 	oldMeta := sf.sm.Get(oldPath)
 	if oldMeta != nil {
-		t.Errorf("Expected old path metadata to be removed")
+		t.Error("Expected old path metadata to be removed")
 	}
 
 	newMeta := sf.sm.Get(newPath)
 	if newMeta == nil {
-		t.Errorf("Expected metadata at new path")
+		t.Error("Expected metadata at new path")
 	}
 	if newMeta.Path != newPath {
 		t.Errorf("Expected path=%s, got %s", newPath, newMeta.Path)
@@ -336,7 +336,7 @@ func TestStagingFSOpenForWriteCreatesNew(t *testing.T) {
 		t.Errorf("Expected ActionUpload, got %v", meta.Action)
 	}
 	if !meta.IsNew {
-		t.Errorf("Expected IsNew=true for newly written file")
+		t.Error("Expected IsNew=true for newly written file")
 	}
 }
 
@@ -391,7 +391,7 @@ func TestStagingFSSyncAll(t *testing.T) {
 
 	// Verify handler was called
 	if !handlerCalled {
-		t.Errorf("Expected handler to be called")
+		t.Error("Expected handler to be called")
 	}
 	if capturedMeta.Path != path {
 		t.Errorf("Expected path=%s, got %s", path, capturedMeta.Path)
@@ -400,7 +400,7 @@ func TestStagingFSSyncAll(t *testing.T) {
 	// Verify metadata is cleared
 	all := sf.sm.GetAll()
 	if len(all) > 0 {
-		t.Errorf("Expected metadata to be cleared after sync")
+		t.Error("Expected metadata to be cleared after sync")
 	}
 
 	// Verify local files are cleaned up
@@ -410,7 +410,7 @@ func TestStagingFSSyncAll(t *testing.T) {
 		t.Fatalf("Failed to read data directory: %v", err)
 	}
 	if len(entries) > 0 {
-		t.Errorf("Expected data directory to be empty after sync")
+		t.Error("Expected data directory to be empty after sync")
 	}
 }
 
@@ -441,7 +441,7 @@ func TestStagingFSMkdir(t *testing.T) {
 		t.Errorf("Expected ActionMkdir, got %v", meta.Action)
 	}
 	if !meta.IsNew {
-		t.Errorf("Expected IsNew=true")
+		t.Error("Expected IsNew=true")
 	}
 
 	// Verify local directory exists
@@ -534,7 +534,7 @@ func TestStagingFSRmdirExistingDir(t *testing.T) {
 		t.Errorf("Expected ActionRmdir, got %v", capturedMeta.Action)
 	}
 	if capturedMeta.IsNew {
-		t.Errorf("Expected IsNew=false for existing directory")
+		t.Error("Expected IsNew=false for existing directory")
 	}
 
 	if meta := sf.sm.Get(path); meta != nil {
@@ -614,12 +614,12 @@ func TestStagingFSRenameDir(t *testing.T) {
 	// Verify metadata path is updated
 	oldMeta := sf.sm.Get(oldPath)
 	if oldMeta != nil {
-		t.Errorf("Expected old path metadata to be removed")
+		t.Error("Expected old path metadata to be removed")
 	}
 
 	newMeta := sf.sm.Get(newPath)
 	if newMeta == nil {
-		t.Errorf("Expected metadata at new path")
+		t.Error("Expected metadata at new path")
 	}
 	if newMeta.Path != newPath {
 		t.Errorf("Expected path=%s, got %s", newPath, newMeta.Path)
@@ -679,6 +679,6 @@ func TestStagingFSRenameDirExisting(t *testing.T) {
 	// Verify metadata is removed after sync
 	meta := sf.sm.Get(oldPath)
 	if meta != nil {
-		t.Errorf("Expected metadata to be removed after immediate sync")
+		t.Error("Expected metadata to be removed after immediate sync")
 	}
 }
