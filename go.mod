@@ -6,7 +6,7 @@ toolchain go1.24.12
 
 require (
 	github.com/cockroachdb/errors v1.12.0
-	github.com/cyverse/go-irodsclient v0.21.2-0.20260828173043-2baa63a00f3f
+	github.com/cyverse/go-irodsclient v0.21.2
 	github.com/dgraph-io/badger/v3 v3.2103.5
 	github.com/dgraph-io/ristretto v0.2.0
 	github.com/rs/xid v1.3.0
