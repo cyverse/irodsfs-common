@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -61,7 +60,7 @@ func (entry *MemoryCacheEntry) GetCreatedAt() time.Time {
 // GetData retrieves a slice of data starting from offset
 func (entry *MemoryCacheEntry) GetData(offset int) ([]byte, error) {
 	if offset < 0 || offset >= len(entry.data) {
-		return nil, fmt.Errorf("offset %d out of bounds (size %d)", offset, len(entry.data))
+		return nil, errors.Newf("offset %d out of bounds (size %d)", offset, len(entry.data))
 	}
 	return entry.data[offset:], nil
 }
@@ -69,7 +68,7 @@ func (entry *MemoryCacheEntry) GetData(offset int) ([]byte, error) {
 // GetDataWriteTo writes data to writer starting from offset
 func (entry *MemoryCacheEntry) GetDataWriteTo(w io.Writer, offset int) (int, error) {
 	if offset < 0 || offset >= len(entry.data) {
-		return 0, fmt.Errorf("offset %d out of bounds (size %d)", offset, len(entry.data))
+		return 0, errors.Newf("offset %d out of bounds (size %d)", offset, len(entry.data))
 	}
 	return w.Write(entry.data[offset:])
 }

@@ -749,7 +749,7 @@ func (sm *StagingStateManager) syncOne(meta *StagingMetadata) error {
 			}
 			sm.unlockOperationUnlocked(meta)
 			sm.mu.Unlock()
-			return errors.Wrapf(err, "handler failed for %s action on %s", meta.Action, meta.Path)
+			return errors.Wrapf(err, "handler failed for %q action on %q", meta.Action, meta.Path)
 		}
 	}
 

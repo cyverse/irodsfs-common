@@ -485,7 +485,7 @@ func (c *IRODSFSClientBuffered) Stat(filePath string) (*irodsclient_fs.Entry, er
 		if meta != nil {
 			switch meta.Action {
 			case stagingfs.ActionDelete, stagingfs.ActionRmdir:
-				return nil, errors.Errorf("file not found: %s", filePath)
+				return nil, errors.Newf("file not found: %s", filePath)
 
 			case stagingfs.ActionUpload:
 				// Return entry with local file size
@@ -543,7 +543,7 @@ func (c *IRODSFSClientBuffered) Stat(filePath string) (*irodsclient_fs.Entry, er
 
 		// Check if this path was renamed away
 		if c.staging.IsRenamedFrom(filePath) {
-			return nil, errors.Errorf("file not found: %s", filePath)
+			return nil, errors.Newf("file not found: %s", filePath)
 		}
 	}
 
@@ -992,7 +992,7 @@ func (c *IRODSFSClientBuffered) serveFileFromCache(irodsPath string, fileSize in
 		cacheKey := c.makeCacheKey(irodsPath, blockNum)
 		cacheEntry := c.cache.Get(cacheKey)
 		if cacheEntry == nil {
-			return errors.Errorf("cache block %d of %q evicted during serve", blockNum, irodsPath)
+			return errors.Newf("cache block %d of %q evicted during serve", blockNum, irodsPath)
 		}
 		data, err := cacheEntry.GetData(0)
 		if err != nil {
@@ -1581,7 +1581,7 @@ func (h *IRODSFSClientBufferedFileHandle) GetAvailable(offset int64) int64 {
 // underlying handle and caches them. Handles cross-block reads correctly.
 func (h *IRODSFSClientBufferedFileHandle) ReadAt(buffer []byte, offset int64) (int, error) {
 	if !h.handle.IsReadMode() {
-		return 0, errors.Errorf("file is opened with %q mode", h.handle.GetOpenMode())
+		return 0, errors.Newf("file is opened with %q mode", h.handle.GetOpenMode())
 	}
 
 	defer util.StackTraceFromPanic(h.logger)

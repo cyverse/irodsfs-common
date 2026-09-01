@@ -80,7 +80,7 @@ func ValidateVPathMappings(mappings []VPathMapping) error {
 	for _, mapping := range mappings {
 		err := mapping.Validate()
 		if err != nil {
-			return errors.Wrapf(err, "failed to validate vpath mapping")
+			return errors.Wrap(err, "failed to validate vpath mapping")
 		}
 
 		// check mapping path is used in another mapping

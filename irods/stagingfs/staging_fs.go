@@ -384,7 +384,7 @@ func (sf *StagingFS) OpenForReadWrite(path string, bulk bool) (*os.File, error) 
 		}
 
 		if err := sf.client.DownloadFileParallel(path, localPath, 4, nil); err != nil {
-			return nil, errors.Wrapf(err, "failed to download file from iRODS: %s", path)
+			return nil, errors.Wrapf(err, "failed to download file from iRODS %q", path)
 		}
 
 		if info, err := os.Stat(localPath); err == nil {
@@ -683,7 +683,7 @@ func (sf *StagingFS) SyncOld(gracePeriod time.Duration) error {
 	for _, path := range oldPaths {
 		localPath := sf.getLocalDataPath(path)
 		if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
-			return errors.Wrapf(err, "failed to delete local file %s", path)
+			return errors.Wrapf(err, "failed to delete local file %q", path)
 		}
 	}
 
@@ -699,37 +699,37 @@ func (sf *StagingFS) registerDefaultHandler() {
 			localPath := sf.getLocalDataPath(meta.Path)
 
 			if err := sf.client.UploadFileParallel(localPath, meta.Path, 4, nil); err != nil {
-				return errors.Wrapf(err, "failed to upload file in iRODS: %s", meta.Path)
+				return errors.Wrapf(err, "failed to upload file in iRODS %q", meta.Path)
 			}
 
 		case ActionRename:
 			// Rename file in iRODS
 			if err := sf.client.RenameFileToFile(meta.OldPath, meta.Path); err != nil {
-				return errors.Wrapf(err, "failed to rename file in iRODS: %s -> %s", meta.OldPath, meta.Path)
+				return errors.Wrapf(err, "failed to rename file in iRODS %q -> %q", meta.OldPath, meta.Path)
 			}
 
 		case ActionRenameDir:
 			// Rename directory in iRODS
 			if err := sf.client.RenameDirToDir(meta.OldPath, meta.Path); err != nil {
-				return errors.Wrapf(err, "failed to rename directory in iRODS: %s -> %s", meta.OldPath, meta.Path)
+				return errors.Wrapf(err, "failed to rename directory in iRODS %q -> %q", meta.OldPath, meta.Path)
 			}
 
 		case ActionDelete:
 			// Delete file from iRODS
 			if err := sf.client.RemoveFile(meta.Path, meta.Force); err != nil {
-				return errors.Wrapf(err, "failed to delete file in iRODS: %s", meta.Path)
+				return errors.Wrapf(err, "failed to delete file in iRODS %q", meta.Path)
 			}
 
 		case ActionMkdir:
 			// Create directory in iRODS
 			if err := sf.client.MakeDir(meta.Path, true); err != nil {
-				return errors.Wrapf(err, "failed to create directory in iRODS: %s", meta.Path)
+				return errors.Wrapf(err, "failed to create directory in iRODS %q", meta.Path)
 			}
 
 		case ActionRmdir:
 			// Remove directory from iRODS
 			if err := sf.client.RemoveDir(meta.Path, meta.Recurse, meta.Force); err != nil {
-				return errors.Wrapf(err, "failed to remove directory in iRODS: %s", meta.Path)
+				return errors.Wrapf(err, "failed to remove directory in iRODS %q", meta.Path)
 			}
 		}
 
@@ -1163,7 +1163,7 @@ func (sf *StagingFS) ensureQuota(size int64) error {
 	sf.sizeMutex.Unlock()
 
 	return errors.Mark(
-		errors.Errorf("staging quota exceeded: current %d + requested %d > max %d", current, size, sf.maxSize),
+		errors.Newf("staging quota exceeded: current %d + requested %d > max %d", current, size, sf.maxSize),
 		ErrQuotaExceeded,
 	)
 }

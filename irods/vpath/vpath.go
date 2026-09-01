@@ -43,7 +43,7 @@ func NewVPathManager(fsClient irods.IRODSFSClient, pathMappings []VPathMapping) 
 	logger.Info("Building a hierarchy")
 	err := manager.build()
 	if err != nil {
-		buildErr := errors.Wrapf(err, "failed to build a hierarchy")
+		buildErr := errors.Wrap(err, "failed to build a hierarchy")
 		logger.Error(buildErr)
 		return nil, buildErr
 	}
@@ -112,7 +112,7 @@ func (manager *VPathManager) build() error {
 	for _, mapping := range manager.pathMappings {
 		err := manager.buildMapping(&mapping)
 		if err != nil {
-			return errors.Wrapf(err, "failed to build vpath mapping")
+			return errors.Wrap(err, "failed to build vpath mapping")
 		}
 	}
 	return nil

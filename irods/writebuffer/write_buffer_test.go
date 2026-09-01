@@ -1,7 +1,7 @@
 package writebuffer
 
 import (
-	"fmt"
+	"errors"
 	"sync"
 	"testing"
 
@@ -233,7 +233,7 @@ func TestWriteBufferMultipleBuffers(t *testing.T) {
 func TestWriteBufferFlushError(t *testing.T) {
 	mgr := NewWriteBufferManager(nil)
 
-	expectedErr := fmt.Errorf("write failed")
+	expectedErr := errors.New("write failed")
 	wb := mgr.CreateBuffer(func(data []byte, offset int64) error {
 		return expectedErr
 	})
