@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
 	irodsclient_common "github.com/cyverse/go-irodsclient/irods/common"
 	"github.com/dgraph-io/badger/v3"
 	log "github.com/sirupsen/logrus"
@@ -34,6 +35,14 @@ type StagingClient interface {
 	RemoveFile(path string, force bool) error
 	MakeDir(path string, recurse bool) error
 	RemoveDir(path string, recurse bool, force bool) error
+}
+
+// stagingStatClient is intentionally optional so existing StagingClient
+// implementations remain compatible. Without it, successfully uploaded files
+// are not retained as local read-cache entries because their freshness cannot
+// be verified safely.
+type stagingStatClient interface {
+	Stat(path string) (*irodsclient_fs.Entry, error)
 }
 
 // SyncErrorHandler is called when a background sync fails for an item
@@ -344,6 +353,28 @@ func (sf *StagingFS) OpenForRead(path string) (*os.File, error) {
 	}
 
 	return f, nil
+}
+
+// OpenCachedForRead opens a completed staging read-cache entry. The cache lock
+// keeps eviction from removing the entry before it is opened, and a successful
+// open refreshes its LRU timestamp. found is false when path is not cached.
+func (sf *StagingFS) OpenCachedForRead(path string) (file *os.File, metadata *StagingMetadata, found bool, err error) {
+	sf.cacheMutex.Lock()
+	defer sf.cacheMutex.Unlock()
+
+	cached, found := sf.cachedItems[path]
+	if !found {
+		return nil, nil, false, nil
+	}
+
+	file, err = os.Open(sf.getLocalDataPath(path))
+	if err != nil {
+		return nil, nil, true, errors.Wrap(err, "failed to open cached file for reading")
+	}
+
+	cached.LastAccessedAt = time.Now()
+	copy := *cached
+	return file, &copy, true, nil
 }
 
 // TruncateFile truncates a staged file to the given size.
@@ -902,15 +933,37 @@ func (sf *StagingFS) transitionToCached(meta *StagingMetadata) {
 		return
 	}
 
+	// A local read-cache is usable only when it has an iRODS freshness stamp
+	// captured immediately after its successful upload. If it cannot be
+	// captured, prefer re-reading from iRODS over retaining unverifiable data.
+	statClient, ok := sf.client.(stagingStatClient)
+	if !ok {
+		sf.removePathSize(meta.Path)
+		_ = os.Remove(localPath)
+		return
+	}
+	remoteEntry, err := statClient.Stat(meta.Path)
+	if err != nil || remoteEntry == nil {
+		if err != nil {
+			log.WithError(err).Warnf("failed to stat synced file %q for staging cache freshness", meta.Path)
+		}
+		sf.removePathSize(meta.Path)
+		_ = os.Remove(localPath)
+		return
+	}
+
 	now := time.Now()
 	cached := &StagingMetadata{
-		Path:           meta.Path,
-		Action:         meta.Action,
-		IsNew:          meta.IsNew,
-		CreatedAt:      meta.CreatedAt,
-		LastModifiedAt: meta.LastModifiedAt,
-		FileState:      StagingFileCached,
-		LastAccessedAt: now,
+		Path:                 meta.Path,
+		Action:               meta.Action,
+		IsNew:                meta.IsNew,
+		CreatedAt:            meta.CreatedAt,
+		LastModifiedAt:       meta.LastModifiedAt,
+		FileState:            StagingFileCached,
+		LastAccessedAt:       now,
+		RemoteSize:           remoteEntry.Size,
+		RemoteModifyTime:     remoteEntry.ModifyTime,
+		RemoteFreshnessKnown: true,
 	}
 
 	sf.cacheMutex.Lock()

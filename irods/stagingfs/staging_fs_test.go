@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
 	irodsclient_common "github.com/cyverse/go-irodsclient/irods/common"
 )
 
@@ -156,6 +157,90 @@ func TestBackgroundMkdirRemainsVisibleAsCachedDirectory(t *testing.T) {
 	}
 }
 
+func TestOpenCachedForReadRefreshesAccessTime(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	path := "/cached.txt"
+	localPath := sf.getLocalDataPath(path)
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		t.Fatalf("Failed to create staging data directory: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("local cached data"), 0644); err != nil {
+		t.Fatalf("Failed to create cached file: %v", err)
+	}
+
+	oldAccess := time.Now().Add(-time.Hour)
+	sf.cacheMutex.Lock()
+	sf.cachedItems[path] = &StagingMetadata{
+		Path:           path,
+		Action:         ActionUpload,
+		FileState:      StagingFileCached,
+		LastAccessedAt: oldAccess,
+	}
+	sf.cacheMutex.Unlock()
+
+	f, meta, found, err := sf.OpenCachedForRead(path)
+	if err != nil || !found {
+		t.Fatalf("OpenCachedForRead() = (%v, found=%t), want cached file", err, found)
+	}
+	defer f.Close()
+	data := make([]byte, len("local cached data"))
+	if _, err := f.Read(data); err != nil {
+		t.Fatalf("Failed to read cached file: %v", err)
+	}
+	if string(data) != "local cached data" {
+		t.Fatalf("Cached data = %q", data)
+	}
+	if !meta.LastAccessedAt.After(oldAccess) {
+		t.Fatalf("Returned access time = %v, want after %v", meta.LastAccessedAt, oldAccess)
+	}
+	if !sf.cachedItems[path].LastAccessedAt.After(oldAccess) {
+		t.Fatalf("Stored access time = %v, want after %v", sf.cachedItems[path].LastAccessedAt, oldAccess)
+	}
+}
+
+func TestTransitionToCachedStoresRemoteFreshness(t *testing.T) {
+	remoteModified := time.Now().UTC().Truncate(time.Second)
+	backend := &statMockStagingClient{entry: &irodsclient_fs.Entry{
+		Size:       int64(len("synced data")),
+		ModifyTime: remoteModified,
+	}}
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        backend,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	path := "/synced.txt"
+	localPath := sf.getLocalDataPath(path)
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		t.Fatalf("Failed to create staging data directory: %v", err)
+	}
+	if err := os.WriteFile(localPath, []byte("synced data"), 0644); err != nil {
+		t.Fatalf("Failed to create staged file: %v", err)
+	}
+	sf.setPathSize(path, int64(len("synced data")))
+
+	sf.transitionToCached(&StagingMetadata{Path: path, Action: ActionUpload})
+	cached := sf.GetCachedItems()[path]
+	if cached == nil {
+		t.Fatal("Expected synced file in the staging read-cache")
+	}
+	if !cached.RemoteFreshnessKnown || cached.RemoteSize != backend.entry.Size || !cached.RemoteModifyTime.Equal(remoteModified) {
+		t.Fatalf("Cached freshness stamp = %+v, want size=%d modify=%v", cached, backend.entry.Size, remoteModified)
+	}
+}
+
 // MockStagingClient implements StagingClient for testing
 type MockStagingClient struct {
 	removeFileForce  bool
@@ -163,6 +248,16 @@ type MockStagingClient struct {
 	removeDirRecurse bool
 	removeDirForce   bool
 	removeDirCalled  bool
+}
+
+type statMockStagingClient struct {
+	MockStagingClient
+	entry *irodsclient_fs.Entry
+	err   error
+}
+
+func (m *statMockStagingClient) Stat(string) (*irodsclient_fs.Entry, error) {
+	return m.entry, m.err
 }
 
 func (m *MockStagingClient) DownloadFileParallel(irodsPath string, localPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error {

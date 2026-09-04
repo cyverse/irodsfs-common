@@ -74,19 +74,22 @@ func (s StagingFileState) String() string {
 
 // StagingMetadata represents the state of a staged file
 type StagingMetadata struct {
-	OperationID     string           // ID of the latest DAG operation for this logical path
-	Path            string           // Current path
-	OldPath         string           // Old path (for RENAME actions)
-	Action          ActionType       // Final action
-	Recurse         bool             // Recursive directory removal
-	Force           bool             // Force file or directory removal
-	IsNew           bool             // Is this a new file?
-	CreatedAt       time.Time        // Creation time
-	LastModifiedAt  time.Time        // Last modification time
-	SyncFailCount   int              // Number of consecutive sync failures
-	BackendMayExist bool             // A completed descendant operation may have created this directory remotely
-	FileState       StagingFileState // Whether local file is dirty or cached
-	LastAccessedAt  time.Time        // Last time the cached file was accessed (for eviction)
+	OperationID          string           // ID of the latest DAG operation for this logical path
+	Path                 string           // Current path
+	OldPath              string           // Old path (for RENAME actions)
+	Action               ActionType       // Final action
+	Recurse              bool             // Recursive directory removal
+	Force                bool             // Force file or directory removal
+	IsNew                bool             // Is this a new file?
+	CreatedAt            time.Time        // Creation time
+	LastModifiedAt       time.Time        // Last modification time
+	SyncFailCount        int              // Number of consecutive sync failures
+	BackendMayExist      bool             // A completed descendant operation may have created this directory remotely
+	FileState            StagingFileState // Whether local file is dirty or cached
+	LastAccessedAt       time.Time        // Last time the cached file was accessed (for eviction)
+	RemoteSize           int64            // iRODS size recorded immediately after the upload that created a cached file
+	RemoteModifyTime     time.Time        // iRODS modification time recorded with RemoteSize
+	RemoteFreshnessKnown bool             // True only when RemoteSize and RemoteModifyTime were recorded after sync
 }
 
 // StagingStateManager manages staging metadata for async uploads

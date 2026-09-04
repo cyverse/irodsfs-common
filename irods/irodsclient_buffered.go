@@ -487,7 +487,7 @@ func (c *IRODSFSClientBuffered) Stat(filePath string) (*irodsclient_fs.Entry, er
 			case stagingfs.ActionDelete, stagingfs.ActionRmdir:
 				return nil, errors.Newf("file not found: %s", filePath)
 
-			case stagingfs.ActionUpload:
+			case stagingfs.ActionUpload, stagingfs.ActionBulkUpload:
 				// Return entry with local file size
 				size := c.staging.GetLocalFileSize(filePath)
 				if size < 0 {
@@ -770,21 +770,17 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 		logger.Warnf("staging quota exceeded, falling back to direct iRODS write for %q", path)
 	}
 
-	// Read-only mode: check staging first
-	if c.staging != nil {
-		meta := c.staging.Get(path)
-		if meta != nil && meta.Action == stagingfs.ActionUpload {
-			f, err := c.staging.OpenForRead(path)
-			if err != nil {
-				return nil, err
-			}
-
+	// Read-only mode: staged data (dirty or synced local read-cache) takes
+	// precedence over the memory cache and iRODS.
+	if !openMode.IsWrite() {
+		if f, staged, err := c.openStagedForRead(path); err != nil {
+			return nil, err
+		} else if staged {
 			entry, err := c.Stat(path)
 			if err != nil {
 				f.Close()
 				return nil, err
 			}
-
 			return newStagedHandle(c, f, path, openMode, entry), nil
 		}
 	}
@@ -908,6 +904,19 @@ func (c *IRODSFSClientBuffered) OpenFileBulk(path string, mode string) (IRODSFSF
 		logger.Warnf("staging quota exceeded, falling back to direct iRODS write for %q", path)
 	}
 
+	if !openMode.IsWrite() {
+		if f, staged, err := c.openStagedForRead(path); err != nil {
+			return nil, err
+		} else if staged {
+			entry, err := c.Stat(path)
+			if err != nil {
+				f.Close()
+				return nil, err
+			}
+			return newStagedHandle(c, f, path, openMode, entry), nil
+		}
+	}
+
 	handle, err := c.client.OpenFile(path, mode)
 	if err != nil {
 		return nil, err
@@ -1022,12 +1031,12 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 
 	defer util.StackTraceFromPanic(logger)
 
-	// skip if the file is staged locally (already on disk)
-	if c.staging != nil {
-		meta := c.staging.Get(irodsPath)
-		if meta != nil && meta.Action == stagingfs.ActionUpload {
-			return nil
-		}
+	// Skip if the newest copy is staged locally, including a completed staging
+	// read-cache entry. Do not populate a lower-priority memory-cache copy.
+	if f, staged, err := c.openStagedForRead(irodsPath); err != nil {
+		return err
+	} else if staged {
+		return f.Close()
 	}
 
 	entry, err := c.client.Stat(irodsPath)
@@ -1090,12 +1099,8 @@ func (c *IRODSFSClientBuffered) DownloadFile(irodsPath string, localPath string,
 		return nil
 	}
 
-	// check if the file is staged locally
-	if c.staging != nil {
-		meta := c.staging.Get(irodsPath)
-		if meta != nil && meta.Action == stagingfs.ActionUpload {
-			return c.downloadFromStaging(irodsPath, c.helper.GetBlockSize(), writeCallback, transferCallback)
-		}
+	if handled, err := c.downloadFromStagingIfAvailable(irodsPath, c.helper.GetBlockSize(), writeCallback, transferCallback); handled {
+		return err
 	}
 
 	entry, err := c.client.Stat(irodsPath)
@@ -1160,12 +1165,8 @@ func (c *IRODSFSClientBuffered) DownloadFileParallel(irodsPath string, localPath
 		return nil
 	}
 
-	// check if the file is staged locally
-	if c.staging != nil {
-		meta := c.staging.Get(irodsPath)
-		if meta != nil && meta.Action == stagingfs.ActionUpload {
-			return c.downloadFromStaging(irodsPath, c.helper.GetBlockSize(), writeCallback, transferCallback)
-		}
+	if handled, err := c.downloadFromStagingIfAvailable(irodsPath, c.helper.GetBlockSize(), writeCallback, transferCallback); handled {
+		return err
 	}
 
 	entry, err := c.client.Stat(irodsPath)
@@ -1214,12 +1215,8 @@ func (c *IRODSFSClientBuffered) DownloadFileWithCallback(irodsPath string, block
 
 	defer util.StackTraceFromPanic(logger)
 
-	// check if the file is staged locally
-	if c.staging != nil {
-		meta := c.staging.Get(irodsPath)
-		if meta != nil && meta.Action == stagingfs.ActionUpload {
-			return c.downloadFromStaging(irodsPath, blockSize, blockReadyCallback, transferCallback)
-		}
+	if handled, err := c.downloadFromStagingIfAvailable(irodsPath, blockSize, blockReadyCallback, transferCallback); handled {
+		return err
 	}
 
 	cacheBlockSize := c.helper.GetBlockSize()
@@ -1263,16 +1260,60 @@ func (c *IRODSFSClientBuffered) DownloadFileWithCallback(irodsPath string, block
 	return err
 }
 
-func (c *IRODSFSClientBuffered) downloadFromStaging(irodsPath string, blockSize int, blockReadyCallback irodsclient_common.DataObjectBlockCallback, transferCallback irodsclient_common.TransferTrackerCallback) error {
-	f, err := c.staging.OpenForRead(irodsPath)
+// openStagedForRead opens the highest-priority local copy of path. Pending
+// uploads win over completed read-cache entries; callers fall back to memory
+// cache and iRODS only when neither exists.
+func (c *IRODSFSClientBuffered) openStagedForRead(irodsPath string) (*os.File, bool, error) {
+	if c.staging == nil {
+		return nil, false, nil
+	}
+
+	meta := c.staging.Get(irodsPath)
+	if meta != nil && (meta.Action == stagingfs.ActionUpload || meta.Action == stagingfs.ActionBulkUpload) {
+		f, err := c.staging.OpenForRead(irodsPath)
+		if err != nil {
+			return nil, true, errors.Wrapf(err, "failed to open staged file %q", irodsPath)
+		}
+		return f, true, nil
+	}
+
+	f, cachedMeta, found, err := c.staging.OpenCachedForRead(irodsPath)
 	if err != nil {
-		return errors.Wrapf(err, "failed to open staged file %q", irodsPath)
+		return nil, true, errors.Wrapf(err, "failed to open staged cache file %q", irodsPath)
+	}
+	if !found {
+		return nil, false, nil
+	}
+
+	// Synced staging data is a read-cache, unlike a pending upload. Validate it
+	// against the remote state before serving it, then discard it on any failed
+	// validation so future reads cannot observe stale local data.
+	remoteEntry, statErr := c.client.Stat(irodsPath)
+	isFresh := statErr == nil && remoteEntry != nil && cachedMeta.RemoteFreshnessKnown &&
+		cachedMeta.RemoteSize == remoteEntry.Size && cachedMeta.RemoteModifyTime.Equal(remoteEntry.ModifyTime)
+	if !isFresh {
+		_ = f.Close()
+		c.staging.EvictCachedFile(irodsPath)
+		if statErr != nil {
+			return nil, false, errors.Wrapf(statErr, "failed to validate staged cache file %q", irodsPath)
+		}
+		return nil, false, nil
+	}
+
+	return f, true, nil
+}
+
+// downloadFromStagingIfAvailable streams a local staged copy when present.
+func (c *IRODSFSClientBuffered) downloadFromStagingIfAvailable(irodsPath string, blockSize int, blockReadyCallback irodsclient_common.DataObjectBlockCallback, transferCallback irodsclient_common.TransferTrackerCallback) (bool, error) {
+	f, found, err := c.openStagedForRead(irodsPath)
+	if err != nil || !found {
+		return found, err
 	}
 	defer f.Close()
 
 	info, err := f.Stat()
 	if err != nil {
-		return errors.Wrapf(err, "failed to stat staged file %q", irodsPath)
+		return true, errors.Wrapf(err, "failed to stat staged file %q", irodsPath)
 	}
 	fileSize := info.Size()
 
@@ -1284,7 +1325,7 @@ func (c *IRODSFSClientBuffered) downloadFromStaging(irodsPath string, blockSize 
 		if n > 0 {
 			if blockReadyCallback != nil {
 				if callbackErr := blockReadyCallback(buf[:n], offset); callbackErr != nil {
-					return callbackErr
+					return true, callbackErr
 				}
 			}
 			if transferCallback != nil {
@@ -1295,12 +1336,12 @@ func (c *IRODSFSClientBuffered) downloadFromStaging(irodsPath string, blockSize 
 			break
 		}
 		if readErr != nil {
-			return errors.Wrapf(readErr, "failed to read staged file %q", irodsPath)
+			return true, errors.Wrapf(readErr, "failed to read staged file %q", irodsPath)
 		}
 		offset += int64(n)
 	}
 
-	return nil
+	return true, nil
 }
 
 func (c *IRODSFSClientBuffered) DownloadFileParallelWithCallback(irodsPath string, blockSize int, numBlocks int, blockReadyCallback irodsclient_common.DataObjectBlockCallback, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error {
@@ -1313,12 +1354,8 @@ func (c *IRODSFSClientBuffered) DownloadFileParallelWithCallback(irodsPath strin
 
 	defer util.StackTraceFromPanic(logger)
 
-	// check if the file is staged locally
-	if c.staging != nil {
-		meta := c.staging.Get(irodsPath)
-		if meta != nil && meta.Action == stagingfs.ActionUpload {
-			return c.downloadFromStaging(irodsPath, blockSize, blockReadyCallback, transferCallback)
-		}
+	if handled, err := c.downloadFromStagingIfAvailable(irodsPath, blockSize, blockReadyCallback, transferCallback); handled {
+		return err
 	}
 
 	cacheBlockSize := c.helper.GetBlockSize()
@@ -1649,7 +1686,7 @@ func (h *IRODSFSClientBufferedFileHandle) ReadAt(buffer []byte, offset int64) (i
 		// Cache the full block
 		if n > 0 {
 			if _, cacheErr := h.cache.PutCopy(cacheKey, blockBuf[:n], false); cacheErr != nil {
-				h.logger.WithError((cacheErr)).Warn("failed to cache block %d", blockNum)
+				h.logger.WithError(cacheErr).Warnf("failed to cache block %d", blockNum)
 			}
 			// Store freshness stamp on first cache miss so download paths can validate staleness.
 			if !h.cache.Has(h.client.makeCacheKey(h.irodsPath, -1)) {
