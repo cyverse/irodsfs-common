@@ -50,8 +50,17 @@ type stagingStatClient interface {
 	Stat(path string) (*irodsclient_fs.Entry, error)
 }
 
-// SyncErrorHandler is called when a background sync fails for an item
+// SyncErrorHandler is called when a background sync fails for an item.
+// Handlers are invoked one at a time from a dedicated goroutine that no staging
+// operation waits on, so a handler may call back into StagingFS — Close
+// included — without deadlocking against the sync that reported the error.
 type SyncErrorHandler func(meta *StagingMetadata, err error)
+
+// syncErrorEvent is one queued SyncErrorHandler invocation.
+type syncErrorEvent struct {
+	meta *StagingMetadata
+	err  error
+}
 
 // StagingFSConfig holds configuration for StagingFS
 type StagingFSConfig struct {
@@ -93,6 +102,10 @@ type StagingFS struct {
 	handles          map[string][]PathHolder // path → open write handles (for rename path propagation)
 	pathSizesMu      sync.Mutex
 	pathSizes        map[string]int64 // per-path tracked sizes for accurate currentSize accounting
+	syncErrorMu      sync.Mutex
+	syncErrorCond    *sync.Cond       // signals queued sync-error callbacks
+	syncErrorQueue   []syncErrorEvent // pending SyncErrorHandler invocations
+	syncErrorStopped bool             // no further callbacks are queued after Close
 }
 
 // NewStagingFS creates a new StagingFS with memory-only state manager
@@ -151,6 +164,7 @@ func NewStagingFS(config *StagingFSConfig) (*StagingFS, error) {
 	sf.currentSize = sf.computeDataDirSize()
 	sf.cleanOrphanFiles()
 	sf.registerDefaultHandler()
+	sf.startSyncErrorNotifier()
 	sf.startBackgroundWorker()
 
 	return sf, nil
@@ -223,6 +237,7 @@ func NewStagingFSWithPersistence(config *StagingFSConfig) (*StagingFS, error) {
 	sf.currentSize = sf.computeDataDirSize()
 	sf.cleanOrphanFiles()
 	sf.registerDefaultHandler()
+	sf.startSyncErrorNotifier()
 	sf.startBackgroundWorker()
 
 	return sf, nil
@@ -911,7 +926,8 @@ func (sf *StagingFS) registerDefaultHandler() {
 	sf.sm.RegisterActionHandler(handler)
 }
 
-// RegisterActionHandler registers a custom handler for iRODS operations
+// RegisterActionHandler registers a custom handler for iRODS operations.
+// See ActionHandler for the re-entrancy rules a handler must follow.
 func (sf *StagingFS) RegisterActionHandler(handler ActionHandler) {
 	sf.sm.RegisterActionHandler(handler)
 }
@@ -924,6 +940,7 @@ func (sf *StagingFS) Close() error {
 	// The worker may already be inside syncOldItems when stopCh is closed.
 	// Keep the backend client and staging state alive until that pass exits.
 	sf.workerWg.Wait()
+	sf.stopSyncErrorNotifier()
 
 	syncErr := sf.SyncAll()
 	if syncErr != nil {
@@ -953,6 +970,65 @@ func (sf *StagingFS) Close() error {
 	}
 
 	return nil
+}
+
+// startSyncErrorNotifier launches the goroutine that delivers SyncErrorHandler
+// callbacks. Delivery is deliberately detached from the goroutine that hit the
+// error: a callback used to run inline on the background worker, so a handler
+// calling Close deadlocked on the very worker it was running on.
+func (sf *StagingFS) startSyncErrorNotifier() {
+	if sf.config.OnSyncError == nil {
+		return
+	}
+
+	sf.syncErrorCond = sync.NewCond(&sf.syncErrorMu)
+	go func() {
+		for {
+			sf.syncErrorMu.Lock()
+			for len(sf.syncErrorQueue) == 0 && !sf.syncErrorStopped {
+				sf.syncErrorCond.Wait()
+			}
+			if len(sf.syncErrorQueue) == 0 {
+				sf.syncErrorMu.Unlock()
+				return
+			}
+			event := sf.syncErrorQueue[0]
+			sf.syncErrorQueue = sf.syncErrorQueue[1:]
+			sf.syncErrorMu.Unlock()
+
+			sf.config.OnSyncError(event.meta, event.err)
+		}
+	}()
+}
+
+// notifySyncError queues a sync failure for delivery. Queuing never blocks, so
+// neither a slow handler nor one that calls back into StagingFS can stall the
+// sync that reported the error.
+func (sf *StagingFS) notifySyncError(meta *StagingMetadata, err error) {
+	if sf.config.OnSyncError == nil {
+		return
+	}
+
+	sf.syncErrorMu.Lock()
+	if !sf.syncErrorStopped {
+		sf.syncErrorQueue = append(sf.syncErrorQueue, syncErrorEvent{meta: meta, err: err})
+		sf.syncErrorCond.Signal()
+	}
+	sf.syncErrorMu.Unlock()
+}
+
+// stopSyncErrorNotifier lets the notifier exit once the queued callbacks are
+// delivered. It never waits for delivery, because Close may itself be called
+// from inside a callback.
+func (sf *StagingFS) stopSyncErrorNotifier() {
+	if sf.config.OnSyncError == nil {
+		return
+	}
+
+	sf.syncErrorMu.Lock()
+	sf.syncErrorStopped = true
+	sf.syncErrorCond.Broadcast()
+	sf.syncErrorMu.Unlock()
 }
 
 // startBackgroundWorker launches a goroutine that periodically syncs old items
@@ -1004,9 +1080,7 @@ func (sf *StagingFS) syncOldItems(gracePeriod time.Duration) {
 			if _, err := sf.sm.syncCandidate(meta, gracePeriod, false); err != nil {
 				log.WithError(err).Warnf("background sync failed for %s (%s), attempt %d", meta.Path, meta.Action, meta.SyncFailCount)
 
-				if sf.config.OnSyncError != nil {
-					sf.config.OnSyncError(meta, err)
-				}
+				sf.notifySyncError(meta, err)
 
 				if meta.SyncFailCount >= MaxSyncFailCount {
 					sf.failedMutex.Lock()
@@ -1434,9 +1508,7 @@ func (sf *StagingFS) forceSyncOldest(needed int64) int64 {
 
 		if err := sf.sm.syncOne(item.meta); err != nil {
 			log.WithError(err).Warnf("force-sync failed for %s during quota eviction", item.path)
-			if sf.config.OnSyncError != nil {
-				sf.config.OnSyncError(item.meta, err)
-			}
+			sf.notifySyncError(item.meta, err)
 			continue
 		}
 

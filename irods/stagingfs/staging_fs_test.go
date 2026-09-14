@@ -1349,3 +1349,41 @@ func TestStagingFSRenameDirKeepsStateWhenLocalRenameFails(t *testing.T) {
 		t.Fatalf("staged child data = %q, want %q", data, "child data")
 	}
 }
+
+func TestStagingFSSyncErrorHandlerMayCloseStagingFS(t *testing.T) {
+	ready := make(chan struct{})
+	closeResult := make(chan error, 1)
+	var sf *StagingFS
+
+	config := &StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+		SyncInterval:  time.Millisecond,
+		GracePeriod:   time.Millisecond,
+		OnSyncError: func(meta *StagingMetadata, err error) {
+			<-ready
+			select {
+			case closeResult <- sf.Close():
+			default:
+			}
+		},
+	}
+
+	sf, err := NewStagingFS(config)
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	sf.RegisterActionHandler(func(*StagingMetadata) error {
+		return errors.New("simulated sync failure")
+	})
+	if err := sf.Create("/failing.txt"); err != nil {
+		t.Fatalf("Failed to stage file: %v", err)
+	}
+	close(ready)
+
+	select {
+	case <-closeResult:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close called from the sync error handler did not return")
+	}
+}

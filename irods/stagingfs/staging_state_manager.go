@@ -15,6 +15,15 @@ import (
 
 // Handler for iRODS operations
 type (
+	// ActionHandler performs one backend operation for a staged path.
+	//
+	// It runs while the state manager holds the logical lock for that path, or
+	// for the whole subtree when the operation is recursive. A handler must
+	// therefore not re-enter a mutating staging operation (Create, Modify,
+	// Touch, Delete, Rename, Rmdir, ...) for that path or for any path inside
+	// that subtree: the re-entrant call waits for a lock that is released only
+	// once the handler returns, so it deadlocks. Read-only calls such as Get and
+	// GetAll, and mutations of unrelated paths, are safe.
 	ActionHandler func(metadata *StagingMetadata) error
 )
 
@@ -1435,7 +1444,8 @@ func (sm *StagingStateManager) WaitForSync(path string) {
 	sm.waitForPathsUnlocked(path)
 }
 
-// RegisterActionHandler registers a handler for operations
+// RegisterActionHandler registers a handler for operations.
+// See ActionHandler for the re-entrancy rules a handler must follow.
 func (sm *StagingStateManager) RegisterActionHandler(handler ActionHandler) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
