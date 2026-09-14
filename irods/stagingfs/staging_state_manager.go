@@ -291,6 +291,13 @@ func (sm *StagingStateManager) Modify(path string) error {
 			LastModifiedAt: now,
 		}
 	} else {
+		// DELETE -> UPLOAD represents a new local file at this path. The
+		// delete worker may already have removed the old backend object, so
+		// subsequent Stat calls must use the staged entry rather than looking
+		// up the now-deleted backend object.
+		if meta.Action == ActionDelete {
+			meta.IsNew = true
+		}
 		meta.Action = ActionUpload
 		meta.LastModifiedAt = time.Now()
 	}
