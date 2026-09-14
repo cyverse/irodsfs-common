@@ -240,6 +240,25 @@ func TestBufferedClientExistsUsesPendingStagingNamespace(t *testing.T) {
 	require.False(t, client.ExistsDir(oldDir))
 }
 
+func TestBufferedClientResolvesPendingRenameSource(t *testing.T) {
+	staging, err := stagingfs.NewStagingFS(&stagingfs.StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &releaseErrorStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = staging.Close() })
+
+	client := &IRODSFSClientBuffered{staging: staging}
+	require.NoError(t, staging.RenameDir("/old", "/middle"))
+	require.NoError(t, staging.RenameDir("/middle", "/new"))
+
+	assert.Equal(t, "/old", client.resolvePendingRenameSource("/new"))
+	assert.Equal(t, "/old/child/file.txt", client.resolvePendingRenameSource("/new/child/file.txt"))
+	assert.Equal(t, "/unrelated/file.txt", client.resolvePendingRenameSource("/unrelated/file.txt"))
+}
+
 func TestBufferedClientShouldCacheFileUsesSmallerLimit(t *testing.T) {
 	cacheMgr := newTestCacheManager(t)
 	defer cacheMgr.Release()

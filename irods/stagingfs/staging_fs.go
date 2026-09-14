@@ -401,36 +401,47 @@ func (sf *StagingFS) TruncateFile(path string, size int64) error {
 // OpenForReadWrite opens a file for reading and writing (downloads from iRODS first).
 // If bulk is true, the file is registered as ActionBulkUpload and deleted after sync (not cached).
 func (sf *StagingFS) OpenForReadWrite(path string, bulk bool) (*os.File, error) {
-	sf.sm.WaitForSync(path)
+	return sf.OpenForReadWriteFrom(path, path, bulk)
+}
+
+// OpenForReadWriteFrom opens logicalPath for reading and writing, downloading
+// its initial data from sourcePath when no local staged copy exists. The paths
+// differ while an asynchronous rename is pending: local staging must remain at
+// the new logical path while iRODS still exposes the old source path.
+func (sf *StagingFS) OpenForReadWriteFrom(logicalPath string, sourcePath string, bulk bool) (*os.File, error) {
+	if sourcePath == "" {
+		sourcePath = logicalPath
+	}
+	sf.sm.WaitForSync(logicalPath)
 
 	if err := sf.ensureQuota(0); err != nil {
 		return nil, err
 	}
 
-	localPath := sf.getLocalDataPath(path)
+	localPath := sf.getLocalDataPath(logicalPath)
 
 	if _, err := os.Stat(localPath); os.IsNotExist(err) {
 		if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 			return nil, errors.Wrap(err, "failed to create parent directory")
 		}
 
-		if err := sf.client.DownloadFileParallel(path, localPath, 4, nil); err != nil {
-			return nil, errors.Wrapf(err, "failed to download file from iRODS %q", path)
+		if err := sf.client.DownloadFileParallel(sourcePath, localPath, 4, nil); err != nil {
+			return nil, errors.Wrapf(err, "failed to download file from iRODS %q", sourcePath)
 		}
 
 		if info, err := os.Stat(localPath); err == nil {
-			sf.setPathSize(path, info.Size())
+			sf.setPathSize(logicalPath, info.Size())
 		}
 	}
 
 	if bulk {
-		if err := sf.sm.CreateBulkUpload(path); err != nil {
+		if err := sf.sm.CreateBulkUpload(logicalPath); err != nil {
 			return nil, err
 		}
 	} else {
-		meta := sf.sm.Get(path)
+		meta := sf.sm.Get(logicalPath)
 		if meta == nil || meta.Action != ActionUpload {
-			if err := sf.sm.Modify(path); err != nil {
+			if err := sf.sm.Modify(logicalPath); err != nil {
 				return nil, err
 			}
 		}
@@ -441,7 +452,7 @@ func (sf *StagingFS) OpenForReadWrite(path string, bulk bool) (*os.File, error) 
 		return nil, errors.Wrap(err, "failed to open local file for reading and writing")
 	}
 
-	sf.AcquireRef(path)
+	sf.AcquireRef(logicalPath)
 	return f, nil
 }
 

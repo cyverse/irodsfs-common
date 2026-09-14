@@ -82,6 +82,40 @@ func TestStagingFSClosePreservesFailedDataForRecovery(t *testing.T) {
 	}
 }
 
+func TestStagingFSOpenForReadWriteFromUsesRemoteSourceAndLogicalDestination(t *testing.T) {
+	client := &downloadRecordingStagingClient{content: []byte("original data")}
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        client,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	f, err := sf.OpenForReadWriteFrom("/renamed.txt", "/original.txt", false)
+	if err != nil {
+		t.Fatalf("OpenForReadWriteFrom failed: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Failed to close staged file: %v", err)
+	}
+
+	if client.downloadedPath != "/original.txt" {
+		t.Fatalf("download source = %q, want %q", client.downloadedPath, "/original.txt")
+	}
+	if meta := sf.Get("/renamed.txt"); meta == nil || meta.Action != ActionUpload {
+		t.Fatalf("logical staging metadata = %+v, want pending upload at renamed path", meta)
+	}
+	data, err := os.ReadFile(sf.getLocalDataPath("/renamed.txt"))
+	if err != nil {
+		t.Fatalf("Failed to read logical staged file: %v", err)
+	}
+	if string(data) != "original data" {
+		t.Fatalf("logical staged data = %q, want %q", data, "original data")
+	}
+}
+
 func TestStagingFSCloseWaitsForBackgroundWorker(t *testing.T) {
 	sf, err := NewStagingFS(&StagingFSConfig{
 		LocalRootPath: t.TempDir(),
@@ -256,8 +290,19 @@ type statMockStagingClient struct {
 	err   error
 }
 
+type downloadRecordingStagingClient struct {
+	MockStagingClient
+	downloadedPath string
+	content        []byte
+}
+
 func (m *statMockStagingClient) Stat(string) (*irodsclient_fs.Entry, error) {
 	return m.entry, m.err
+}
+
+func (m *downloadRecordingStagingClient) DownloadFileParallel(irodsPath string, localPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error {
+	m.downloadedPath = irodsPath
+	return os.WriteFile(localPath, m.content, 0644)
 }
 
 func (m *MockStagingClient) DownloadFileParallel(irodsPath string, localPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error {
