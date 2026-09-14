@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	stdpath "path"
 	"sort"
 	"strings"
 	"sync"
@@ -144,6 +145,21 @@ func newStagingStateManager(db *badger.DB) *StagingStateManager {
 	return sm
 }
 
+// cleanPath returns the canonical form of a logical staging path: rooted, slash
+// separated, and free of ".", ".." and repeated slashes. Canonicalizing at the
+// API boundary keeps two spellings of one path from being tracked as separate
+// operations under separate locks, and keeps a path from reaching outside the
+// staging root once it is joined with the local data directory.
+func cleanPath(path string) string {
+	if path == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return stdpath.Clean(path)
+}
+
 // pathInSubtree reports whether path is root itself or one of its descendants.
 func pathInSubtree(path string, root string) bool {
 	cleanRoot := strings.TrimRight(root, "/")
@@ -243,6 +259,7 @@ func (sm *StagingStateManager) waitForLockedDescendants(root string) {
 // Modify, or Touch: the lease holder itself registers those, and blocking them
 // would deadlock.
 func (sm *StagingStateManager) AcquireWriteLease(path string) {
+	path = cleanPath(path)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -252,6 +269,7 @@ func (sm *StagingStateManager) AcquireWriteLease(path string) {
 
 // ReleaseWriteLease drops one reservation taken by AcquireWriteLease.
 func (sm *StagingStateManager) ReleaseWriteLease(path string) {
+	path = cleanPath(path)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -270,6 +288,7 @@ func (sm *StagingStateManager) ReleaseWriteLease(path string) {
 // guarantees of AcquireWriteLease it keeps descendant operations from syncing,
 // and returns only once syncs already running below root have finished.
 func (sm *StagingStateManager) AcquireWriteLeaseSubtree(root string) {
+	root = cleanPath(root)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -282,6 +301,7 @@ func (sm *StagingStateManager) AcquireWriteLeaseSubtree(root string) {
 
 // ReleaseWriteLeaseSubtree drops one reservation taken by AcquireWriteLeaseSubtree.
 func (sm *StagingStateManager) ReleaseWriteLeaseSubtree(root string) {
+	root = cleanPath(root)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -341,6 +361,7 @@ func (sm *StagingStateManager) notifyProgressUnlocked() {
 
 // Create marks a path as newly created
 func (sm *StagingStateManager) Create(path string) error {
+	path = cleanPath(path)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -360,6 +381,7 @@ func (sm *StagingStateManager) Create(path string) error {
 
 // CreateBulkUpload registers a path for bulk upload (will be deleted after sync, not cached)
 func (sm *StagingStateManager) CreateBulkUpload(path string) error {
+	path = cleanPath(path)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -378,6 +400,7 @@ func (sm *StagingStateManager) CreateBulkUpload(path string) error {
 
 // Modify marks a path as modified
 func (sm *StagingStateManager) Modify(path string) error {
+	path = cleanPath(path)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -431,6 +454,8 @@ func (sm *StagingStateManager) Modify(path string) error {
 // moved to the new logical path. Existing files retain an explicit RENAME action
 // so the background worker can order it ahead of later work at the new path.
 func (sm *StagingStateManager) Rename(oldPath, newPath string) (bool, error) {
+	oldPath = cleanPath(oldPath)
+	newPath = cleanPath(newPath)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -509,6 +534,8 @@ func (sm *StagingStateManager) Rename(oldPath, newPath string) (bool, error) {
 // work to the new logical subtree. For a never-synced directory no backend
 // rename is necessary; only its local metadata paths are moved.
 func (sm *StagingStateManager) RenameDir(oldPath, newPath string) (bool, error) {
+	oldPath = cleanPath(oldPath)
+	newPath = cleanPath(newPath)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -578,6 +605,7 @@ func (sm *StagingStateManager) Delete(path string) error {
 
 // DeleteWithForce marks a path as deleted and preserves the force option for sync.
 func (sm *StagingStateManager) DeleteWithForce(path string, force bool) error {
+	path = cleanPath(path)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -631,6 +659,7 @@ func (sm *StagingStateManager) DeleteWithForce(path string, force bool) error {
 
 // Mkdir marks a directory as created
 func (sm *StagingStateManager) Mkdir(path string) error {
+	path = cleanPath(path)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -652,6 +681,7 @@ func (sm *StagingStateManager) Mkdir(path string) error {
 // work in the subtree is collapsed before the RMDIR is persisted so background
 // sync can process only the operations required to make the collection empty.
 func (sm *StagingStateManager) Rmdir(path string, recurse bool, force bool) (bool, error) {
+	path = cleanPath(path)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -773,6 +803,7 @@ func (sm *StagingStateManager) Rmdir(path string, recurse bool, force bool) (boo
 // operation DAG, and in persistent storage. Callers must use this instead of
 // mutating metadata returned by Get.
 func (sm *StagingStateManager) Touch(path string) error {
+	path = cleanPath(path)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -790,6 +821,7 @@ func (sm *StagingStateManager) Touch(path string) error {
 // work. It undoes a registration whose local data could not be staged; nothing
 // happens when the operation has already been replaced or completed.
 func (sm *StagingStateManager) DiscardPendingOperation(path string, operationID string) error {
+	path = cleanPath(path)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -803,6 +835,7 @@ func (sm *StagingStateManager) DiscardPendingOperation(path string, operationID 
 
 // Get retrieves a copy of metadata for a path.
 func (sm *StagingStateManager) Get(path string) *StagingMetadata {
+	path = cleanPath(path)
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	meta := sm.metadata[path]
@@ -829,6 +862,7 @@ func (sm *StagingStateManager) GetAll() map[string]*StagingMetadata {
 }
 
 func (sm *StagingStateManager) IsRenamedFrom(path string) bool {
+	path = cleanPath(path)
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	for _, op := range sm.dag.nodes {
@@ -1494,6 +1528,7 @@ func (sm *StagingStateManager) retryBlockedOperations() {
 
 // WaitForSync blocks until the given path is no longer being synced.
 func (sm *StagingStateManager) WaitForSync(path string) {
+	path = cleanPath(path)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 

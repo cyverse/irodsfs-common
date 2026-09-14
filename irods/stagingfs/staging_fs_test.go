@@ -1927,3 +1927,80 @@ func TestStagingFSRecursiveRmdirRemovesStagedChildren(t *testing.T) {
 		t.Fatalf("recursive Rmdir left local data behind, stat error: %v", err)
 	}
 }
+
+func TestStagingFSNormalizesEquivalentPathSpellings(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	const canonical = "/dir/file.txt"
+	const alias = "/dir//sub/../file.txt"
+
+	f, err := sf.OpenForWrite(alias, false)
+	if err != nil {
+		t.Fatalf("OpenForWrite failed: %v", err)
+	}
+	if _, err := f.Write([]byte("data")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	sf.ReleaseRef(alias)
+
+	// Both spellings must name one staged file, one metadata entry and one
+	// operation; otherwise they would sync under separate locks.
+	if meta := sf.sm.Get(canonical); meta == nil || meta.Action != ActionUpload {
+		t.Fatalf("metadata at %q = %+v, want a pending upload", canonical, meta)
+	}
+	if size := sf.GetLocalFileSize(alias); size != 4 {
+		t.Fatalf("size via %q = %d, want 4", alias, size)
+	}
+	if got, want := sf.GetLocalDataPath(alias), sf.GetLocalDataPath(canonical); got != want {
+		t.Fatalf("local path via %q = %q, want %q", alias, got, want)
+	}
+	if candidates := sf.sm.getSyncCandidates(0, true); len(candidates) != 1 {
+		t.Fatalf("sync candidates = %d, want a single operation", len(candidates))
+	}
+}
+
+func TestStagingFSKeepsLocalDataInsideStagingRoot(t *testing.T) {
+	rootPath := t.TempDir()
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: rootPath,
+		Client:        &MockStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	dataPath := filepath.Join(rootPath, "data")
+	escaping := sf.GetLocalDataPath("/../../../../etc/passwd")
+	if !strings.HasPrefix(escaping, dataPath+string(os.PathSeparator)) {
+		t.Fatalf("local path %q escaped the staging data directory %q", escaping, dataPath)
+	}
+
+	const path = "/../../escape.txt"
+	f, err := sf.OpenForWrite(path, false)
+	if err != nil {
+		t.Fatalf("OpenForWrite failed: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	sf.ReleaseRef(path)
+
+	if _, err := os.Stat(filepath.Join(dataPath, "escape.txt")); err != nil {
+		t.Fatalf("staged file was not written inside the staging data directory: %v", err)
+	}
+}

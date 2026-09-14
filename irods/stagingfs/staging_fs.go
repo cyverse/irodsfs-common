@@ -258,15 +258,15 @@ func NewStagingFSWithPersistence(config *StagingFSConfig) (*StagingFS, error) {
 // getLocalDataPath returns the local file path for an iRODS path
 // Converts /iplant/home/user/test.txt to /staging/data/iplant/home/user/test.txt
 func (sf *StagingFS) getLocalDataPath(path string) string {
-	// Remove leading slash if present
-	if len(path) > 0 && path[0] == '/' {
-		path = path[1:]
-	}
-	return filepath.Join(sf.config.LocalRootPath, "data", path)
+	// Canonicalize first: without it a path such as "/../../etc/passwd" would
+	// join to a location outside the staging data directory.
+	path = cleanPath(path)
+	return filepath.Join(sf.config.LocalRootPath, "data", strings.TrimPrefix(path, "/"))
 }
 
 // Create creates a new file
 func (sf *StagingFS) Create(path string) error {
+	path = cleanPath(path)
 	if err := sf.sm.Create(path); err != nil {
 		return err
 	}
@@ -293,6 +293,7 @@ func (sf *StagingFS) Create(path string) error {
 // ReleaseHandle instead: a ref taken here is keyed by the path string, so a
 // rename between this call and the matching ReleaseRef releases the wrong path.
 func (sf *StagingFS) AcquireRef(path string) {
+	path = cleanPath(path)
 	sf.refMu.Lock()
 	sf.openRefs[path]++
 	sf.refMu.Unlock()
@@ -300,6 +301,7 @@ func (sf *StagingFS) AcquireRef(path string) {
 
 // ReleaseRef decrements the open-handle ref count for path.
 func (sf *StagingFS) ReleaseRef(path string) {
+	path = cleanPath(path)
 	sf.refMu.Lock()
 	sf.releaseRefUnlocked(path)
 	sf.refMu.Unlock()
@@ -317,6 +319,7 @@ func (sf *StagingFS) releaseRefUnlocked(path string) {
 // registration does not own the handle's open ref; the caller keeps releasing
 // that with ReleaseRef.
 func (sf *StagingFS) RegisterHandle(path string, h PathHolder) {
+	path = cleanPath(path)
 	sf.refMu.Lock()
 	sf.registerHandleUnlocked(path, h, false)
 	sf.refMu.Unlock()
@@ -326,6 +329,7 @@ func (sf *StagingFS) RegisterHandle(path string, h PathHolder) {
 // Only the registration is dropped; an owned open ref is not released, so
 // handles opened through the Open*For methods must use ReleaseHandle instead.
 func (sf *StagingFS) UnregisterHandle(path string, h PathHolder) {
+	path = cleanPath(path)
 	sf.refMu.Lock()
 	if reg := sf.handleRegs[h]; reg != nil {
 		path = reg.path
@@ -360,6 +364,7 @@ func (sf *StagingFS) ReleaseHandle(holder PathHolder) bool {
 // at once is what keeps a rename from moving the ref to the new path while the
 // handle is still only known by the old one.
 func (sf *StagingFS) acquireOpenHandle(path string, holder PathHolder) {
+	path = cleanPath(path)
 	sf.refMu.Lock()
 	sf.openRefs[path]++
 	if holder != nil {
@@ -390,6 +395,7 @@ func (sf *StagingFS) removeHandleUnlocked(path string, holder PathHolder) {
 
 // hasOpenRef returns true if path currently has open write handles.
 func (sf *StagingFS) hasOpenRef(path string) bool {
+	path = cleanPath(path)
 	sf.refMu.Lock()
 	defer sf.refMu.Unlock()
 	return sf.openRefs[path] > 0
@@ -409,6 +415,7 @@ func (sf *StagingFS) OpenForWrite(path string, bulk bool) (*os.File, error) {
 // then never move the ref to the new path while holder is still recorded (or
 // released) under the old one. ReleaseHandle undoes both.
 func (sf *StagingFS) OpenForWriteFor(path string, bulk bool, holder PathHolder) (*os.File, error) {
+	path = cleanPath(path)
 	// Keep SyncAll from passing its open-ref check until this handle is fully
 	// registered. The ref itself protects the file after this method returns.
 	sf.syncAllMu.Lock()
@@ -466,6 +473,7 @@ func (sf *StagingFS) OpenForWriteFor(path string, bulk bool, holder PathHolder) 
 // OpenForRead opens a staged file for reading only. Returns an error if the file
 // is not present locally in staging.
 func (sf *StagingFS) OpenForRead(path string) (*os.File, error) {
+	path = cleanPath(path)
 	localPath := sf.getLocalDataPath(path)
 
 	f, err := os.Open(localPath)
@@ -480,6 +488,7 @@ func (sf *StagingFS) OpenForRead(path string) (*os.File, error) {
 // keeps eviction from removing the entry before it is opened, and a successful
 // open refreshes its LRU timestamp. found is false when path is not cached.
 func (sf *StagingFS) OpenCachedForRead(path string) (file *os.File, metadata *StagingMetadata, found bool, err error) {
+	path = cleanPath(path)
 	sf.cacheMutex.Lock()
 	defer sf.cacheMutex.Unlock()
 
@@ -500,6 +509,7 @@ func (sf *StagingFS) OpenCachedForRead(path string) (file *os.File, metadata *St
 
 // TruncateFile truncates a staged file to the given size.
 func (sf *StagingFS) TruncateFile(path string, size int64) error {
+	path = cleanPath(path)
 	// Hold the path against sync for the whole truncate: waiting for an
 	// in-flight sync alone would still let a candidate selected moments earlier
 	// upload the file halfway through this truncate.
@@ -547,14 +557,17 @@ func (sf *StagingFS) OpenForReadWriteFrom(logicalPath string, sourcePath string,
 // holder, downloading from sourcePath when no local staged copy exists.
 // See OpenForWriteFor for why the registration is taken with the open ref.
 func (sf *StagingFS) OpenForReadWriteFromFor(logicalPath string, sourcePath string, bulk bool, holder PathHolder) (*os.File, error) {
+	logicalPath = cleanPath(logicalPath)
+	if sourcePath == "" {
+		sourcePath = logicalPath
+	} else {
+		sourcePath = cleanPath(sourcePath)
+	}
+
 	// Keep SyncAll from passing its open-ref check until this handle is fully
 	// registered. The ref itself protects the file after this method returns.
 	sf.syncAllMu.Lock()
 	defer sf.syncAllMu.Unlock()
-
-	if sourcePath == "" {
-		sourcePath = logicalPath
-	}
 
 	// See OpenForWrite: the lease spans metadata registration and the open.
 	sf.sm.AcquireWriteLease(logicalPath)
@@ -631,6 +644,8 @@ func (sf *StagingFS) downloadFileAtomically(sourcePath string, localPath string)
 
 // Rename renames a file
 func (sf *StagingFS) Rename(oldPath, newPath string) error {
+	oldPath = cleanPath(oldPath)
+	newPath = cleanPath(newPath)
 	// Reserve both paths for the whole rename. Without this a background worker
 	// could run the queued backend rename, or an upload depending on it, while
 	// the local file still sits at the old path.
@@ -721,6 +736,8 @@ func rollbackLocalRename(renamed bool, currentPath string, originalPath string) 
 
 // RenameDir renames a directory
 func (sf *StagingFS) RenameDir(oldPath, newPath string) error {
+	oldPath = cleanPath(oldPath)
+	newPath = cleanPath(newPath)
 	// Reserve both subtrees for the whole rename, so no descendant operation is
 	// synced against a path that only half of this rename has moved yet.
 	sf.sm.AcquireWriteLeaseSubtree(oldPath)
@@ -830,6 +847,7 @@ func (sf *StagingFS) Delete(path string) error {
 
 // DeleteWithForce deletes a file and preserves the force option for sync.
 func (sf *StagingFS) DeleteWithForce(path string, force bool) error {
+	path = cleanPath(path)
 	if err := sf.sm.DeleteWithForce(path, force); err != nil {
 		return err
 	}
@@ -851,6 +869,7 @@ func (sf *StagingFS) DeleteWithForce(path string, force bool) error {
 
 // Mkdir creates a directory
 func (sf *StagingFS) Mkdir(path string) error {
+	path = cleanPath(path)
 	if err := sf.sm.Mkdir(path); err != nil {
 		return err
 	}
@@ -868,6 +887,7 @@ func (sf *StagingFS) Mkdir(path string) error {
 // A non-recursive removal behaves like POSIX rmdir: it refuses a directory that
 // still holds staged data instead of destroying that data recursively.
 func (sf *StagingFS) Rmdir(path string, recurse bool, force bool) error {
+	path = cleanPath(path)
 	localPath := sf.getLocalDataPath(path)
 
 	if !recurse {
@@ -1368,6 +1388,7 @@ func (sf *StagingFS) GetLocalDataPath(path string) string {
 // data does not leave a stale local cache entry. Only affects StagingFileCached entries;
 // dirty (pending sync) entries are left untouched.
 func (sf *StagingFS) EvictCachedFile(path string) {
+	path = cleanPath(path)
 	sf.cacheMutex.Lock()
 	_, exists := sf.cachedItems[path]
 	if exists {
@@ -1388,6 +1409,7 @@ func (sf *StagingFS) EvictCachedFile(path string) {
 // it as ActionBulkUpload. The background sync worker uploads it to iRODS and then immediately
 // deletes the local copy (unlike ActionUpload which keeps the file as a read cache).
 func (sf *StagingFS) StageForBulkUpload(localPath, irodsPath string) error {
+	irodsPath = cleanPath(irodsPath)
 	info, err := os.Stat(localPath)
 	if err != nil {
 		return errors.Wrap(err, "failed to stat source file")
@@ -1484,6 +1506,7 @@ func copyFileToTemp(src, dst string) (string, error) {
 
 // GetLocalFileSize returns the size of the local staged file, or -1 if not found
 func (sf *StagingFS) GetLocalFileSize(path string) int64 {
+	path = cleanPath(path)
 	localPath := sf.getLocalDataPath(path)
 	info, err := os.Stat(localPath)
 	if err != nil {
@@ -1495,6 +1518,7 @@ func (sf *StagingFS) GetLocalFileSize(path string) int64 {
 // IsRenamedFrom checks if the given path was renamed away by any staging entry.
 // Returns true if some entry has OldPath == path (meaning this path no longer exists).
 func (sf *StagingFS) IsRenamedFrom(path string) bool {
+	path = cleanPath(path)
 	return sf.sm.IsRenamedFrom(path)
 }
 
@@ -1504,6 +1528,7 @@ func (sf *StagingFS) GetPendingRenames() []*StagingMetadata {
 
 // Get retrieves metadata for a path
 func (sf *StagingFS) Get(path string) *StagingMetadata {
+	path = cleanPath(path)
 	return sf.sm.Get(path)
 }
 
@@ -1646,6 +1671,7 @@ func (sf *StagingFS) releaseQuota(size int64) {
 // it. Without this a single open handle could write past the quota, because the
 // file size is otherwise only counted when the handle is closed.
 func (sf *StagingFS) ReserveFileGrowth(path string, newSize int64) error {
+	path = cleanPath(path)
 	current := sf.getFileSize(path)
 	if newSize <= current {
 		return nil
@@ -1825,6 +1851,7 @@ func (sf *StagingFS) getFileSize(path string) int64 {
 // file size from disk and updates per-path tracking so the global counter reflects all
 // bytes written via WriteAt since the handle was opened.
 func (sf *StagingFS) NotifyFileClosed(path string) {
+	path = cleanPath(path)
 	localPath := sf.getLocalDataPath(path)
 	if info, err := os.Stat(localPath); err == nil {
 		sf.setPathSize(path, info.Size())
