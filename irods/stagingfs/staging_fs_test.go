@@ -2004,3 +2004,158 @@ func TestStagingFSKeepsLocalDataInsideStagingRoot(t *testing.T) {
 		t.Fatalf("staged file was not written inside the staging data directory: %v", err)
 	}
 }
+
+// recordingHandler records backend actions and fails the first attempt of one
+// action type, so ordering has to come from the operation DAG rather than from
+// the order in which the operations happened to be created.
+func recordingHandler(actions *[]string, failFirst ActionType) ActionHandler {
+	failed := false
+	return func(meta *StagingMetadata) error {
+		*actions = append(*actions, fmt.Sprintf("%s %s", meta.Action, meta.Path))
+		if meta.Action == failFirst && !failed {
+			failed = true
+			return errors.New("backend unavailable")
+		}
+		return nil
+	}
+}
+
+func TestStagingFSRenameOntoDeletedPathWaitsForTheDelete(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	var actions []string
+	sf.RegisterActionHandler(recordingHandler(&actions, ActionDelete))
+
+	if err := sf.Delete("/b.txt"); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+	if err := sf.Rename("/a.txt", "/b.txt"); err != nil {
+		t.Fatalf("Rename failed: %v", err)
+	}
+
+	// The rename is urgent and the delete is not, so without a dependency the
+	// rename runs first and the delete then removes the renamed object.
+	if err := sf.sm.SyncOld(0); err == nil {
+		t.Fatal("expected the first delete attempt to fail")
+	}
+	if len(actions) != 1 || actions[0] != "DELETE /b.txt" {
+		t.Fatalf("actions after the failed delete = %v, want only the delete attempt", actions)
+	}
+
+	if err := sf.sm.SyncAll(); err != nil {
+		t.Fatalf("SyncAll failed: %v", err)
+	}
+	want := []string{"DELETE /b.txt", "DELETE /b.txt", "RENAME /b.txt"}
+	if len(actions) != len(want) {
+		t.Fatalf("actions = %v, want %v", actions, want)
+	}
+	for i := range want {
+		if actions[i] != want[i] {
+			t.Fatalf("actions = %v, want %v", actions, want)
+		}
+	}
+}
+
+func TestStagingFSMkdirAtDeletedPathWaitsForTheDelete(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	var actions []string
+	sf.RegisterActionHandler(recordingHandler(&actions, ActionDelete))
+
+	if err := sf.Delete("/x"); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+	if err := sf.Mkdir("/x"); err != nil {
+		t.Fatalf("Mkdir failed: %v", err)
+	}
+
+	if err := sf.sm.SyncOld(0); err == nil {
+		t.Fatal("expected the first delete attempt to fail")
+	}
+	if len(actions) != 1 || actions[0] != "DELETE /x" {
+		t.Fatalf("actions after the failed delete = %v, want only the delete attempt", actions)
+	}
+
+	if err := sf.sm.SyncAll(); err != nil {
+		t.Fatalf("SyncAll failed: %v", err)
+	}
+	want := []string{"DELETE /x", "DELETE /x", "MKDIR /x"}
+	if len(actions) != len(want) {
+		t.Fatalf("actions = %v, want %v", actions, want)
+	}
+	for i := range want {
+		if actions[i] != want[i] {
+			t.Fatalf("actions = %v, want %v", actions, want)
+		}
+	}
+}
+
+func TestStagingFSCreateFileWhereDirectoryRemovalIsPending(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	var actions []string
+	sf.RegisterActionHandler(func(meta *StagingMetadata) error {
+		actions = append(actions, fmt.Sprintf("%s %s", meta.Action, meta.Path))
+		return nil
+	})
+
+	const path = "/replaced"
+	if err := sf.Rmdir(path, false, false); err != nil {
+		t.Fatalf("Rmdir failed: %v", err)
+	}
+
+	// Creating a file where a directory removal is still pending must be
+	// queued behind that removal, not refused for the whole grace period.
+	f, err := sf.OpenForWrite(path, false)
+	if err != nil {
+		t.Fatalf("OpenForWrite at a path with a pending directory removal failed: %v", err)
+	}
+	if _, err := f.Write([]byte("replacement")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	sf.NotifyFileClosed(path)
+	sf.ReleaseRef(path)
+
+	meta := sf.sm.Get(path)
+	if meta == nil || meta.Action != ActionUpload || !meta.IsNew {
+		t.Fatalf("staging metadata = %+v, want a new pending upload", meta)
+	}
+
+	if err := sf.sm.SyncAll(); err != nil {
+		t.Fatalf("SyncAll failed: %v", err)
+	}
+	want := []string{"RMDIR " + path, "UPLOAD " + path}
+	if len(actions) != len(want) || actions[0] != want[0] || actions[1] != want[1] {
+		t.Fatalf("actions = %v, want %v", actions, want)
+	}
+}

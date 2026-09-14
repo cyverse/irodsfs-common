@@ -409,13 +409,17 @@ func (sm *StagingStateManager) Modify(path string) error {
 	sm.waitForPathsUnlocked(path)
 
 	meta, exists := sm.metadata[path]
-	if exists && meta.Action == ActionRename {
+	if exists && (meta.Action == ActionRename || meta.Action == ActionRmdir) {
+		// The pending operation has to reach the backend before this upload:
+		// the rename that moved the object here, or the removal of the
+		// directory that used to occupy the path. After a removal the object
+		// is new, so it must not be looked up in the backend either.
 		now := time.Now()
 		uploadMeta := &StagingMetadata{
 			Path:           path,
 			OldPath:        meta.OldPath,
 			Action:         ActionUpload,
-			IsNew:          false,
+			IsNew:          meta.Action == ActionRmdir,
 			CreatedAt:      meta.CreatedAt,
 			LastModifiedAt: now,
 		}
@@ -1312,6 +1316,16 @@ func (sm *StagingStateManager) persistMetadata(path string, meta *StagingMetadat
 }
 
 func (sm *StagingStateManager) enqueueOperation(path string, meta *StagingMetadata, dependencies []string, urgent bool) error {
+	// A pending operation already registered for this path keeps its place in
+	// the queue: the new operation replaces it logically but must reach the
+	// backend after it. Without this, a delete of the path could run after the
+	// rename that later moved another object onto it, removing the new object.
+	if pending := sm.metadata[path]; pending != nil && pending.OperationID != "" {
+		if op := sm.dag.get(pending.OperationID); op != nil {
+			dependencies = append(dependencies, op.ID)
+		}
+	}
+
 	rmdirParents := make([]string, 0)
 	for id, op := range sm.dag.nodes {
 		if op.Metadata.Action != ActionRenameDir && op.Metadata.Action != ActionRmdir {
