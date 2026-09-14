@@ -22,6 +22,11 @@ import (
 
 type releaseErrorStagingClient struct{}
 
+type renameRaceStagingClient struct {
+	releaseErrorStagingClient
+	downloadAttempts []string
+}
+
 func (c *releaseErrorStagingClient) DownloadFileParallel(string, string, int, irodsclient_common.TransferTrackerCallback) error {
 	return nil
 }
@@ -35,6 +40,18 @@ func (c *releaseErrorStagingClient) RenameDirToDir(string, string) error   { ret
 func (c *releaseErrorStagingClient) RemoveFile(string, bool) error         { return nil }
 func (c *releaseErrorStagingClient) MakeDir(string, bool) error            { return nil }
 func (c *releaseErrorStagingClient) RemoveDir(string, bool, bool) error    { return nil }
+
+func (c *renameRaceStagingClient) DownloadFileParallel(path string, localPath string, _ int, _ irodsclient_common.TransferTrackerCallback) error {
+	c.downloadAttempts = append(c.downloadAttempts, path)
+	if path == "/old.txt" {
+		return irodsclient_types.NewFileNotFoundError(path)
+	}
+	return os.WriteFile(localPath, []byte("renamed contents"), 0644)
+}
+
+func (c *renameRaceStagingClient) UploadFileParallel(string, string, int, irodsclient_common.TransferTrackerCallback) error {
+	return nil
+}
 
 func TestBufferedClientReleaseReturnsStagingCloseError(t *testing.T) {
 	rootPath := t.TempDir()
@@ -257,6 +274,82 @@ func TestBufferedClientResolvesPendingRenameSource(t *testing.T) {
 	assert.Equal(t, "/old", client.resolvePendingRenameSource("/new"))
 	assert.Equal(t, "/old/child/file.txt", client.resolvePendingRenameSource("/new/child/file.txt"))
 	assert.Equal(t, "/unrelated/file.txt", client.resolvePendingRenameSource("/unrelated/file.txt"))
+}
+
+func TestExecuteWithRenameFallbackReResolvesIntermediatePath(t *testing.T) {
+	resolverCalls := 0
+	resolver := func(string) string {
+		resolverCalls++
+		if resolverCalls == 1 {
+			return "/old/file.txt"
+		}
+		return "/middle/file.txt"
+	}
+	var attempts []string
+	value, backendPath, err := executeWithRenameFallback("/new/file.txt", resolver, func(path string) (string, error) {
+		attempts = append(attempts, path)
+		if path == "/middle/file.txt" {
+			return "contents", nil
+		}
+		return "", irodsclient_types.NewFileNotFoundError(path)
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "contents", value)
+	assert.Equal(t, "/middle/file.txt", backendPath)
+	assert.Equal(t, []string{"/old/file.txt", "/middle/file.txt"}, attempts)
+}
+
+func TestExecuteWithRenameFallbackTriesLogicalPathAfterStaleSnapshot(t *testing.T) {
+	resolver := func(string) string { return "/old/file.txt" }
+	var attempts []string
+	_, backendPath, err := executeWithRenameFallback("/new/file.txt", resolver, func(path string) (struct{}, error) {
+		attempts = append(attempts, path)
+		if path == "/new/file.txt" {
+			return struct{}{}, nil
+		}
+		return struct{}{}, irodsclient_types.NewFileNotFoundError(path)
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "/new/file.txt", backendPath)
+	assert.Equal(t, []string{"/old/file.txt", "/new/file.txt"}, attempts)
+}
+
+func TestExecuteWithRenameFallbackDoesNotRetryOtherErrors(t *testing.T) {
+	wantErr := errors.New("permission denied")
+	attempts := 0
+	_, backendPath, err := executeWithRenameFallback("/new/file.txt", func(string) string {
+		return "/old/file.txt"
+	}, func(string) (struct{}, error) {
+		attempts++
+		return struct{}{}, wantErr
+	})
+	require.ErrorIs(t, err, wantErr)
+	assert.Equal(t, "/old/file.txt", backendPath)
+	assert.Equal(t, 1, attempts)
+}
+
+func TestOpenStagedForReadWriteRetriesLogicalPathAfterRenameCompletes(t *testing.T) {
+	backend := &renameRaceStagingClient{}
+	staging, err := stagingfs.NewStagingFS(&stagingfs.StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        backend,
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = staging.Close() })
+	require.NoError(t, staging.Rename("/old.txt", "/new.txt"))
+
+	client := &IRODSFSClientBuffered{staging: staging}
+	f, err := client.openStagedForReadWrite("/new.txt", false)
+	require.NoError(t, err)
+	data, err := os.ReadFile(f.Name())
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	staging.ReleaseRef("/new.txt")
+
+	assert.Equal(t, []string{"/old.txt", "/new.txt"}, backend.downloadAttempts)
+	assert.Equal(t, "renamed contents", string(data))
 }
 
 func TestBufferedClientShouldCacheFileUsesSmallerLimit(t *testing.T) {

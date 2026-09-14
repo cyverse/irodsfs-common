@@ -209,8 +209,7 @@ func (c *IRODSFSClientBuffered) GetMetrics() *irodsclient_metrics.IRODSMetrics {
 }
 
 func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, error) {
-	remoteDirPath := c.resolvePendingRenameSource(dirPath)
-	entries, err := c.client.List(remoteDirPath)
+	entries, remoteDirPath, err := executeWithRenameFallback(dirPath, c.resolvePendingRenameSource, c.client.List)
 	if err != nil {
 		entries = []*irodsclient_fs.Entry{}
 	}
@@ -497,7 +496,7 @@ func (c *IRODSFSClientBuffered) Stat(filePath string) (*irodsclient_fs.Entry, er
 				}
 
 				// Modified existing file — get base entry from iRODS, override size
-				entry, err := c.client.Stat(c.resolvePendingRenameSource(filePath))
+				entry, _, err := executeWithRenameFallback(filePath, c.resolvePendingRenameSource, c.client.Stat)
 				if err != nil {
 					if irodsclient_types.IsFileNotFoundError(err) {
 						// A dirty local copy remains authoritative even if the
@@ -546,7 +545,7 @@ func (c *IRODSFSClientBuffered) Stat(filePath string) (*irodsclient_fs.Entry, er
 		}
 	}
 
-	entry, err := c.client.Stat(c.resolvePendingRenameSource(filePath))
+	entry, _, err := executeWithRenameFallback(filePath, c.resolvePendingRenameSource, c.client.Stat)
 	if err != nil {
 		// A rename is asynchronous. Until its predecessor operation reaches
 		// iRODS, the destination does not exist remotely even though it is
@@ -594,6 +593,56 @@ func (c *IRODSFSClientBuffered) resolvePendingRenameSource(logicalPath string) s
 	}
 
 	return resolvedPath
+}
+
+// executeWithRenameFallback retries a backend operation when an asynchronous
+// rename moves the object after its source path was resolved. Re-resolving
+// supports chained renames where the currently valid backend path may be an
+// intermediate destination rather than the final logical path.
+func executeWithRenameFallback[T any](logicalPath string, resolver func(string) string, operation func(string) (T, error)) (T, string, error) {
+	attempted := map[string]struct{}{}
+	backendPath := resolver(logicalPath)
+
+	for {
+		value, err := operation(backendPath)
+		if err == nil || !irodsclient_types.IsFileNotFoundError(err) {
+			return value, backendPath, err
+		}
+		attempted[backendPath] = struct{}{}
+
+		nextPath := resolver(logicalPath)
+		if _, exists := attempted[nextPath]; exists {
+			nextPath = logicalPath
+		}
+		if _, exists := attempted[nextPath]; exists {
+			return value, backendPath, err
+		}
+		backendPath = nextPath
+	}
+}
+
+func (c *IRODSFSClientBuffered) executeWithRenameFallback(logicalPath string, operation func(string) error) (string, error) {
+	_, backendPath, err := executeWithRenameFallback(logicalPath, c.resolvePendingRenameSource, func(path string) (struct{}, error) {
+		return struct{}{}, operation(path)
+	})
+	return backendPath, err
+}
+
+func (c *IRODSFSClientBuffered) existsWithRenameFallback(logicalPath string, exists func(string) bool) bool {
+	_, _, err := executeWithRenameFallback(logicalPath, c.resolvePendingRenameSource, func(path string) (struct{}, error) {
+		if exists(path) {
+			return struct{}{}, nil
+		}
+		return struct{}{}, irodsclient_types.NewFileNotFoundError(path)
+	})
+	return err == nil
+}
+
+func (c *IRODSFSClientBuffered) openStagedForReadWrite(path string, bulk bool) (*os.File, error) {
+	f, _, err := executeWithRenameFallback(path, c.resolvePendingRenameSource, func(sourcePath string) (*os.File, error) {
+		return c.staging.OpenForReadWriteFrom(path, sourcePath, bulk)
+	})
+	return f, err
 }
 
 func (c *IRODSFSClientBuffered) setLogicalEntryPath(entry *irodsclient_fs.Entry, logicalPath string) {
@@ -699,7 +748,7 @@ func (c *IRODSFSClientBuffered) ExistsDir(dirPath string) bool {
 			return false
 		}
 	}
-	return c.client.ExistsDir(c.resolvePendingRenameSource(dirPath))
+	return c.existsWithRenameFallback(dirPath, c.client.ExistsDir)
 }
 
 func (c *IRODSFSClientBuffered) ExistsFile(filePath string) bool {
@@ -720,7 +769,7 @@ func (c *IRODSFSClientBuffered) ExistsFile(filePath string) bool {
 			return false
 		}
 	}
-	return c.client.ExistsFile(c.resolvePendingRenameSource(filePath))
+	return c.existsWithRenameFallback(filePath, c.client.ExistsFile)
 }
 
 func (c *IRODSFSClientBuffered) hasPendingRenameDestination(filePath string, action stagingfs.ActionType) bool {
@@ -874,7 +923,7 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 		}
 
 		if openMode.IsRead() {
-			f, stagingErr := c.staging.OpenForReadWriteFrom(path, c.resolvePendingRenameSource(path), false)
+			f, stagingErr := c.openStagedForReadWrite(path, false)
 			if stagingErr != nil {
 				if !errors.Is(stagingErr, stagingfs.ErrQuotaExceeded) {
 					return nil, stagingErr
@@ -900,7 +949,7 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 				return h, nil
 			}
 		} else {
-			f, stagingErr := c.staging.OpenForReadWriteFrom(path, c.resolvePendingRenameSource(path), false)
+			f, stagingErr := c.openStagedForReadWrite(path, false)
 			if stagingErr != nil {
 				if !errors.Is(stagingErr, stagingfs.ErrQuotaExceeded) {
 					return nil, stagingErr
@@ -931,7 +980,9 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 	}
 
 	// No staging or file not in staging: use cached read path
-	handle, err := c.client.OpenFile(c.resolvePendingRenameSource(path), mode)
+	handle, _, err := executeWithRenameFallback(path, c.resolvePendingRenameSource, func(backendPath string) (IRODSFSFileHandle, error) {
+		return c.client.OpenFile(backendPath, mode)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1008,7 +1059,7 @@ func (c *IRODSFSClientBuffered) OpenFileBulk(path string, mode string) (IRODSFSF
 		}
 
 		if openMode.IsRead() {
-			f, stagingErr := c.staging.OpenForReadWriteFrom(path, c.resolvePendingRenameSource(path), true)
+			f, stagingErr := c.openStagedForReadWrite(path, true)
 			if stagingErr != nil {
 				if !errors.Is(stagingErr, stagingfs.ErrQuotaExceeded) {
 					return nil, stagingErr
@@ -1034,7 +1085,7 @@ func (c *IRODSFSClientBuffered) OpenFileBulk(path string, mode string) (IRODSFSF
 				return h, nil
 			}
 		} else {
-			f, stagingErr := c.staging.OpenForReadWriteFrom(path, c.resolvePendingRenameSource(path), true)
+			f, stagingErr := c.openStagedForReadWrite(path, true)
 			if stagingErr != nil {
 				if !errors.Is(stagingErr, stagingfs.ErrQuotaExceeded) {
 					return nil, stagingErr
@@ -1062,7 +1113,9 @@ func (c *IRODSFSClientBuffered) OpenFileBulk(path string, mode string) (IRODSFSF
 		}
 	}
 
-	handle, err := c.client.OpenFile(c.resolvePendingRenameSource(path), mode)
+	handle, _, err := executeWithRenameFallback(path, c.resolvePendingRenameSource, func(backendPath string) (IRODSFSFileHandle, error) {
+		return c.client.OpenFile(backendPath, mode)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1082,7 +1135,10 @@ func (c *IRODSFSClientBuffered) TruncateFile(path string, size int64) error {
 			return c.staging.TruncateFile(path, size)
 		}
 	}
-	return c.client.TruncateFile(c.resolvePendingRenameSource(path), size)
+	_, err := c.executeWithRenameFallback(path, func(backendPath string) error {
+		return c.client.TruncateFile(backendPath, size)
+	})
+	return err
 }
 
 func (c *IRODSFSClientBuffered) validateFileCacheForOpen(path string, handle IRODSFSFileHandle, logger *log.Entry) {
@@ -1184,8 +1240,7 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 		return f.Close()
 	}
 
-	remotePath := c.resolvePendingRenameSource(irodsPath)
-	entry, err := c.client.Stat(remotePath)
+	entry, _, err := executeWithRenameFallback(irodsPath, c.resolvePendingRenameSource, c.client.Stat)
 	if err != nil {
 		return errors.Wrap(err, "failed to stat file for cache check")
 	}
@@ -1214,7 +1269,10 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 		return nil
 	}
 
-	_, err = c.client.fs.DownloadFileParallelWithCallback(remotePath, "", c.helper.GetBlockSize(), 3, blockReadyCallback, 4, transferCallback)
+	_, err = c.executeWithRenameFallback(irodsPath, func(backendPath string) error {
+		_, downloadErr := c.client.fs.DownloadFileParallelWithCallback(backendPath, "", c.helper.GetBlockSize(), 3, blockReadyCallback, 4, transferCallback)
+		return downloadErr
+	})
 	if err == nil {
 		c.storeCacheFileMeta(irodsPath, entry)
 	}
@@ -1249,14 +1307,16 @@ func (c *IRODSFSClientBuffered) DownloadFile(irodsPath string, localPath string,
 		return err
 	}
 
-	remotePath := c.resolvePendingRenameSource(irodsPath)
-	entry, err := c.client.Stat(remotePath)
+	entry, _, err := executeWithRenameFallback(irodsPath, c.resolvePendingRenameSource, c.client.Stat)
 	if err != nil {
 		return errors.Wrap(err, "failed to stat file")
 	}
 	if !c.shouldCacheFile(entry.Size) {
 		_ = c.invalidateFileCacheBlocksHint(irodsPath, entry.Size)
-		_, err = c.client.fs.DownloadFileWithCallback(remotePath, "", c.helper.GetBlockSize(), 3, writeCallback, transferCallback)
+		_, err = c.executeWithRenameFallback(irodsPath, func(backendPath string) error {
+			_, downloadErr := c.client.fs.DownloadFileWithCallback(backendPath, "", c.helper.GetBlockSize(), 3, writeCallback, transferCallback)
+			return downloadErr
+		})
 		return err
 	}
 
@@ -1280,7 +1340,10 @@ func (c *IRODSFSClientBuffered) DownloadFile(irodsPath string, localPath string,
 		return writeCallback(data, offset)
 	}
 
-	_, err = c.client.fs.DownloadFileWithCallback(remotePath, "", cacheBlockSize, 3, cachedWriteCallback, transferCallback)
+	_, err = c.executeWithRenameFallback(irodsPath, func(backendPath string) error {
+		_, downloadErr := c.client.fs.DownloadFileWithCallback(backendPath, "", cacheBlockSize, 3, cachedWriteCallback, transferCallback)
+		return downloadErr
+	})
 	if err == nil {
 		c.storeCacheFileMeta(irodsPath, entry)
 	}
@@ -1316,14 +1379,16 @@ func (c *IRODSFSClientBuffered) DownloadFileParallel(irodsPath string, localPath
 		return err
 	}
 
-	remotePath := c.resolvePendingRenameSource(irodsPath)
-	entry, err := c.client.Stat(remotePath)
+	entry, _, err := executeWithRenameFallback(irodsPath, c.resolvePendingRenameSource, c.client.Stat)
 	if err != nil {
 		return errors.Wrap(err, "failed to stat file")
 	}
 	if !c.shouldCacheFile(entry.Size) {
 		_ = c.invalidateFileCacheBlocksHint(irodsPath, entry.Size)
-		_, err = c.client.fs.DownloadFileParallelWithCallback(remotePath, "", c.helper.GetBlockSize(), taskNum*3, writeCallback, taskNum, transferCallback)
+		_, err = c.executeWithRenameFallback(irodsPath, func(backendPath string) error {
+			_, downloadErr := c.client.fs.DownloadFileParallelWithCallback(backendPath, "", c.helper.GetBlockSize(), taskNum*3, writeCallback, taskNum, transferCallback)
+			return downloadErr
+		})
 		return err
 	}
 
@@ -1347,7 +1412,10 @@ func (c *IRODSFSClientBuffered) DownloadFileParallel(irodsPath string, localPath
 		return writeCallback(data, offset)
 	}
 
-	_, err = c.client.fs.DownloadFileParallelWithCallback(remotePath, "", cacheBlockSize, taskNum*3, cachedWriteCallback, taskNum, transferCallback)
+	_, err = c.executeWithRenameFallback(irodsPath, func(backendPath string) error {
+		_, downloadErr := c.client.fs.DownloadFileParallelWithCallback(backendPath, "", cacheBlockSize, taskNum*3, cachedWriteCallback, taskNum, transferCallback)
+		return downloadErr
+	})
 	if err == nil {
 		c.storeCacheFileMeta(irodsPath, entry)
 	}
@@ -1366,17 +1434,19 @@ func (c *IRODSFSClientBuffered) DownloadFileWithCallback(irodsPath string, block
 	if handled, err := c.downloadFromStagingIfAvailable(irodsPath, blockSize, blockReadyCallback, transferCallback); handled {
 		return err
 	}
-	remotePath := c.resolvePendingRenameSource(irodsPath)
 
 	cacheBlockSize := c.helper.GetBlockSize()
 	if blockSize == cacheBlockSize {
-		entry, err := c.client.Stat(remotePath)
+		entry, _, err := executeWithRenameFallback(irodsPath, c.resolvePendingRenameSource, c.client.Stat)
 		if err != nil {
 			return errors.Wrap(err, "failed to stat file")
 		}
 		if !c.shouldCacheFile(entry.Size) {
 			_ = c.invalidateFileCacheBlocksHint(irodsPath, entry.Size)
-			_, err = c.fs.DownloadFileWithCallback(remotePath, "", blockSize, numBlocks, blockReadyCallback, transferCallback)
+			_, err = c.executeWithRenameFallback(irodsPath, func(backendPath string) error {
+				_, downloadErr := c.fs.DownloadFileWithCallback(backendPath, "", blockSize, numBlocks, blockReadyCallback, transferCallback)
+				return downloadErr
+			})
 			return err
 		}
 
@@ -1398,14 +1468,20 @@ func (c *IRODSFSClientBuffered) DownloadFileWithCallback(irodsPath string, block
 			}
 			return blockReadyCallback(data, offset)
 		}
-		_, err = c.fs.DownloadFileWithCallback(remotePath, "", blockSize, numBlocks, cachedCallback, transferCallback)
+		_, err = c.executeWithRenameFallback(irodsPath, func(backendPath string) error {
+			_, downloadErr := c.fs.DownloadFileWithCallback(backendPath, "", blockSize, numBlocks, cachedCallback, transferCallback)
+			return downloadErr
+		})
 		if err == nil {
 			c.storeCacheFileMeta(irodsPath, entry)
 		}
 		return err
 	}
 
-	_, err := c.fs.DownloadFileWithCallback(remotePath, "", blockSize, numBlocks, blockReadyCallback, transferCallback)
+	_, err := c.executeWithRenameFallback(irodsPath, func(backendPath string) error {
+		_, downloadErr := c.fs.DownloadFileWithCallback(backendPath, "", blockSize, numBlocks, blockReadyCallback, transferCallback)
+		return downloadErr
+	})
 	return err
 }
 
@@ -1437,7 +1513,7 @@ func (c *IRODSFSClientBuffered) openStagedForRead(irodsPath string) (*os.File, b
 	// Synced staging data is a read-cache, unlike a pending upload. Validate it
 	// against the remote state before serving it, then discard it on any failed
 	// validation so future reads cannot observe stale local data.
-	remoteEntry, statErr := c.client.Stat(c.resolvePendingRenameSource(irodsPath))
+	remoteEntry, _, statErr := executeWithRenameFallback(irodsPath, c.resolvePendingRenameSource, c.client.Stat)
 	isFresh := statErr == nil && remoteEntry != nil && cachedMeta.RemoteFreshnessKnown &&
 		cachedMeta.RemoteSize == remoteEntry.Size && cachedMeta.RemoteModifyTime.Equal(remoteEntry.ModifyTime)
 	if !isFresh {
@@ -1506,17 +1582,19 @@ func (c *IRODSFSClientBuffered) DownloadFileParallelWithCallback(irodsPath strin
 	if handled, err := c.downloadFromStagingIfAvailable(irodsPath, blockSize, blockReadyCallback, transferCallback); handled {
 		return err
 	}
-	remotePath := c.resolvePendingRenameSource(irodsPath)
 
 	cacheBlockSize := c.helper.GetBlockSize()
 	if blockSize == cacheBlockSize {
-		entry, err := c.client.Stat(remotePath)
+		entry, _, err := executeWithRenameFallback(irodsPath, c.resolvePendingRenameSource, c.client.Stat)
 		if err != nil {
 			return errors.Wrap(err, "failed to stat file")
 		}
 		if !c.shouldCacheFile(entry.Size) {
 			_ = c.invalidateFileCacheBlocksHint(irodsPath, entry.Size)
-			_, err = c.fs.DownloadFileParallelWithCallback(remotePath, "", blockSize, numBlocks, blockReadyCallback, taskNum, transferCallback)
+			_, err = c.executeWithRenameFallback(irodsPath, func(backendPath string) error {
+				_, downloadErr := c.fs.DownloadFileParallelWithCallback(backendPath, "", blockSize, numBlocks, blockReadyCallback, taskNum, transferCallback)
+				return downloadErr
+			})
 			return err
 		}
 
@@ -1538,14 +1616,20 @@ func (c *IRODSFSClientBuffered) DownloadFileParallelWithCallback(irodsPath strin
 			}
 			return blockReadyCallback(data, offset)
 		}
-		_, err = c.fs.DownloadFileParallelWithCallback(remotePath, "", blockSize, numBlocks, cachedCallback, taskNum, transferCallback)
+		_, err = c.executeWithRenameFallback(irodsPath, func(backendPath string) error {
+			_, downloadErr := c.fs.DownloadFileParallelWithCallback(backendPath, "", blockSize, numBlocks, cachedCallback, taskNum, transferCallback)
+			return downloadErr
+		})
 		if err == nil {
 			c.storeCacheFileMeta(irodsPath, entry)
 		}
 		return err
 	}
 
-	_, err := c.fs.DownloadFileParallelWithCallback(remotePath, "", blockSize, numBlocks, blockReadyCallback, taskNum, transferCallback)
+	_, err := c.executeWithRenameFallback(irodsPath, func(backendPath string) error {
+		_, downloadErr := c.fs.DownloadFileParallelWithCallback(backendPath, "", blockSize, numBlocks, blockReadyCallback, taskNum, transferCallback)
+		return downloadErr
+	})
 	return err
 }
 
@@ -1671,7 +1755,7 @@ func (c *IRODSFSClientBuffered) invalidateFileCacheBlocksHint(irodsPath string, 
 	// Only stat iRODS when the caller has no size hint. This avoids a blocking
 	// network call when the size is already known (e.g. staged handle Close).
 	if sizeHint == 0 {
-		entry, err := c.client.Stat(c.resolvePendingRenameSource(irodsPath))
+		entry, _, err := executeWithRenameFallback(irodsPath, c.resolvePendingRenameSource, c.client.Stat)
 		if err == nil && entry != nil && entry.Size > fileSize {
 			fileSize = entry.Size
 		}
