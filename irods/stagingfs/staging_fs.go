@@ -31,6 +31,14 @@ type PathHolder interface {
 	UpdateStagingPath(newPath string)
 }
 
+// handleRegistration is what StagingFS holds on behalf of one open handle. The
+// path is kept current across renames, so the handle always releases exactly
+// what it acquired even if it never learned about the rename itself.
+type handleRegistration struct {
+	path    string
+	ownsRef bool // the registration also owns the open ref for path
+}
+
 // StagingClient defines the minimal interface that StagingFS needs from the backend storage
 type StagingClient interface {
 	DownloadFileParallel(irodsPath string, localPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error
@@ -93,13 +101,13 @@ type StagingFS struct {
 	failedMutex      sync.Mutex
 	failedItems      map[string]*StagingMetadata // items that exceeded max retry count
 	cacheMutex       sync.Mutex
-	cachedItems      map[string]*StagingMetadata // files that are synced and kept as read cache
-	cachedDirs       map[string]*StagingMetadata // directories synced while backend listings may still be stale
-	refMu            sync.Mutex
-	openRefs         map[string]int // path → number of open write handles; sync skips these paths
-	syncAllMu        sync.Mutex     // serializes SyncAll with write-handle setup
-	handlesMu        sync.Mutex
-	handles          map[string][]PathHolder // path → open write handles (for rename path propagation)
+	cachedItems      map[string]*StagingMetadata        // files that are synced and kept as read cache
+	cachedDirs       map[string]*StagingMetadata        // directories synced while backend listings may still be stale
+	refMu            sync.Mutex                         // guards openRefs, handles and handleRegistrations together
+	openRefs         map[string]int                     // path → number of open write handles; sync skips these paths
+	syncAllMu        sync.Mutex                         // serializes SyncAll with write-handle setup
+	handles          map[string][]PathHolder            // path → open write handles (for rename path propagation)
+	handleRegs       map[PathHolder]*handleRegistration // holder → what it holds, so a rename cannot orphan it
 	pathSizesMu      sync.Mutex
 	pathSizes        map[string]int64 // per-path tracked sizes for accurate currentSize accounting
 	syncErrorMu      sync.Mutex
@@ -158,6 +166,7 @@ func NewStagingFS(config *StagingFSConfig) (*StagingFS, error) {
 		cachedDirs:       make(map[string]*StagingMetadata),
 		openRefs:         make(map[string]int),
 		handles:          make(map[string][]PathHolder),
+		handleRegs:       make(map[PathHolder]*handleRegistration),
 		pathSizes:        make(map[string]int64),
 	}
 
@@ -231,6 +240,7 @@ func NewStagingFSWithPersistence(config *StagingFSConfig) (*StagingFS, error) {
 		cachedDirs:       make(map[string]*StagingMetadata),
 		openRefs:         make(map[string]int),
 		handles:          make(map[string][]PathHolder),
+		handleRegs:       make(map[PathHolder]*handleRegistration),
 		pathSizes:        make(map[string]int64),
 	}
 
@@ -276,6 +286,10 @@ func (sf *StagingFS) Create(path string) error {
 }
 
 // AcquireRef increments the open-handle ref count for path, preventing sync from touching it.
+//
+// Callers that own a PathHolder should use the Open*For methods and
+// ReleaseHandle instead: a ref taken here is keyed by the path string, so a
+// rename between this call and the matching ReleaseRef releases the wrong path.
 func (sf *StagingFS) AcquireRef(path string) {
 	sf.refMu.Lock()
 	sf.openRefs[path]++
@@ -285,26 +299,84 @@ func (sf *StagingFS) AcquireRef(path string) {
 // ReleaseRef decrements the open-handle ref count for path.
 func (sf *StagingFS) ReleaseRef(path string) {
 	sf.refMu.Lock()
+	sf.releaseRefUnlocked(path)
+	sf.refMu.Unlock()
+}
+
+// releaseRefUnlocked drops one open ref for path. The caller must hold refMu.
+func (sf *StagingFS) releaseRefUnlocked(path string) {
 	sf.openRefs[path]--
 	if sf.openRefs[path] <= 0 {
 		delete(sf.openRefs, path)
 	}
+}
+
+// RegisterHandle records a write handle so it can be notified on rename. The
+// registration does not own the handle's open ref; the caller keeps releasing
+// that with ReleaseRef.
+func (sf *StagingFS) RegisterHandle(path string, h PathHolder) {
+	sf.refMu.Lock()
+	sf.registerHandleUnlocked(path, h, false)
 	sf.refMu.Unlock()
 }
 
-// RegisterHandle records a write handle so it can be notified on rename.
-func (sf *StagingFS) RegisterHandle(path string, h PathHolder) {
-	sf.handlesMu.Lock()
-	sf.handles[path] = append(sf.handles[path], h)
-	sf.handlesMu.Unlock()
+// UnregisterHandle removes a write handle from the registry (called on Close).
+// Only the registration is dropped; an owned open ref is not released, so
+// handles opened through the Open*For methods must use ReleaseHandle instead.
+func (sf *StagingFS) UnregisterHandle(path string, h PathHolder) {
+	sf.refMu.Lock()
+	if reg := sf.handleRegs[h]; reg != nil {
+		path = reg.path
+		delete(sf.handleRegs, h)
+	}
+	sf.removeHandleUnlocked(path, h)
+	sf.refMu.Unlock()
 }
 
-// UnregisterHandle removes a write handle from the registry (called on Close).
-func (sf *StagingFS) UnregisterHandle(path string, h PathHolder) {
-	sf.handlesMu.Lock()
+// ReleaseHandle drops the open ref and the rename registration that an Open*For
+// method took for holder, whatever path they have been renamed to since. It
+// reports whether holder still held a registration: a handle that never took
+// one (a read-only staged handle, say) cannot release someone else's ref.
+func (sf *StagingFS) ReleaseHandle(holder PathHolder) bool {
+	sf.refMu.Lock()
+	defer sf.refMu.Unlock()
+
+	reg := sf.handleRegs[holder]
+	if reg == nil {
+		return false
+	}
+	delete(sf.handleRegs, holder)
+	sf.removeHandleUnlocked(reg.path, holder)
+	if reg.ownsRef {
+		sf.releaseRefUnlocked(reg.path)
+	}
+	return true
+}
+
+// acquireOpenHandle takes the open ref for path and, when holder is not nil,
+// registers it for rename notification in the same critical section. Doing both
+// at once is what keeps a rename from moving the ref to the new path while the
+// handle is still only known by the old one.
+func (sf *StagingFS) acquireOpenHandle(path string, holder PathHolder) {
+	sf.refMu.Lock()
+	sf.openRefs[path]++
+	if holder != nil {
+		sf.registerHandleUnlocked(path, holder, true)
+	}
+	sf.refMu.Unlock()
+}
+
+// registerHandleUnlocked records holder at path. The caller must hold refMu.
+func (sf *StagingFS) registerHandleUnlocked(path string, holder PathHolder, ownsRef bool) {
+	sf.handles[path] = append(sf.handles[path], holder)
+	sf.handleRegs[holder] = &handleRegistration{path: path, ownsRef: ownsRef}
+}
+
+// removeHandleUnlocked drops holder from the registry at path. The caller must hold refMu.
+func (sf *StagingFS) removeHandleUnlocked(path string, holder PathHolder) {
 	list := sf.handles[path]
 	for i, entry := range list {
-		if entry == h {
+		if entry == holder {
 			sf.handles[path] = append(list[:i], list[i+1:]...)
 			break
 		}
@@ -312,7 +384,6 @@ func (sf *StagingFS) UnregisterHandle(path string, h PathHolder) {
 	if len(sf.handles[path]) == 0 {
 		delete(sf.handles, path)
 	}
-	sf.handlesMu.Unlock()
 }
 
 // hasOpenRef returns true if path currently has open write handles.
@@ -324,7 +395,18 @@ func (sf *StagingFS) hasOpenRef(path string) bool {
 
 // OpenForWrite opens a file for writing only.
 // If bulk is true, the file is registered as ActionBulkUpload and deleted after sync (not cached).
+//
+// The caller owns the resulting open ref and must release it with ReleaseRef.
+// Callers that own a PathHolder should use OpenForWriteFor instead.
 func (sf *StagingFS) OpenForWrite(path string, bulk bool) (*os.File, error) {
+	return sf.OpenForWriteFor(path, bulk, nil)
+}
+
+// OpenForWriteFor opens path for writing on behalf of holder, taking the open
+// ref and registering holder for rename notification together. A rename can
+// then never move the ref to the new path while holder is still recorded (or
+// released) under the old one. ReleaseHandle undoes both.
+func (sf *StagingFS) OpenForWriteFor(path string, bulk bool, holder PathHolder) (*os.File, error) {
 	// Keep SyncAll from passing its open-ref check until this handle is fully
 	// registered. The ref itself protects the file after this method returns.
 	sf.syncAllMu.Lock()
@@ -375,7 +457,7 @@ func (sf *StagingFS) OpenForWrite(path string, bulk bool) (*os.File, error) {
 		return nil, errors.Wrap(err, "failed to open local file for writing")
 	}
 
-	sf.AcquireRef(path)
+	sf.acquireOpenHandle(path, holder)
 	return f, nil
 }
 
@@ -445,11 +527,24 @@ func (sf *StagingFS) OpenForReadWrite(path string, bulk bool) (*os.File, error) 
 	return sf.OpenForReadWriteFrom(path, path, bulk)
 }
 
+// OpenForReadWriteFor opens path for reading and writing on behalf of holder.
+// See OpenForWriteFor for why the registration is taken with the open ref.
+func (sf *StagingFS) OpenForReadWriteFor(path string, bulk bool, holder PathHolder) (*os.File, error) {
+	return sf.OpenForReadWriteFromFor(path, path, bulk, holder)
+}
+
 // OpenForReadWriteFrom opens logicalPath for reading and writing, downloading
 // its initial data from sourcePath when no local staged copy exists. The paths
 // differ while an asynchronous rename is pending: local staging must remain at
 // the new logical path while iRODS still exposes the old source path.
 func (sf *StagingFS) OpenForReadWriteFrom(logicalPath string, sourcePath string, bulk bool) (*os.File, error) {
+	return sf.OpenForReadWriteFromFor(logicalPath, sourcePath, bulk, nil)
+}
+
+// OpenForReadWriteFromFor opens logicalPath for reading and writing on behalf of
+// holder, downloading from sourcePath when no local staged copy exists.
+// See OpenForWriteFor for why the registration is taken with the open ref.
+func (sf *StagingFS) OpenForReadWriteFromFor(logicalPath string, sourcePath string, bulk bool, holder PathHolder) (*os.File, error) {
 	// Keep SyncAll from passing its open-ref check until this handle is fully
 	// registered. The ref itself protects the file after this method returns.
 	sf.syncAllMu.Lock()
@@ -504,7 +599,7 @@ func (sf *StagingFS) OpenForReadWriteFrom(logicalPath string, sourcePath string,
 		return nil, errors.Wrap(err, "failed to open local file for reading and writing")
 	}
 
-	sf.AcquireRef(logicalPath)
+	sf.acquireOpenHandle(logicalPath, holder)
 	return f, nil
 }
 
@@ -582,23 +677,26 @@ func (sf *StagingFS) Rename(oldPath, newPath string) error {
 	}
 	sf.pathSizesMu.Unlock()
 
-	// Move open refs and collect handles to notify (outside handlesMu to avoid deadlock)
+	// Move open refs, handles and their registrations together, so a handle that
+	// has not been notified yet still releases the ref it actually holds.
 	sf.refMu.Lock()
 	if count, exists := sf.openRefs[oldPath]; exists {
 		delete(sf.openRefs, oldPath)
 		sf.openRefs[newPath] += count
 	}
-	sf.refMu.Unlock()
-
-	sf.handlesMu.Lock()
 	movedHandles := sf.handles[oldPath]
 	delete(sf.handles, oldPath)
 	if len(movedHandles) > 0 {
 		sf.handles[newPath] = append(sf.handles[newPath], movedHandles...)
 	}
-	sf.handlesMu.Unlock()
+	for _, reg := range sf.handleRegs {
+		if reg.path == oldPath {
+			reg.path = newPath
+		}
+	}
+	sf.refMu.Unlock()
 
-	// Notify handles of the new path (after releasing handlesMu to avoid deadlock with Close)
+	// Notify handles of the new path (after releasing refMu to avoid deadlock with Close)
 	for _, h := range movedHandles {
 		h.UpdateStagingPath(newPath)
 	}
@@ -683,7 +781,11 @@ func (sf *StagingFS) RenameDir(oldPath, newPath string) error {
 	}
 	sf.pathSizesMu.Unlock()
 
-	// Move open refs for all paths under oldPath
+	// Move open refs, handles and their registrations under oldPath together
+	var toNotify []struct {
+		h       PathHolder
+		newPath string
+	}
 	sf.refMu.Lock()
 	for p, count := range sf.openRefs {
 		if p == oldPath || strings.HasPrefix(p, oldPrefix) {
@@ -691,14 +793,6 @@ func (sf *StagingFS) RenameDir(oldPath, newPath string) error {
 			sf.openRefs[newPath+p[len(oldPath):]] += count
 		}
 	}
-	sf.refMu.Unlock()
-
-	// Collect and move handles under oldPath
-	var toNotify []struct {
-		h       PathHolder
-		newPath string
-	}
-	sf.handlesMu.Lock()
 	for p, list := range sf.handles {
 		if p == oldPath || strings.HasPrefix(p, oldPrefix) {
 			updated := newPath + p[len(oldPath):]
@@ -712,7 +806,12 @@ func (sf *StagingFS) RenameDir(oldPath, newPath string) error {
 			}
 		}
 	}
-	sf.handlesMu.Unlock()
+	for _, reg := range sf.handleRegs {
+		if reg.path == oldPath || strings.HasPrefix(reg.path, oldPrefix) {
+			reg.path = newPath + reg.path[len(oldPath):]
+		}
+	}
+	sf.refMu.Unlock()
 
 	for _, n := range toNotify {
 		n.h.UpdateStagingPath(n.newPath)

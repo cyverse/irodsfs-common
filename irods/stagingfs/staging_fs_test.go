@@ -1387,3 +1387,112 @@ func TestStagingFSSyncErrorHandlerMayCloseStagingFS(t *testing.T) {
 		t.Fatal("Close called from the sync error handler did not return")
 	}
 }
+
+// unawarePathHolder models a handle that is not tracking rename notifications,
+// which is exactly the case the staging registration has to survive.
+type unawarePathHolder struct{}
+
+func (h *unawarePathHolder) UpdateStagingPath(string) {}
+
+func TestStagingFSReleaseHandleFollowsRename(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	holder := &unawarePathHolder{}
+	f, err := sf.OpenForWriteFor("/dir/old.txt", false, holder)
+	if err != nil {
+		t.Fatalf("OpenForWriteFor failed: %v", err)
+	}
+	if err := sf.Rename("/dir/old.txt", "/dir/new.txt"); err != nil {
+		t.Fatalf("Rename failed: %v", err)
+	}
+	if !sf.hasOpenRef("/dir/new.txt") {
+		t.Fatal("rename did not move the open ref to the new path")
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	if !sf.ReleaseHandle(holder) {
+		t.Fatal("ReleaseHandle did not find the registration taken by the open")
+	}
+	if sf.hasOpenRef("/dir/new.txt") || sf.hasOpenRef("/dir/old.txt") {
+		t.Fatal("open ref leaked across the rename; background sync would skip the file forever")
+	}
+}
+
+func TestStagingFSReleaseHandleFollowsDirectoryRename(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	if err := sf.Mkdir("/olddir"); err != nil {
+		t.Fatalf("Mkdir failed: %v", err)
+	}
+	holder := &unawarePathHolder{}
+	f, err := sf.OpenForWriteFor("/olddir/file.txt", false, holder)
+	if err != nil {
+		t.Fatalf("OpenForWriteFor failed: %v", err)
+	}
+	if err := sf.RenameDir("/olddir", "/newdir"); err != nil {
+		t.Fatalf("RenameDir failed: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	if !sf.ReleaseHandle(holder) {
+		t.Fatal("ReleaseHandle did not find the registration taken by the open")
+	}
+	if sf.hasOpenRef("/newdir/file.txt") || sf.hasOpenRef("/olddir/file.txt") {
+		t.Fatal("open ref leaked across the directory rename")
+	}
+}
+
+func TestStagingFSReleaseHandleIgnoresUnregisteredHolder(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	const path = "/shared.txt"
+	writer := &unawarePathHolder{}
+	f, err := sf.OpenForWriteFor(path, false, writer)
+	if err != nil {
+		t.Fatalf("OpenForWriteFor failed: %v", err)
+	}
+
+	// A read-only staged handle holds no ref. Closing it must not drop the ref
+	// that the concurrent writer holds for the same path.
+	if sf.ReleaseHandle(&unawarePathHolder{}) {
+		t.Fatal("ReleaseHandle reported a registration for a holder that never took one")
+	}
+	if !sf.hasOpenRef(path) {
+		t.Fatal("an unrelated handle released the writer's open ref")
+	}
+
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	if !sf.ReleaseHandle(writer) {
+		t.Fatal("ReleaseHandle did not find the writer's registration")
+	}
+	if sf.hasOpenRef(path) {
+		t.Fatal("the writer's open ref was not released")
+	}
+}

@@ -341,7 +341,7 @@ func TestOpenStagedForReadWriteRetriesLogicalPathAfterRenameCompletes(t *testing
 	require.NoError(t, staging.Rename("/old.txt", "/new.txt"))
 
 	client := &IRODSFSClientBuffered{staging: staging}
-	f, err := client.openStagedForReadWrite("/new.txt", false)
+	f, err := client.openStagedForReadWrite("/new.txt", false, nil)
 	require.NoError(t, err)
 	data, err := os.ReadFile(f.Name())
 	require.NoError(t, err)

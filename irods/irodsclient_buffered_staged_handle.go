@@ -73,6 +73,15 @@ func newStagedHandleForNewFile(client *IRODSFSClientBuffered, file *os.File, iro
 	return newStagedHandle(client, file, irodsPath, mode, entry)
 }
 
+// setFile attaches the staging file to a handle that was created before the
+// file was opened. Handles are built first so the staging open can take the
+// open ref and the rename registration for them in one step.
+func (h *IRODSFSClientBufferedStagedHandle) setFile(file *os.File) {
+	h.mu.Lock()
+	h.file = file
+	h.mu.Unlock()
+}
+
 func (h *IRODSFSClientBufferedStagedHandle) GetID() string {
 	return h.id
 }
@@ -197,8 +206,9 @@ func (h *IRODSFSClientBufferedStagedHandle) Close() error {
 		if h.client.staging != nil {
 			// Update size tracking to reflect all bytes written via WriteAt.
 			h.client.staging.NotifyFileClosed(currentPath)
-			h.client.staging.ReleaseRef(currentPath)
-			h.client.staging.UnregisterHandle(currentPath, h)
+			// Releases whatever this handle actually holds, including after a
+			// rename, and does nothing for a read-only handle that holds no ref.
+			h.client.staging.ReleaseHandle(h)
 		}
 		// Pass the known entry size to skip the iRODS Stat call inside
 		// invalidateFileCacheBlocks. For bulk-uploaded files the file does not
