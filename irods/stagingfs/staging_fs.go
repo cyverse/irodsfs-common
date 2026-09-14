@@ -425,7 +425,7 @@ func (sf *StagingFS) OpenForReadWriteFrom(logicalPath string, sourcePath string,
 			return nil, errors.Wrap(err, "failed to create parent directory")
 		}
 
-		if err := sf.client.DownloadFileParallel(sourcePath, localPath, 4, nil); err != nil {
+		if err := sf.downloadFileAtomically(sourcePath, localPath); err != nil {
 			return nil, errors.Wrapf(err, "failed to download file from iRODS %q", sourcePath)
 		}
 
@@ -454,6 +454,30 @@ func (sf *StagingFS) OpenForReadWriteFrom(logicalPath string, sourcePath string,
 
 	sf.AcquireRef(logicalPath)
 	return f, nil
+}
+
+// downloadFileAtomically prevents an interrupted backend download from leaving
+// a partial file at the final staging path. A later open may safely treat the
+// final path as complete whenever it exists.
+func (sf *StagingFS) downloadFileAtomically(sourcePath string, localPath string) error {
+	tmp, err := os.CreateTemp(filepath.Dir(localPath), "."+filepath.Base(localPath)+".download-*")
+	if err != nil {
+		return errors.Wrap(err, "failed to create temporary download file")
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return errors.Wrap(err, "failed to close temporary download file")
+	}
+	defer os.Remove(tmpPath)
+
+	if err := sf.client.DownloadFileParallel(sourcePath, tmpPath, 4, nil); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, localPath); err != nil {
+		return errors.Wrap(err, "failed to publish downloaded staging file")
+	}
+	return nil
 }
 
 // Rename renames a file

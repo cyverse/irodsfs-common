@@ -116,6 +116,54 @@ func TestStagingFSOpenForReadWriteFromUsesRemoteSourceAndLogicalDestination(t *t
 	}
 }
 
+func TestStagingFSOpenForReadWriteRetriesAfterInterruptedDownload(t *testing.T) {
+	client := &interruptedDownloadStagingClient{}
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        client,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	const path = "/interrupted.txt"
+	if _, err := sf.OpenForReadWrite(path, false); err == nil {
+		t.Fatal("Interrupted download unexpectedly succeeded")
+	}
+	if size := sf.GetLocalFileSize(path); size != -1 {
+		t.Fatalf("Partial download remained at final staging path with size %d", size)
+	}
+
+	f, err := sf.OpenForReadWrite(path, false)
+	if err != nil {
+		t.Fatalf("Retry after interrupted download failed: %v", err)
+	}
+	data, err := os.ReadFile(f.Name())
+	if err != nil {
+		f.Close()
+		t.Fatalf("Failed to read staged retry result: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Failed to close staged retry result: %v", err)
+	}
+	sf.ReleaseRef(path)
+
+	if client.downloadCalls != 2 {
+		t.Fatalf("download calls = %d, want 2", client.downloadCalls)
+	}
+	if string(data) != "complete remote contents" {
+		t.Fatalf("staged retry data = %q, want complete remote contents", data)
+	}
+	tmpMatches, err := filepath.Glob(filepath.Join(filepath.Dir(f.Name()), ".interrupted.txt.download-*"))
+	if err != nil {
+		t.Fatalf("Failed to inspect temporary download files: %v", err)
+	}
+	if len(tmpMatches) != 0 {
+		t.Fatalf("temporary download files were not cleaned up: %v", tmpMatches)
+	}
+}
+
 func TestStagingFSCloseWaitsForBackgroundWorker(t *testing.T) {
 	sf, err := NewStagingFS(&StagingFSConfig{
 		LocalRootPath: t.TempDir(),
@@ -296,6 +344,11 @@ type downloadRecordingStagingClient struct {
 	content        []byte
 }
 
+type interruptedDownloadStagingClient struct {
+	MockStagingClient
+	downloadCalls int
+}
+
 func (m *statMockStagingClient) Stat(string) (*irodsclient_fs.Entry, error) {
 	return m.entry, m.err
 }
@@ -303,6 +356,17 @@ func (m *statMockStagingClient) Stat(string) (*irodsclient_fs.Entry, error) {
 func (m *downloadRecordingStagingClient) DownloadFileParallel(irodsPath string, localPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error {
 	m.downloadedPath = irodsPath
 	return os.WriteFile(localPath, m.content, 0644)
+}
+
+func (m *interruptedDownloadStagingClient) DownloadFileParallel(irodsPath string, localPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error {
+	m.downloadCalls++
+	if m.downloadCalls == 1 {
+		if err := os.WriteFile(localPath, []byte("partial"), 0644); err != nil {
+			return err
+		}
+		return errors.New("simulated interrupted download")
+	}
+	return os.WriteFile(localPath, []byte("complete remote contents"), 0644)
 }
 
 func (m *MockStagingClient) DownloadFileParallel(irodsPath string, localPath string, taskNum int, transferCallback irodsclient_common.TransferTrackerCallback) error {
