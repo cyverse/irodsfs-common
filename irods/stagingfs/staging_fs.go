@@ -461,7 +461,12 @@ func (sf *StagingFS) OpenForWriteFor(path string, bulk bool, holder PathHolder) 
 		}
 	}
 
-	f, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE, 0644)
+	// Open the staging file read-write even for a write-only request: callers
+	// that created a file with O_RDWR (SQLite, for one) read it back through
+	// the same handle, and a write-only descriptor fails those reads with
+	// EBADF. Which operations are allowed stays a property of the caller's
+	// handle, not of this local descriptor.
+	f, err := os.OpenFile(localPath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to open local file for writing")
 	}

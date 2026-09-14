@@ -1002,3 +1002,40 @@ func TestBufferedClientRecreateRightAfterDeleteIsVisible(t *testing.T) {
 	require.NotNil(t, meta)
 	require.Equal(t, stagingfs.ActionUpload, meta.Action)
 }
+
+// SQLite creates its database with O_RDWR|O_CREAT and reads the header back
+// immediately. The staged handle must therefore be readable: a write-only local
+// file makes every read fail with EBADF, which SQLite reports as "disk I/O error".
+func TestStagedHandleCreatedForReadWriteCanReadBack(t *testing.T) {
+	staging, err := stagingfs.NewStagingFS(&stagingfs.StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &renameRaceStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = staging.Close() })
+
+	client := &IRODSFSClientBuffered{staging: staging}
+
+	const path = "/test_sqlite.db"
+	handle := newStagedHandleForNewFile(client, nil, path, irodsclient_types.FileOpenModeReadWrite)
+	file, err := staging.OpenForWriteFor(path, false, handle)
+	require.NoError(t, err)
+	handle.setFile(file)
+	t.Cleanup(func() {
+		_ = file.Close()
+		staging.ReleaseHandle(handle)
+	})
+
+	header := []byte("SQLite format 3\x00")
+	n, err := handle.WriteAt(header, 0)
+	require.NoError(t, err)
+	require.Equal(t, len(header), n)
+
+	readBack := make([]byte, len(header))
+	n, err = handle.ReadAt(readBack, 0)
+	require.NoError(t, err)
+	require.Equal(t, len(header), n)
+	require.Equal(t, header, readBack)
+}

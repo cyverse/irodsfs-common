@@ -1140,7 +1140,9 @@ func (c *IRODSFSClientBuffered) TruncateFile(path string, size int64) error {
 
 	if c.staging != nil {
 		meta := c.staging.Get(path)
-		if meta != nil && meta.Action == stagingfs.ActionUpload {
+		// A bulk-staged file has local data and no backend object yet, so it
+		// must be truncated locally too.
+		if meta != nil && (meta.Action == stagingfs.ActionUpload || meta.Action == stagingfs.ActionBulkUpload) {
 			return c.staging.TruncateFile(path, size)
 		}
 	}
