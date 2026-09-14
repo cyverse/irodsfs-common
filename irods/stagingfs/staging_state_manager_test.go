@@ -3,6 +3,8 @@ package stagingfs
 import (
 	"testing"
 	"time"
+
+	"github.com/dgraph-io/badger/v3"
 )
 
 func TestModifyAfterDeleteMarksReplacementAsNew(t *testing.T) {
@@ -119,5 +121,49 @@ func TestTouchUpdatesMetadataAndOperationDAG(t *testing.T) {
 	}
 	if candidates := manager.getSyncCandidates(time.Hour, false); len(candidates) != 0 {
 		t.Fatalf("Touch did not reset grace period; got %d sync candidates", len(candidates))
+	}
+}
+
+func TestCompleteOperationKeepsStateWhenPersistenceFails(t *testing.T) {
+	options := badger.DefaultOptions(t.TempDir())
+	options.Logger = nil
+	db, err := badger.Open(options)
+	if err != nil {
+		t.Fatalf("Failed to open Badger: %v", err)
+	}
+
+	sm := NewStagingStateManagerWithPersistence(db)
+	const path = "/persisted.txt"
+	if err := sm.Create(path); err != nil {
+		t.Fatalf("Failed to stage file: %v", err)
+	}
+	candidate := *sm.Get(path)
+
+	var calls int
+	sm.RegisterActionHandler(func(*StagingMetadata) error {
+		calls++
+		return nil
+	})
+
+	// Every later write fails, so the completion cannot be recorded.
+	if err := db.Close(); err != nil {
+		t.Fatalf("Failed to close Badger: %v", err)
+	}
+
+	if err := sm.syncOne(&candidate); err == nil {
+		t.Fatal("sync reported success although the completion could not be persisted")
+	}
+	if calls != 1 {
+		t.Fatalf("backend handler calls = %d, want 1", calls)
+	}
+
+	// Memory must still describe a pending operation, or the caller is told the
+	// sync failed while nothing is left to retry.
+	meta := sm.Get(path)
+	if meta == nil || meta.OperationID != candidate.OperationID {
+		t.Fatalf("metadata = %+v, want the operation to stay pending for a retry", meta)
+	}
+	if candidates := sm.getSyncCandidates(0, true); len(candidates) != 1 {
+		t.Fatalf("sync candidates = %d, want the operation to be runnable again", len(candidates))
 	}
 }

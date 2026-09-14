@@ -12,6 +12,7 @@ import (
 
 	"github.com/cockroachdb/errors"
 	"github.com/dgraph-io/badger/v3"
+	log "github.com/sirupsen/logrus"
 )
 
 // Handler for iRODS operations
@@ -788,9 +789,7 @@ func (sm *StagingStateManager) Rmdir(path string, recurse bool, force bool) (boo
 		if metadataPath != path && pathInSubtree(metadataPath, path) {
 			dependencies = append(dependencies, child.OperationID)
 			sm.dag.markUrgent(child.OperationID)
-			if sm.db != nil {
-				_ = sm.db.Update(func(txn *badger.Txn) error { return sm.persistOperationTxn(txn, child.OperationID) })
-			}
+			sm.persistOperationStateUnlocked(child.OperationID)
 		}
 	}
 	if err := sm.enqueueOperation(path, rmdirMeta, dependencies, true); err != nil {
@@ -953,9 +952,7 @@ func (sm *StagingStateManager) syncCandidate(meta *StagingMetadata, gracePeriod 
 	if sm.pathConds[meta.Path] == nil {
 		sm.pathConds[meta.Path] = sync.NewCond(&sm.mu)
 	}
-	if sm.db != nil {
-		_ = sm.db.Update(func(txn *badger.Txn) error { return sm.persistOperationTxn(txn, op.ID) })
-	}
+	sm.persistOperationStateUnlocked(op.ID)
 	// Read the handler while the lock is held: a concurrent
 	// RegisterActionHandler writes it under the same lock.
 	handler := sm.ActionHandler
@@ -971,9 +968,7 @@ func (sm *StagingStateManager) syncCandidate(meta *StagingMetadata, gracePeriod 
 				if latest := sm.metadata[live.Metadata.Path]; latest != nil && latest.OperationID == live.ID {
 					latest.SyncFailCount = live.Metadata.SyncFailCount
 				}
-				if sm.db != nil {
-					_ = sm.db.Update(func(txn *badger.Txn) error { return sm.persistOperationTxn(txn, live.ID) })
-				}
+				sm.persistOperationStateUnlocked(live.ID)
 			}
 			sm.unlockOperationUnlocked(meta)
 			sm.mu.Unlock()
@@ -985,6 +980,14 @@ func (sm *StagingStateManager) syncCandidate(meta *StagingMetadata, gracePeriod 
 	deleteErr := sm.markAncestorDirectoriesTouchedUnlocked(meta.Path)
 	if deleteErr == nil {
 		deleteErr = sm.completeOperationUnlocked(meta.OperationID, meta.Path)
+	}
+	if deleteErr != nil {
+		// The backend work is done but could not be recorded. Leave the
+		// operation runnable instead of stranding it in RUNNING, so a later
+		// pass retries it rather than never touching it again.
+		if live := sm.dag.get(meta.OperationID); live != nil && live.State == OperationRunning {
+			live.State = OperationQueued
+		}
 	}
 	sm.unlockOperationUnlocked(meta)
 	sm.mu.Unlock()
@@ -1027,19 +1030,29 @@ func (sm *StagingStateManager) unlockOperationUnlocked(meta *StagingMetadata) {
 }
 
 func (sm *StagingStateManager) completeOperationUnlocked(operationID string, path string) error {
-	if sm.dag.get(operationID) == nil {
+	op := sm.dag.get(operationID)
+	if op == nil {
 		return nil
 	}
-	sm.dag.remove(operationID)
+
 	latest := sm.metadata[path]
 	removeLatest := latest != nil && latest.OperationID == operationID
+
+	// Apply the removal in memory first: the transaction has to persist the
+	// dependency lists that the removal leaves behind. When the write fails,
+	// memory is put back the way it was, so the error the caller sees describes
+	// an operation that is still pending in both places and can be retried.
+	dependents := sm.dag.dependentsOf(operationID)
+	sm.dag.remove(operationID)
 	if removeLatest {
 		delete(sm.metadata, path)
 	}
+
 	if sm.db == nil {
 		return nil
 	}
-	return sm.db.Update(func(txn *badger.Txn) error {
+
+	err := sm.db.Update(func(txn *badger.Txn) error {
 		if err := txn.Delete([]byte(fmt.Sprintf("operation:%s", operationID))); err != nil {
 			return err
 		}
@@ -1055,6 +1068,15 @@ func (sm *StagingStateManager) completeOperationUnlocked(operationID string, pat
 		}
 		return nil
 	})
+	if err != nil {
+		sm.dag.reinsert(op, dependents)
+		if removeLatest {
+			sm.metadata[path] = latest
+		}
+		return err
+	}
+
+	return nil
 }
 
 // SyncAll performs all pending iRODS operations and clears metadata one by one (exclusive lock)
@@ -1452,6 +1474,22 @@ func (sm *StagingStateManager) cancelOperationSubtreeUnlocked(root string, inclu
 	})
 }
 
+// persistOperationStateUnlocked writes one operation's current state outside any
+// transaction the caller owns. A failure is not fatal — a restore normalizes
+// RUNNING back to QUEUED and the work is retried — but it must not pass
+// silently, because a failing database is how staging loses its durability.
+// The caller must hold sm.mu.
+func (sm *StagingStateManager) persistOperationStateUnlocked(operationID string) {
+	if sm.db == nil {
+		return
+	}
+	if err := sm.db.Update(func(txn *badger.Txn) error {
+		return sm.persistOperationTxn(txn, operationID)
+	}); err != nil {
+		log.WithError(err).Warnf("failed to persist staging operation %s", operationID)
+	}
+}
+
 func (sm *StagingStateManager) persistOperationTxn(txn *badger.Txn, operationID string) error {
 	op := sm.dag.get(operationID)
 	if op == nil {
@@ -1501,9 +1539,7 @@ func (sm *StagingStateManager) markOperationBlockedPublic(operationID string) {
 	defer sm.mu.Unlock()
 	if op := sm.dag.get(operationID); op != nil {
 		op.State = OperationBlocked
-		if sm.db != nil {
-			_ = sm.db.Update(func(txn *badger.Txn) error { return sm.persistOperationTxn(txn, operationID) })
-		}
+		sm.persistOperationStateUnlocked(operationID)
 	}
 }
 
@@ -1520,9 +1556,7 @@ func (sm *StagingStateManager) retryBlockedOperations() {
 		if latest := sm.metadata[op.Metadata.Path]; latest != nil && latest.OperationID == id {
 			latest.SyncFailCount = 0
 		}
-		if sm.db != nil {
-			_ = sm.db.Update(func(txn *badger.Txn) error { return sm.persistOperationTxn(txn, id) })
-		}
+		sm.persistOperationStateUnlocked(id)
 	}
 }
 

@@ -88,6 +88,30 @@ func (dag *OperationDAG) remove(id string) {
 	}
 }
 
+// dependentsOf returns the operations that list id as a dependency.
+func (dag *OperationDAG) dependentsOf(id string) []string {
+	dependents := make([]string, 0)
+	for nodeID, op := range dag.nodes {
+		for _, dependencyID := range op.Dependencies {
+			if dependencyID == id {
+				dependents = append(dependents, nodeID)
+				break
+			}
+		}
+	}
+	return dependents
+}
+
+// reinsert undoes remove: it puts op back and restores the dependency edges
+// that pointed at it, so a removal that could not be persisted leaves the DAG
+// exactly as it was.
+func (dag *OperationDAG) reinsert(op *StagingOperation, dependents []string) {
+	dag.nodes[op.ID] = op
+	for _, id := range dependents {
+		dag.addDependency(id, op.ID)
+	}
+}
+
 func (dag *OperationDAG) addDependency(id string, dependencyID string) {
 	if id == "" || dependencyID == "" || id == dependencyID {
 		return
