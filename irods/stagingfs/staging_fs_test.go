@@ -14,6 +14,7 @@ import (
 	cockroach_errors "github.com/cockroachdb/errors"
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
 	irodsclient_common "github.com/cyverse/go-irodsclient/irods/common"
+	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 )
 
 func TestStagingFSCloseRemovesDataAfterSuccessfulSync(t *testing.T) {
@@ -1840,5 +1841,89 @@ func TestStagingFSReserveFileGrowthEnforcesQuota(t *testing.T) {
 	}
 	if size := sf.GetCurrentDataSize(); size != quota/2 {
 		t.Fatalf("tracked size = %d, want the refused growth not to be counted", size)
+	}
+}
+
+func TestStagingFSNonRecursiveRmdirRefusesStagedChildren(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	if err := sf.Mkdir("/dir"); err != nil {
+		t.Fatalf("Mkdir failed: %v", err)
+	}
+	const childPath = "/dir/child.txt"
+	stagePendingUpload(t, sf, childPath, "child data")
+
+	err = sf.Rmdir("/dir", false, false)
+	if !irodsclient_types.IsCollectionNotEmptyError(err) {
+		t.Fatalf("non-recursive Rmdir of a non-empty directory returned %v, want a collection-not-empty error", err)
+	}
+
+	if data, readErr := os.ReadFile(sf.getLocalDataPath(childPath)); readErr != nil {
+		t.Fatalf("refused Rmdir destroyed staged data: %v", readErr)
+	} else if string(data) != "child data" {
+		t.Fatalf("staged data = %q, want %q", data, "child data")
+	}
+	if meta := sf.sm.Get(childPath); meta == nil || meta.Action != ActionUpload {
+		t.Fatalf("child metadata = %+v, want the pending upload to survive", meta)
+	}
+	if meta := sf.sm.Get("/dir"); meta == nil || meta.Action != ActionMkdir {
+		t.Fatalf("directory metadata = %+v, want the pending mkdir to survive", meta)
+	}
+}
+
+func TestStagingFSNonRecursiveRmdirRemovesEmptyDirectory(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	if err := sf.Mkdir("/empty"); err != nil {
+		t.Fatalf("Mkdir failed: %v", err)
+	}
+	if err := sf.Rmdir("/empty", false, false); err != nil {
+		t.Fatalf("non-recursive Rmdir of an empty directory failed: %v", err)
+	}
+	if _, err := os.Stat(sf.getLocalDataPath("/empty")); !os.IsNotExist(err) {
+		t.Fatalf("local directory was not removed, stat error: %v", err)
+	}
+}
+
+func TestStagingFSRecursiveRmdirRemovesStagedChildren(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	if err := sf.Mkdir("/dir"); err != nil {
+		t.Fatalf("Mkdir failed: %v", err)
+	}
+	stagePendingUpload(t, sf, "/dir/child.txt", "child data")
+
+	if err := sf.Rmdir("/dir", true, true); err != nil {
+		t.Fatalf("recursive Rmdir failed: %v", err)
+	}
+	if _, err := os.Stat(sf.getLocalDataPath("/dir")); !os.IsNotExist(err) {
+		t.Fatalf("recursive Rmdir left local data behind, stat error: %v", err)
 	}
 }

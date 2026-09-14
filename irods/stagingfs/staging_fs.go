@@ -12,6 +12,7 @@ import (
 	"github.com/cockroachdb/errors"
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
 	irodsclient_common "github.com/cyverse/go-irodsclient/irods/common"
+	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 	"github.com/dgraph-io/badger/v3"
 	log "github.com/sirupsen/logrus"
 )
@@ -863,8 +864,24 @@ func (sf *StagingFS) Mkdir(path string) error {
 	return nil
 }
 
-// RmdirWithOptions removes a directory and preserves its removal options for sync.
+// Rmdir removes a directory and preserves its removal options for sync.
+// A non-recursive removal behaves like POSIX rmdir: it refuses a directory that
+// still holds staged data instead of destroying that data recursively.
 func (sf *StagingFS) Rmdir(path string, recurse bool, force bool) error {
+	localPath := sf.getLocalDataPath(path)
+
+	if !recurse {
+		notEmpty, err := localDirHasEntries(localPath)
+		if err != nil {
+			return errors.Wrap(err, "failed to inspect local directory")
+		}
+		if notEmpty {
+			// Refuse before any state is queued, so the caller's error leaves
+			// the staged data and its pending operations untouched.
+			return irodsclient_types.NewCollectionNotEmptyError(path)
+		}
+	}
+
 	syncNow, err := sf.sm.Rmdir(path, recurse, force)
 	if err != nil {
 		return err
@@ -878,8 +895,15 @@ func (sf *StagingFS) Rmdir(path string, recurse bool, force bool) error {
 	}
 	sf.cacheMutex.Unlock()
 
-	localPath := sf.getLocalDataPath(path)
-	if err := os.RemoveAll(localPath); err != nil && !os.IsNotExist(err) {
+	if recurse {
+		if err := os.RemoveAll(localPath); err != nil && !os.IsNotExist(err) {
+			return errors.Wrap(err, "failed to delete local directory")
+		}
+	} else if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
+		if notEmpty, checkErr := localDirHasEntries(localPath); checkErr == nil && notEmpty {
+			// Something was staged below path while the removal was queued.
+			return irodsclient_types.NewCollectionNotEmptyError(path)
+		}
 		return errors.Wrap(err, "failed to delete local directory")
 	}
 
@@ -888,6 +912,19 @@ func (sf *StagingFS) Rmdir(path string, recurse bool, force bool) error {
 	_ = syncNow
 
 	return nil
+}
+
+// localDirHasEntries reports whether the local staging directory holds anything.
+// A missing directory holds nothing.
+func localDirHasEntries(localPath string) (bool, error) {
+	entries, err := os.ReadDir(localPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return len(entries) > 0, nil
 }
 
 // SyncAll performs all pending operations
