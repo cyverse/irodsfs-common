@@ -20,6 +20,11 @@ import (
 // Callers may use errors.Is to detect this and fall back to a non-staging path.
 var ErrQuotaExceeded = errors.New("staging quota exceeded")
 
+// ErrOpenWriteHandles is returned by SyncAll when staged files are still open
+// for writing. Syncing those files could upload a partial snapshot and the
+// subsequent cleanup would unlink data that is still being written.
+var ErrOpenWriteHandles = errors.New("staging files are still open for writing")
+
 // PathHolder is implemented by any object that holds a staging path reference and
 // must be notified when the path changes (e.g. due to a rename while the handle is open).
 type PathHolder interface {
@@ -83,6 +88,7 @@ type StagingFS struct {
 	cachedDirs       map[string]*StagingMetadata // directories synced while backend listings may still be stale
 	refMu            sync.Mutex
 	openRefs         map[string]int // path → number of open write handles; sync skips these paths
+	syncAllMu        sync.Mutex     // serializes SyncAll with write-handle setup
 	handlesMu        sync.Mutex
 	handles          map[string][]PathHolder // path → open write handles (for rename path propagation)
 	pathSizesMu      sync.Mutex
@@ -304,6 +310,11 @@ func (sf *StagingFS) hasOpenRef(path string) bool {
 // OpenForWrite opens a file for writing only.
 // If bulk is true, the file is registered as ActionBulkUpload and deleted after sync (not cached).
 func (sf *StagingFS) OpenForWrite(path string, bulk bool) (*os.File, error) {
+	// Keep SyncAll from passing its open-ref check until this handle is fully
+	// registered. The ref itself protects the file after this method returns.
+	sf.syncAllMu.Lock()
+	defer sf.syncAllMu.Unlock()
+
 	sf.sm.WaitForSync(path)
 
 	if err := sf.ensureQuota(0); err != nil {
@@ -409,6 +420,11 @@ func (sf *StagingFS) OpenForReadWrite(path string, bulk bool) (*os.File, error) 
 // differ while an asynchronous rename is pending: local staging must remain at
 // the new logical path while iRODS still exposes the old source path.
 func (sf *StagingFS) OpenForReadWriteFrom(logicalPath string, sourcePath string, bulk bool) (*os.File, error) {
+	// Keep SyncAll from passing its open-ref check until this handle is fully
+	// registered. The ref itself protects the file after this method returns.
+	sf.syncAllMu.Lock()
+	defer sf.syncAllMu.Unlock()
+
 	if sourcePath == "" {
 		sourcePath = logicalPath
 	}
@@ -707,6 +723,32 @@ func (sf *StagingFS) Rmdir(path string, recurse bool, force bool) error {
 
 // SyncAll performs all pending operations
 func (sf *StagingFS) SyncAll() error {
+	// An open write handle may continue modifying its file after an upload.
+	// Refuse the sync instead of uploading a partial snapshot and unlinking the
+	// staging tree underneath the handle. Holding syncAllMu also prevents a new
+	// handle from being opened between this check and cleanup.
+	sf.syncAllMu.Lock()
+	defer sf.syncAllMu.Unlock()
+
+	sf.refMu.Lock()
+	openPaths := 0
+	openHandles := 0
+	for _, count := range sf.openRefs {
+		if count > 0 {
+			openPaths++
+			openHandles += count
+		}
+	}
+	sf.refMu.Unlock()
+	if openHandles > 0 {
+		return errors.Wrapf(
+			ErrOpenWriteHandles,
+			"cannot sync staging data while %d write handle(s) across %d path(s) remain open",
+			openHandles,
+			openPaths,
+		)
+	}
+
 	if err := sf.sm.SyncAll(); err != nil {
 		return err
 	}

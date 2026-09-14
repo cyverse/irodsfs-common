@@ -682,6 +682,8 @@ func TestStagingFSSyncAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to write: %v", err)
 	}
+	sf.NotifyFileClosed(path)
+	sf.ReleaseRef(path)
 
 	// Verify file exists before sync
 	localPath := sf.getLocalDataPath(path)
@@ -727,6 +729,47 @@ func TestStagingFSSyncAll(t *testing.T) {
 	}
 	if len(entries) > 0 {
 		t.Error("Expected data directory to be empty after sync")
+	}
+}
+
+func TestStagingFSSyncAllRejectsOpenWriteHandle(t *testing.T) {
+	rootPath := t.TempDir()
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: rootPath,
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	const path = "/open.txt"
+	f, err := sf.OpenForWrite(path, false)
+	if err != nil {
+		t.Fatalf("OpenForWrite failed: %v", err)
+	}
+	if _, err := f.Write([]byte("data still being written")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	if err := sf.SyncAll(); !errors.Is(err, ErrOpenWriteHandles) {
+		t.Fatalf("SyncAll error = %v, want ErrOpenWriteHandles", err)
+	}
+	if _, err := os.Stat(sf.getLocalDataPath(path)); err != nil {
+		t.Fatalf("SyncAll removed an open staged file: %v", err)
+	}
+	if meta := sf.Get(path); meta == nil || meta.Action != ActionUpload {
+		t.Fatalf("SyncAll removed pending metadata for open file: %+v", meta)
+	}
+
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	sf.NotifyFileClosed(path)
+	sf.ReleaseRef(path)
+
+	if err := sf.SyncAll(); err != nil {
+		t.Fatalf("SyncAll after closing write handle failed: %v", err)
 	}
 }
 
