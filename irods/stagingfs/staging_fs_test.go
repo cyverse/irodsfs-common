@@ -164,6 +164,47 @@ func TestStagingFSOpenForReadWriteRetriesAfterInterruptedDownload(t *testing.T) 
 	}
 }
 
+func TestStagingFSTruncateResetsOperationGracePeriod(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	const path = "/truncate.txt"
+	f, err := sf.OpenForWrite(path, false)
+	if err != nil {
+		t.Fatalf("OpenForWrite failed: %v", err)
+	}
+	if _, err := f.Write([]byte("abcdef")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	sf.ReleaseRef(path)
+
+	oldTime := time.Now().Add(-2 * time.Hour)
+	sf.sm.mu.Lock()
+	operationID := sf.sm.metadata[path].OperationID
+	sf.sm.metadata[path].LastModifiedAt = oldTime
+	sf.sm.dag.get(operationID).Metadata.LastModifiedAt = oldTime
+	sf.sm.mu.Unlock()
+
+	if err := sf.TruncateFile(path, 3); err != nil {
+		t.Fatalf("TruncateFile failed: %v", err)
+	}
+	if candidates := sf.sm.getSyncCandidates(time.Hour, false); len(candidates) != 0 {
+		t.Fatalf("truncate did not reset grace period; got %d sync candidates", len(candidates))
+	}
+	if size := sf.GetLocalFileSize(path); size != 3 {
+		t.Fatalf("truncated size = %d, want 3", size)
+	}
+}
+
 func TestStagingFSCloseWaitsForBackgroundWorker(t *testing.T) {
 	sf, err := NewStagingFS(&StagingFSConfig{
 		LocalRootPath: t.TempDir(),

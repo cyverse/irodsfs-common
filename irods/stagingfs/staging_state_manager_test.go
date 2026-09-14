@@ -1,6 +1,9 @@
 package stagingfs
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestModifyAfterDeleteMarksReplacementAsNew(t *testing.T) {
 	manager := NewStagingStateManager()
@@ -62,5 +65,59 @@ func TestMkdirAfterRmdirMarksReplacementAsNew(t *testing.T) {
 	metadata := manager.Get(path)
 	if metadata == nil || metadata.Action != ActionMkdir || !metadata.IsNew {
 		t.Fatalf("replacement metadata = %#v, want new MKDIR", metadata)
+	}
+}
+
+func TestGetReturnsMetadataCopy(t *testing.T) {
+	manager := NewStagingStateManager()
+	const path = "/test/copy.txt"
+	if err := manager.Create(path); err != nil {
+		t.Fatalf("Create(%q): %v", path, err)
+	}
+
+	metadata := manager.Get(path)
+	metadata.Action = ActionDelete
+	metadata.LastModifiedAt = time.Time{}
+
+	stored := manager.Get(path)
+	if stored.Action != ActionUpload {
+		t.Fatalf("stored action = %s, want %s", stored.Action, ActionUpload)
+	}
+	if stored.LastModifiedAt.IsZero() {
+		t.Fatal("mutating Get result changed stored modification time")
+	}
+}
+
+func TestTouchUpdatesMetadataAndOperationDAG(t *testing.T) {
+	manager := NewStagingStateManager()
+	const path = "/test/touch.txt"
+	if err := manager.Create(path); err != nil {
+		t.Fatalf("Create(%q): %v", path, err)
+	}
+
+	oldTime := time.Now().Add(-2 * time.Hour)
+	manager.mu.Lock()
+	manager.metadata[path].LastModifiedAt = oldTime
+	operationID := manager.metadata[path].OperationID
+	manager.dag.get(operationID).Metadata.LastModifiedAt = oldTime
+	manager.mu.Unlock()
+
+	touchedAfter := time.Now()
+	if err := manager.Touch(path); err != nil {
+		t.Fatalf("Touch(%q): %v", path, err)
+	}
+
+	metadata := manager.Get(path)
+	if metadata.LastModifiedAt.Before(touchedAfter) {
+		t.Fatalf("metadata modification time = %v, want >= %v", metadata.LastModifiedAt, touchedAfter)
+	}
+	manager.mu.RLock()
+	dagModifiedAt := manager.dag.get(operationID).Metadata.LastModifiedAt
+	manager.mu.RUnlock()
+	if dagModifiedAt.Before(touchedAfter) {
+		t.Fatalf("DAG modification time = %v, want >= %v", dagModifiedAt, touchedAfter)
+	}
+	if candidates := manager.getSyncCandidates(time.Hour, false); len(candidates) != 0 {
+		t.Fatalf("Touch did not reset grace period; got %d sync candidates", len(candidates))
 	}
 }

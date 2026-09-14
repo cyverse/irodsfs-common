@@ -647,11 +647,32 @@ func (sm *StagingStateManager) Rmdir(path string, recurse bool, force bool) (boo
 	return false, nil
 }
 
-// Get retrieves metadata for a path
+// Touch updates the modification time for a pending path in memory, in the
+// operation DAG, and in persistent storage. Callers must use this instead of
+// mutating metadata returned by Get.
+func (sm *StagingStateManager) Touch(path string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.waitForPathsUnlocked(path)
+	meta := sm.metadata[path]
+	if meta == nil {
+		return nil
+	}
+	meta.LastModifiedAt = time.Now()
+	return sm.persistMetadata(path, meta)
+}
+
+// Get retrieves a copy of metadata for a path.
 func (sm *StagingStateManager) Get(path string) *StagingMetadata {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	return sm.metadata[path]
+	meta := sm.metadata[path]
+	if meta == nil {
+		return nil
+	}
+	copyMeta := *meta
+	return &copyMeta
 }
 
 // GetAll returns deep copies of all staged metadata.

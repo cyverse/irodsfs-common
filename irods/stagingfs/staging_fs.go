@@ -389,10 +389,10 @@ func (sf *StagingFS) TruncateFile(path string, size int64) error {
 
 	sf.setPathSize(path, size)
 
-	// Update last modified time to reset grace period
-	meta := sf.sm.Get(path)
-	if meta != nil {
-		meta.LastModifiedAt = time.Now()
+	// Update metadata, the operation DAG, and persistent state together so the
+	// grace period is measured from this truncate rather than the prior write.
+	if err := sf.sm.Touch(path); err != nil {
+		return errors.Wrap(err, "failed to update truncate modification time")
 	}
 
 	return nil
