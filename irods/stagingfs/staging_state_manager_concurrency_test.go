@@ -440,3 +440,84 @@ func TestWriteLeaseWaitsForInFlightSync(t *testing.T) {
 	}
 	sm.ReleaseWriteLease(path)
 }
+
+func TestSubtreeWriteLeaseDefersDescendantSync(t *testing.T) {
+	sm := NewStagingStateManager()
+	const childPath = "/dir/child.txt"
+	if err := sm.Create(childPath); err != nil {
+		t.Fatalf("Failed to stage child: %v", err)
+	}
+	candidate := *sm.Get(childPath)
+
+	var actions []ActionType
+	sm.RegisterActionHandler(func(meta *StagingMetadata) error {
+		actions = append(actions, meta.Action)
+		return nil
+	})
+
+	sm.AcquireWriteLeaseSubtree("/dir")
+	executed, err := sm.syncCandidate(&candidate, 0, true)
+	if err != nil {
+		t.Fatalf("Leased descendant sync candidate failed: %v", err)
+	}
+	if executed || len(actions) != 0 {
+		t.Fatalf("Descendant synced while its subtree was leased, actions %v", actions)
+	}
+
+	sm.ReleaseWriteLeaseSubtree("/dir")
+	if executed, err = sm.syncCandidate(&candidate, 0, true); err != nil {
+		t.Fatalf("Failed to sync descendant after releasing the subtree lease: %v", err)
+	}
+	if !executed || len(actions) != 1 || actions[0] != ActionUpload {
+		t.Fatalf("Expected a single UPLOAD after the lease was released, got %v", actions)
+	}
+}
+
+func TestSubtreeWriteLeaseWaitsForInFlightDescendantSync(t *testing.T) {
+	sm := NewStagingStateManager()
+	const childPath = "/dir/child.txt"
+	if err := sm.Create(childPath); err != nil {
+		t.Fatalf("Failed to stage child: %v", err)
+	}
+	candidate := *sm.Get(childPath)
+
+	uploadStarted := make(chan struct{})
+	releaseUpload := make(chan struct{})
+	sm.RegisterActionHandler(func(meta *StagingMetadata) error {
+		close(uploadStarted)
+		<-releaseUpload
+		return nil
+	})
+
+	uploadDone := make(chan error, 1)
+	go func() {
+		uploadDone <- sm.syncOne(&candidate)
+	}()
+	select {
+	case <-uploadStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Child upload did not start")
+	}
+
+	leaseAcquired := make(chan struct{})
+	go func() {
+		sm.AcquireWriteLeaseSubtree("/dir")
+		close(leaseAcquired)
+	}()
+	select {
+	case <-leaseAcquired:
+		t.Fatal("Subtree lease was granted while a descendant was being uploaded")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseUpload)
+	if err := <-uploadDone; err != nil {
+		t.Fatalf("Child upload failed: %v", err)
+	}
+	select {
+	case <-leaseAcquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Subtree lease was not granted after the descendant upload completed")
+	}
+	sm.ReleaseWriteLeaseSubtree("/dir")
+}

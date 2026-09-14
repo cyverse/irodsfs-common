@@ -1232,3 +1232,120 @@ func TestStagingFSStaleCandidateSkipsReopenedFile(t *testing.T) {
 		t.Fatalf("reopen did not reset the grace period; got %d sync candidates", len(candidates))
 	}
 }
+
+func TestStagingFSRenameKeepsStateWhenLocalRenameFails(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	// A staged regular file makes the destination parent directory
+	// uncreatable, so the local rename cannot succeed.
+	blocker, err := sf.OpenForWrite("/blocker", false)
+	if err != nil {
+		t.Fatalf("OpenForWrite failed: %v", err)
+	}
+	blocker.Close()
+	sf.ReleaseRef("/blocker")
+
+	const path = "/renamed.txt"
+	stagePendingUpload(t, sf, path, "staged data")
+
+	if err := sf.Rename(path, "/blocker/renamed.txt"); err == nil {
+		t.Fatal("Rename onto an unusable local destination must fail")
+	}
+
+	if meta := sf.sm.Get(path); meta == nil || meta.Action != ActionUpload {
+		t.Fatalf("staging metadata = %+v, want the pending upload to stay at the source path", meta)
+	}
+	if meta := sf.sm.Get("/blocker/renamed.txt"); meta != nil {
+		t.Fatalf("failed rename left staging metadata at the destination: %+v", meta)
+	}
+	if data, err := os.ReadFile(sf.getLocalDataPath(path)); err != nil {
+		t.Fatalf("Failed to read staged data after a failed rename: %v", err)
+	} else if string(data) != "staged data" {
+		t.Fatalf("staged data = %q, want %q", data, "staged data")
+	}
+}
+
+func TestStagingFSRenameRestoresLocalFileWhenStateRenameFails(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	// A pending deletion cannot transition to RENAME, so the state change fails
+	// after the local file has already been moved.
+	const path = "/deleted.txt"
+	if err := sf.Delete(path); err != nil {
+		t.Fatalf("Delete failed: %v", err)
+	}
+	localPath := sf.getLocalDataPath(path)
+	if err := os.WriteFile(localPath, []byte("local data"), 0644); err != nil {
+		t.Fatalf("Failed to write local data: %v", err)
+	}
+
+	if err := sf.Rename(path, "/deleted-renamed.txt"); err == nil {
+		t.Fatal("Rename of a pending deletion must fail")
+	}
+
+	if data, err := os.ReadFile(localPath); err != nil {
+		t.Fatalf("Local data was not restored after a failed rename: %v", err)
+	} else if string(data) != "local data" {
+		t.Fatalf("restored data = %q, want %q", data, "local data")
+	}
+	if _, err := os.Stat(sf.getLocalDataPath("/deleted-renamed.txt")); !os.IsNotExist(err) {
+		t.Fatalf("failed rename left local data at the destination, stat error: %v", err)
+	}
+	if meta := sf.sm.Get(path); meta == nil || meta.Action != ActionDelete {
+		t.Fatalf("staging metadata = %+v, want the pending deletion to stay at the source path", meta)
+	}
+}
+
+func TestStagingFSRenameDirKeepsStateWhenLocalRenameFails(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	blocker, err := sf.OpenForWrite("/blocker", false)
+	if err != nil {
+		t.Fatalf("OpenForWrite failed: %v", err)
+	}
+	blocker.Close()
+	sf.ReleaseRef("/blocker")
+
+	const childPath = "/olddir/child.txt"
+	if err := sf.Mkdir("/olddir"); err != nil {
+		t.Fatalf("Mkdir failed: %v", err)
+	}
+	stagePendingUpload(t, sf, childPath, "child data")
+
+	if err := sf.RenameDir("/olddir", "/blocker/newdir"); err == nil {
+		t.Fatal("RenameDir onto an unusable local destination must fail")
+	}
+
+	if meta := sf.sm.Get("/olddir"); meta == nil || meta.Action != ActionMkdir {
+		t.Fatalf("directory metadata = %+v, want the pending mkdir to stay at the source path", meta)
+	}
+	if meta := sf.sm.Get(childPath); meta == nil || meta.Action != ActionUpload {
+		t.Fatalf("child metadata = %+v, want the pending upload to stay at the source path", meta)
+	}
+	if data, err := os.ReadFile(sf.getLocalDataPath(childPath)); err != nil {
+		t.Fatalf("Failed to read staged child after a failed directory rename: %v", err)
+	} else if string(data) != "child data" {
+		t.Fatalf("staged child data = %q, want %q", data, "child data")
+	}
+}

@@ -519,8 +519,34 @@ func (sf *StagingFS) downloadFileAtomically(sourcePath string, localPath string)
 
 // Rename renames a file
 func (sf *StagingFS) Rename(oldPath, newPath string) error {
+	// Reserve both paths for the whole rename. Without this a background worker
+	// could run the queued backend rename, or an upload depending on it, while
+	// the local file still sits at the old path.
+	sf.sm.AcquireWriteLease(oldPath)
+	defer sf.sm.ReleaseWriteLease(oldPath)
+	sf.sm.AcquireWriteLease(newPath)
+	defer sf.sm.ReleaseWriteLease(newPath)
+
+	oldLocalPath := sf.getLocalDataPath(oldPath)
+	newLocalPath := sf.getLocalDataPath(newPath)
+
+	// Move local data first: a failure here must leave no renamed state behind.
+	renamedLocally := false
+	if _, err := os.Stat(oldLocalPath); err == nil {
+		if err := os.MkdirAll(filepath.Dir(newLocalPath), 0755); err != nil {
+			return errors.Wrap(err, "failed to create parent directory")
+		}
+		if err := os.Rename(oldLocalPath, newLocalPath); err != nil {
+			return errors.Wrap(err, "failed to rename local file")
+		}
+		renamedLocally = true
+	}
+
 	syncNow, err := sf.sm.Rename(oldPath, newPath)
 	if err != nil {
+		if rollbackErr := rollbackLocalRename(renamedLocally, newLocalPath, oldLocalPath); rollbackErr != nil {
+			return errors.CombineErrors(err, rollbackErr)
+		}
 		return err
 	}
 
@@ -562,29 +588,51 @@ func (sf *StagingFS) Rename(oldPath, newPath string) error {
 		h.UpdateStagingPath(newPath)
 	}
 
-	oldLocalPath := sf.getLocalDataPath(oldPath)
-	newLocalPath := sf.getLocalDataPath(newPath)
+	_ = syncNow
+	return nil
+}
 
-	if _, err := os.Stat(oldLocalPath); err != nil {
+// rollbackLocalRename restores a local rename that was already applied when a
+// later step of the same logical rename failed.
+func rollbackLocalRename(renamed bool, currentPath string, originalPath string) error {
+	if !renamed {
 		return nil
 	}
-
-	if err := os.MkdirAll(filepath.Dir(newLocalPath), 0755); err != nil {
-		return errors.Wrap(err, "failed to create parent directory")
+	if err := os.Rename(currentPath, originalPath); err != nil {
+		return errors.Wrapf(err, "failed to restore local data at %q after a failed rename", originalPath)
 	}
-
-	if err := os.Rename(oldLocalPath, newLocalPath); err != nil {
-		return errors.Wrap(err, "failed to rename local file")
-	}
-
-	_ = syncNow
 	return nil
 }
 
 // RenameDir renames a directory
 func (sf *StagingFS) RenameDir(oldPath, newPath string) error {
+	// Reserve both subtrees for the whole rename, so no descendant operation is
+	// synced against a path that only half of this rename has moved yet.
+	sf.sm.AcquireWriteLeaseSubtree(oldPath)
+	defer sf.sm.ReleaseWriteLeaseSubtree(oldPath)
+	sf.sm.AcquireWriteLeaseSubtree(newPath)
+	defer sf.sm.ReleaseWriteLeaseSubtree(newPath)
+
+	oldLocalPath := sf.getLocalDataPath(oldPath)
+	newLocalPath := sf.getLocalDataPath(newPath)
+
+	// Move local data first: a failure here must leave no renamed state behind.
+	renamedLocally := false
+	if _, err := os.Stat(oldLocalPath); err == nil {
+		if err := os.MkdirAll(filepath.Dir(newLocalPath), 0755); err != nil {
+			return errors.Wrap(err, "failed to create parent directory")
+		}
+		if err := os.Rename(oldLocalPath, newLocalPath); err != nil {
+			return errors.Wrap(err, "failed to rename local directory")
+		}
+		renamedLocally = true
+	}
+
 	syncNow, err := sf.sm.RenameDir(oldPath, newPath)
 	if err != nil {
+		if rollbackErr := rollbackLocalRename(renamedLocally, newLocalPath, oldLocalPath); rollbackErr != nil {
+			return errors.CombineErrors(err, rollbackErr)
+		}
 		return err
 	}
 
@@ -653,21 +701,6 @@ func (sf *StagingFS) RenameDir(oldPath, newPath string) error {
 
 	for _, n := range toNotify {
 		n.h.UpdateStagingPath(n.newPath)
-	}
-
-	oldLocalPath := sf.getLocalDataPath(oldPath)
-	newLocalPath := sf.getLocalDataPath(newPath)
-
-	if _, err := os.Stat(oldLocalPath); err != nil {
-		return nil
-	}
-
-	if err := os.MkdirAll(filepath.Dir(newLocalPath), 0755); err != nil {
-		return errors.Wrap(err, "failed to create parent directory")
-	}
-
-	if err := os.Rename(oldLocalPath, newLocalPath); err != nil {
-		return errors.Wrap(err, "failed to rename local directory")
 	}
 
 	_ = syncNow

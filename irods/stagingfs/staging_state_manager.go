@@ -99,6 +99,7 @@ type StagingStateManager struct {
 	lockedPaths    map[string]bool       // Paths locked during sync operations
 	lockedSubtrees map[string]bool       // Directory trees locked during recursive operations
 	writeLeases    map[string]int        // Paths reserved by a local writer; sync defers while held
+	leasedRoots    map[string]int        // Subtrees reserved by a local recursive operation
 	pathConds      map[string]*sync.Cond // Per-path condition variables
 	db             *badger.DB
 	mu             sync.RWMutex
@@ -113,6 +114,7 @@ func NewStagingStateManager() *StagingStateManager {
 		lockedPaths:    make(map[string]bool),
 		lockedSubtrees: make(map[string]bool),
 		writeLeases:    make(map[string]int),
+		leasedRoots:    make(map[string]int),
 		pathConds:      make(map[string]*sync.Cond),
 		db:             nil,
 	}
@@ -126,6 +128,7 @@ func NewStagingStateManagerWithPersistence(db *badger.DB) *StagingStateManager {
 		lockedPaths:    make(map[string]bool),
 		lockedSubtrees: make(map[string]bool),
 		writeLeases:    make(map[string]int),
+		leasedRoots:    make(map[string]int),
 		pathConds:      make(map[string]*sync.Cond),
 		db:             db,
 	}
@@ -251,24 +254,67 @@ func (sm *StagingStateManager) ReleaseWriteLease(path string) {
 	}
 }
 
+// AcquireWriteLeaseSubtree reserves an entire subtree while its caller performs
+// a local recursive operation such as a directory rename. In addition to the
+// guarantees of AcquireWriteLease it keeps descendant operations from syncing,
+// and returns only once syncs already running below root have finished.
+func (sm *StagingStateManager) AcquireWriteLeaseSubtree(root string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.waitForSubtreeUnlocked(root)
+	// Registering the lease first stops any new descendant sync, so the drain
+	// below cannot be outrun by a sync that starts while it waits.
+	sm.leasedRoots[root]++
+	sm.waitForLockedDescendants(root)
+}
+
+// ReleaseWriteLeaseSubtree drops one reservation taken by AcquireWriteLeaseSubtree.
+func (sm *StagingStateManager) ReleaseWriteLeaseSubtree(root string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.leasedRoots[root]--
+	if sm.leasedRoots[root] <= 0 {
+		delete(sm.leasedRoots, root)
+	}
+	if cond := sm.pathConds[root]; cond != nil {
+		cond.Broadcast()
+	}
+}
+
 // leasedPathUnlocked returns a write-leased path that must keep the operation
 // described by meta from running, or "" when none does. Directory operations
-// are held back by a lease anywhere in the subtrees they touch. The caller must
-// hold sm.mu.
+// are held back by a lease anywhere in the subtrees they touch, and a leased
+// subtree holds back anything overlapping it. The caller must hold sm.mu.
 func (sm *StagingStateManager) leasedPathUnlocked(meta *StagingMetadata) string {
+	paths := []string{meta.Path}
+	if meta.OldPath != "" {
+		paths = append(paths, meta.OldPath)
+	}
+
 	if meta.Action == ActionRmdir || meta.Action == ActionRenameDir {
 		for leased := range sm.writeLeases {
-			if pathInSubtree(leased, meta.Path) || (meta.OldPath != "" && pathInSubtree(leased, meta.OldPath)) {
-				return leased
+			for _, path := range paths {
+				if pathInSubtree(leased, path) {
+					return leased
+				}
 			}
 		}
-		return ""
+	} else {
+		for _, path := range paths {
+			if sm.writeLeases[path] > 0 {
+				return path
+			}
+		}
 	}
-	if sm.writeLeases[meta.Path] > 0 {
-		return meta.Path
-	}
-	if meta.OldPath != "" && sm.writeLeases[meta.OldPath] > 0 {
-		return meta.OldPath
+
+	for root := range sm.leasedRoots {
+		for _, path := range paths {
+			if pathInSubtree(path, root) || pathInSubtree(root, path) {
+				return root
+			}
+		}
 	}
 	return ""
 }
