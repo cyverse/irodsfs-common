@@ -770,15 +770,19 @@ func (sf *StagingFS) SyncAll() error {
 	return os.MkdirAll(dataPath, 0755)
 }
 
-// SyncOld syncs items older than grace period (10 seconds)
+// SyncOld syncs items older than gracePeriod and removes only local files whose
+// upload operation actually completed. Pending, blocked, or newly replaced
+// metadata keeps its local file for a later retry.
 func (sf *StagingFS) SyncOld(gracePeriod time.Duration) error {
-	// Get old paths before sync
+	// Keep only file uploads as cleanup candidates. Directory and namespace
+	// operations do not own a single local regular file to remove.
 	now := time.Now()
-	var oldPaths []string
+	oldUploads := make(map[string]struct{})
 	all := sf.sm.GetAll()
 	for path, meta := range all {
-		if now.Sub(meta.LastModifiedAt) >= gracePeriod {
-			oldPaths = append(oldPaths, path)
+		if now.Sub(meta.LastModifiedAt) >= gracePeriod &&
+			(meta.Action == ActionUpload || meta.Action == ActionBulkUpload) {
+			oldUploads[path] = struct{}{}
 		}
 	}
 
@@ -787,9 +791,15 @@ func (sf *StagingFS) SyncOld(gracePeriod time.Duration) error {
 		return err
 	}
 
-	// Clean up only the synced local files
-	for _, path := range oldPaths {
+	// A path is safe to clean only when no metadata remains for it. In
+	// particular, this preserves data for blocked operations, operations that
+	// became too new while syncing, and replacements registered concurrently.
+	for path := range oldUploads {
+		if sf.sm.Get(path) != nil {
+			continue
+		}
 		localPath := sf.getLocalDataPath(path)
+		sf.removePathSize(path)
 		if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
 			return errors.Wrapf(err, "failed to delete local file %q", path)
 		}

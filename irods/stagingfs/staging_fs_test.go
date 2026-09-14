@@ -773,6 +773,83 @@ func TestStagingFSSyncAllRejectsOpenWriteHandle(t *testing.T) {
 	}
 }
 
+func TestStagingFSSyncOldPreservesBlockedUpload(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	const path = "/blocked.txt"
+	if err := sf.Create(path); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	localPath := sf.getLocalDataPath(path)
+	content := []byte("must survive until retry")
+	if err := os.WriteFile(localPath, content, 0644); err != nil {
+		t.Fatalf("Failed to write staged file: %v", err)
+	}
+
+	sf.sm.mu.Lock()
+	meta := sf.sm.metadata[path]
+	meta.LastModifiedAt = time.Now().Add(-2 * time.Hour)
+	sf.sm.dag.get(meta.OperationID).Metadata.LastModifiedAt = meta.LastModifiedAt
+	sf.sm.dag.get(meta.OperationID).State = OperationBlocked
+	sf.sm.mu.Unlock()
+
+	if err := sf.SyncOld(time.Hour); err != nil {
+		t.Fatalf("SyncOld failed: %v", err)
+	}
+	if data, err := os.ReadFile(localPath); err != nil {
+		t.Fatalf("SyncOld removed blocked staged file: %v", err)
+	} else if string(data) != string(content) {
+		t.Fatalf("blocked staged data = %q, want %q", data, content)
+	}
+	if meta := sf.Get(path); meta == nil || meta.Action != ActionUpload {
+		t.Fatalf("SyncOld removed blocked metadata: %+v", meta)
+	}
+}
+
+func TestStagingFSSyncOldRemovesCompletedUpload(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	const path = "/completed.txt"
+	if err := sf.Create(path); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	localPath := sf.getLocalDataPath(path)
+	if err := os.WriteFile(localPath, []byte("completed upload"), 0644); err != nil {
+		t.Fatalf("Failed to write staged file: %v", err)
+	}
+	sf.setPathSize(path, int64(len("completed upload")))
+
+	sf.sm.mu.Lock()
+	meta := sf.sm.metadata[path]
+	meta.LastModifiedAt = time.Now().Add(-2 * time.Hour)
+	sf.sm.dag.get(meta.OperationID).Metadata.LastModifiedAt = meta.LastModifiedAt
+	sf.sm.mu.Unlock()
+
+	if err := sf.SyncOld(time.Hour); err != nil {
+		t.Fatalf("SyncOld failed: %v", err)
+	}
+	if _, err := os.Stat(localPath); !os.IsNotExist(err) {
+		t.Fatalf("SyncOld retained completed staged file, stat error: %v", err)
+	}
+	if meta := sf.Get(path); meta != nil {
+		t.Fatalf("SyncOld retained completed metadata: %+v", meta)
+	}
+}
+
 func TestStagingFSMkdir(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &StagingFSConfig{
