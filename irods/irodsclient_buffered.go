@@ -488,7 +488,10 @@ func (c *IRODSFSClientBuffered) Stat(filePath string) (*irodsclient_fs.Entry, er
 		if meta != nil {
 			switch meta.Action {
 			case stagingfs.ActionDelete, stagingfs.ActionRmdir:
-				return nil, errors.Newf("file not found: %s", filePath)
+				// A real not-found error: callers (and FUSE through them) tell
+				// "removed" from "broken" with IsFileNotFoundError, and a plain
+				// error here surfaces as EREMOTEIO until the removal syncs.
+				return nil, irodsclient_types.NewFileNotFoundError(filePath)
 
 			case stagingfs.ActionUpload, stagingfs.ActionBulkUpload:
 				if meta.IsNew {
@@ -541,7 +544,7 @@ func (c *IRODSFSClientBuffered) Stat(filePath string) (*irodsclient_fs.Entry, er
 
 		// Check if this path was renamed away
 		if c.staging.IsRenamedFrom(filePath) {
-			return nil, errors.Newf("file not found: %s", filePath)
+			return nil, irodsclient_types.NewFileNotFoundError(filePath)
 		}
 	}
 

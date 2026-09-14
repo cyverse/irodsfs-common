@@ -923,3 +923,82 @@ func TestStagedHandleWriteRespectsStagingQuota(t *testing.T) {
 	require.True(t, cockroach_errors.Is(err, stagingfs.ErrQuotaExceeded), "unexpected error: %v", err)
 	require.LessOrEqual(t, staging.GetLocalFileSize(path), int64(quota))
 }
+
+// A pending staging DELETE hides the path from the backend for the whole grace
+// period. Callers distinguish "gone" from "broken" with IsFileNotFoundError, so
+// Stat has to report a real not-found error: FUSE maps anything else to
+// EREMOTEIO, which is what a recreate right after a delete used to hit.
+func TestBufferedClientStatReportsStagedRemovalsAsNotFound(t *testing.T) {
+	staging, err := stagingfs.NewStagingFS(&stagingfs.StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &renameRaceStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = staging.Close() })
+
+	client := &IRODSFSClientBuffered{staging: staging}
+
+	deletedFile := "/test/sqlite_test.py"
+	require.NoError(t, staging.DeleteWithForce(deletedFile, true))
+	_, err = client.Stat(deletedFile)
+	require.Error(t, err)
+	require.True(t, irodsclient_types.IsFileNotFoundError(err), "deleted file: %v", err)
+
+	removedDir := "/test/removed-dir"
+	require.NoError(t, staging.Rmdir(removedDir, false, false))
+	_, err = client.Stat(removedDir)
+	require.Error(t, err)
+	require.True(t, irodsclient_types.IsFileNotFoundError(err), "removed directory: %v", err)
+
+	renamedFile := "/test/renamed.py"
+	require.NoError(t, staging.Rename(renamedFile, "/test/renamed-to.py"))
+	_, err = client.Stat(renamedFile)
+	require.Error(t, err)
+	require.True(t, irodsclient_types.IsFileNotFoundError(err), "renamed source: %v", err)
+}
+
+// The sequence a delete followed by an immediate download performs: remove the
+// file, look it up (which must report ENOENT, not an I/O error), then recreate
+// and write it while the DELETE is still pending.
+func TestBufferedClientRecreateRightAfterDeleteIsVisible(t *testing.T) {
+	staging, err := stagingfs.NewStagingFS(&stagingfs.StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &renameRaceStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = staging.Close() })
+
+	client := &IRODSFSClientBuffered{
+		staging:      staging,
+		inodeManager: inode.NewInodeManager(),
+	}
+
+	const path = "/test/sqlite_test.py"
+	require.NoError(t, staging.DeleteWithForce(path, true))
+
+	_, err = client.Stat(path)
+	require.True(t, irodsclient_types.IsFileNotFoundError(err), "lookup before recreate: %v", err)
+	require.False(t, client.ExistsFile(path))
+
+	file, err := staging.OpenForWrite(path, false)
+	require.NoError(t, err)
+	_, err = file.Write([]byte("replacement contents\n"))
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	staging.NotifyFileClosed(path)
+	staging.ReleaseRef(path)
+
+	entry, err := client.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, path, entry.Path)
+	require.Equal(t, int64(len("replacement contents\n")), entry.Size)
+	require.True(t, client.ExistsFile(path))
+
+	meta := staging.Get(path)
+	require.NotNil(t, meta)
+	require.Equal(t, stagingfs.ActionUpload, meta.Action)
+}
