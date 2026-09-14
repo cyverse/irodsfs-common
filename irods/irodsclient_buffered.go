@@ -488,36 +488,30 @@ func (c *IRODSFSClientBuffered) Stat(filePath string) (*irodsclient_fs.Entry, er
 				return nil, errors.Newf("file not found: %s", filePath)
 
 			case stagingfs.ActionUpload, stagingfs.ActionBulkUpload:
-				// Return entry with local file size
-				size := c.staging.GetLocalFileSize(filePath)
-				if size < 0 {
-					size = 0
-				}
-
 				if meta.IsNew {
-					inodeID, err := c.inodeManager.CreateOrGetInodeIDForStagingEntry(filePath)
-					if err != nil {
-						return nil, err
-					}
-					return &irodsclient_fs.Entry{
-						ID:         int64(inodeID),
-						Type:       irodsclient_fs.FileEntry,
-						Name:       path.Base(filePath),
-						Path:       filePath,
-						Owner:      c.fs.GetAccount().ClientUser,
-						Size:       size,
-						CreateTime: meta.CreatedAt,
-						ModifyTime: meta.LastModifiedAt,
-						AccessTime: meta.LastModifiedAt,
-					}, nil
+					return c.getStagedFileEntry(filePath, meta)
 				}
 
 				// Modified existing file — get base entry from iRODS, override size
 				entry, err := c.client.Stat(filePath)
 				if err != nil {
+					if irodsclient_types.IsFileNotFoundError(err) {
+						// A dirty local copy remains authoritative even if the
+						// backend object was deleted (including DELETE -> CREATE
+						// and RENAME -> UPLOAD races).
+						if stagedEntry, found, stagedErr := c.getPendingRenameEntry(filePath); stagedErr != nil {
+							return nil, stagedErr
+						} else if found {
+							return stagedEntry, nil
+						}
+						return c.getStagedFileEntry(filePath, meta)
+					}
 					return nil, err
 				}
-				entry.Size = size
+				size := c.staging.GetLocalFileSize(filePath)
+				if size >= 0 {
+					entry.Size = size
+				}
 				entry.ModifyTime = meta.LastModifiedAt
 				c.reuseStagingInodeID(entry)
 				return entry, nil
@@ -549,10 +543,98 @@ func (c *IRODSFSClientBuffered) Stat(filePath string) (*irodsclient_fs.Entry, er
 
 	entry, err := c.client.Stat(filePath)
 	if err != nil {
+		// A rename is asynchronous. Until its predecessor operation reaches
+		// iRODS, the destination does not exist remotely even though it is
+		// already part of the local namespace. This also covers a later UPLOAD
+		// whose DAG dependency is that pending rename.
+		if irodsclient_types.IsFileNotFoundError(err) {
+			if stagedEntry, found, stagedErr := c.getPendingRenameEntry(filePath); stagedErr != nil {
+				return nil, stagedErr
+			} else if found {
+				return stagedEntry, nil
+			}
+		}
 		return nil, err
 	}
 	c.reuseStagingInodeID(entry)
 	return entry, nil
+}
+
+func (c *IRODSFSClientBuffered) getStagedFileEntry(filePath string, meta *stagingfs.StagingMetadata) (*irodsclient_fs.Entry, error) {
+	inodeID, err := c.inodeManager.CreateOrGetInodeIDForStagingEntry(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	size := c.staging.GetLocalFileSize(filePath)
+	if size < 0 {
+		size = 0
+	}
+	owner := ""
+	if c.fs != nil {
+		owner = c.fs.GetAccount().ClientUser
+	}
+
+	return &irodsclient_fs.Entry{
+		ID:         int64(inodeID),
+		Type:       irodsclient_fs.FileEntry,
+		Name:       path.Base(filePath),
+		Path:       filePath,
+		Owner:      owner,
+		Size:       size,
+		CreateTime: meta.CreatedAt,
+		ModifyTime: meta.LastModifiedAt,
+		AccessTime: meta.LastModifiedAt,
+	}, nil
+}
+
+// getPendingRenameEntry returns a local entry for a rename destination that
+// has not reached iRODS yet. The operation DAG retains the RENAME predecessor
+// after a later upload replaces the path metadata, so inspect pending DAG
+// operations rather than only the latest metadata for filePath.
+func (c *IRODSFSClientBuffered) getPendingRenameEntry(filePath string) (*irodsclient_fs.Entry, bool, error) {
+	if c.staging == nil || c.inodeManager == nil {
+		return nil, false, nil
+	}
+
+	for _, meta := range c.staging.GetPendingRenames() {
+		if meta.Path != filePath {
+			continue
+		}
+
+		inodeID, err := c.inodeManager.CreateOrGetInodeIDForStagingEntry(filePath)
+		if err != nil {
+			return nil, false, err
+		}
+
+		entryType := irodsclient_fs.FileEntry
+		if meta.Action == stagingfs.ActionRenameDir {
+			entryType = irodsclient_fs.DirectoryEntry
+		}
+
+		size := c.staging.GetLocalFileSize(filePath)
+		if size < 0 {
+			size = 0
+		}
+		owner := ""
+		if c.fs != nil {
+			owner = c.fs.GetAccount().ClientUser
+		}
+
+		return &irodsclient_fs.Entry{
+			ID:         int64(inodeID),
+			Type:       entryType,
+			Name:       path.Base(filePath),
+			Path:       filePath,
+			Owner:      owner,
+			Size:       size,
+			CreateTime: meta.CreatedAt,
+			ModifyTime: meta.LastModifiedAt,
+			AccessTime: meta.LastModifiedAt,
+		}, true, nil
+	}
+
+	return nil, false, nil
 }
 
 func (c *IRODSFSClientBuffered) ExistsDir(dirPath string) bool {
@@ -565,6 +647,9 @@ func (c *IRODSFSClientBuffered) ExistsDir(dirPath string) bool {
 			case stagingfs.ActionMkdir:
 				return true
 			}
+		}
+		if c.hasPendingRenameDestination(dirPath, stagingfs.ActionRenameDir) {
+			return true
 		}
 		if c.staging.IsRenamedFrom(dirPath) {
 			return false
@@ -580,15 +665,30 @@ func (c *IRODSFSClientBuffered) ExistsFile(filePath string) bool {
 			switch meta.Action {
 			case stagingfs.ActionDelete:
 				return false
-			case stagingfs.ActionUpload:
+			case stagingfs.ActionUpload, stagingfs.ActionBulkUpload:
 				return true
 			}
+		}
+		if c.hasPendingRenameDestination(filePath, stagingfs.ActionRename) {
+			return true
 		}
 		if c.staging.IsRenamedFrom(filePath) {
 			return false
 		}
 	}
 	return c.client.ExistsFile(filePath)
+}
+
+func (c *IRODSFSClientBuffered) hasPendingRenameDestination(filePath string, action stagingfs.ActionType) bool {
+	if c.staging == nil {
+		return false
+	}
+	for _, meta := range c.staging.GetPendingRenames() {
+		if meta.Path == filePath && meta.Action == action {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *IRODSFSClientBuffered) RemoveFile(irodsPath string, force bool) error {

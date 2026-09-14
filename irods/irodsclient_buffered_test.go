@@ -169,6 +169,77 @@ func TestBufferedClientReusesIssuedStagingInodeID(t *testing.T) {
 	assert.Equal(t, int64(issuedID), entry.ID)
 }
 
+func TestBufferedClientPendingRenameEntrySurvivesImmediateOverwrite(t *testing.T) {
+	staging, err := stagingfs.NewStagingFS(&stagingfs.StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &releaseErrorStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = staging.Close() })
+
+	const oldPath = "/test/old.txt"
+	const newPath = "/test/new.txt"
+	require.NoError(t, staging.Rename(oldPath, newPath))
+
+	// Writing at the destination replaces the current metadata with UPLOAD,
+	// but the pending RENAME remains in the operation DAG.
+	file, err := staging.OpenForWrite(newPath, false)
+	require.NoError(t, err)
+	_, err = file.Write([]byte("replacement"))
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	staging.ReleaseRef(newPath)
+
+	client := &IRODSFSClientBuffered{
+		staging:      staging,
+		inodeManager: inode.NewInodeManager(),
+	}
+	entry, found, err := client.getPendingRenameEntry(newPath)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, int64(len("replacement")), entry.Size)
+	require.Equal(t, newPath, entry.Path)
+	require.Positive(t, entry.ID)
+}
+
+func TestBufferedClientExistsUsesPendingStagingNamespace(t *testing.T) {
+	staging, err := stagingfs.NewStagingFS(&stagingfs.StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &releaseErrorStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = staging.Close() })
+
+	client := &IRODSFSClientBuffered{staging: staging}
+
+	// BULK_UPLOAD was absent from ExistsFile even though it is a locally
+	// visible staged file.
+	bulkFile := "/test/bulk.txt"
+	bulk, err := staging.OpenForWrite(bulkFile, true)
+	require.NoError(t, err)
+	require.NoError(t, bulk.Close())
+	staging.ReleaseRef(bulkFile)
+	require.True(t, client.ExistsFile(bulkFile))
+
+	// The destination of an asynchronous rename must be visible before its
+	// remote operation runs; the source must be hidden.
+	oldFile := "/test/old.txt"
+	newFile := "/test/new.txt"
+	require.NoError(t, staging.Rename(oldFile, newFile))
+	require.True(t, client.ExistsFile(newFile))
+	require.False(t, client.ExistsFile(oldFile))
+
+	oldDir := "/test/old-dir"
+	newDir := "/test/new-dir"
+	require.NoError(t, staging.RenameDir(oldDir, newDir))
+	require.True(t, client.ExistsDir(newDir))
+	require.False(t, client.ExistsDir(oldDir))
+}
+
 func TestBufferedClientShouldCacheFileUsesSmallerLimit(t *testing.T) {
 	cacheMgr := newTestCacheManager(t)
 	defer cacheMgr.Release()
