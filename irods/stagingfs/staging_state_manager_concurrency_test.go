@@ -2,6 +2,7 @@ package stagingfs
 
 import (
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -368,24 +369,26 @@ func TestWriteLeaseDefersSyncCandidate(t *testing.T) {
 		t.Fatalf("Expected no backend action while leased, got %v", actions)
 	}
 
-	// SyncAll must give up on a leased path instead of spinning on a candidate
-	// it can never run.
+	// SyncAll must wait for the lease instead of spinning on a candidate it
+	// cannot run, or reporting the pending operation as blocked.
 	syncAllDone := make(chan error, 1)
 	go func() {
 		syncAllDone <- sm.SyncAll()
 	}()
 	select {
 	case err := <-syncAllDone:
-		if err == nil {
-			t.Fatal("SyncAll reported success while a leased operation remained pending")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("SyncAll did not return while a path lease was held")
+		t.Fatalf("SyncAll returned %v while a path lease was held", err)
+	case <-time.After(50 * time.Millisecond):
 	}
 
 	sm.ReleaseWriteLease(path)
-	if err := sm.SyncAll(); err != nil {
-		t.Fatalf("Failed to sync after releasing the lease: %v", err)
+	select {
+	case err := <-syncAllDone:
+		if err != nil {
+			t.Fatalf("Failed to sync after releasing the lease: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SyncAll did not finish after the lease was released")
 	}
 	if len(actions) != 1 || actions[0] != ActionUpload {
 		t.Fatalf("Expected a single UPLOAD after the lease was released, got %v", actions)
@@ -520,4 +523,62 @@ func TestSubtreeWriteLeaseWaitsForInFlightDescendantSync(t *testing.T) {
 		t.Fatal("Subtree lease was not granted after the descendant upload completed")
 	}
 	sm.ReleaseWriteLeaseSubtree("/dir")
+}
+
+func TestSyncAllWaitsForOperationRunningElsewhere(t *testing.T) {
+	sm := NewStagingStateManager()
+	const path = "/running.txt"
+	if err := sm.Create(path); err != nil {
+		t.Fatalf("Failed to stage file: %v", err)
+	}
+	candidate := *sm.Get(path)
+
+	uploadStarted := make(chan struct{})
+	releaseUpload := make(chan struct{})
+	var calls atomic.Int32
+	sm.RegisterActionHandler(func(meta *StagingMetadata) error {
+		if calls.Add(1) == 1 {
+			close(uploadStarted)
+			<-releaseUpload
+		}
+		return nil
+	})
+
+	uploadDone := make(chan error, 1)
+	go func() {
+		uploadDone <- sm.syncOne(&candidate)
+	}()
+	select {
+	case <-uploadStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Upload did not start")
+	}
+
+	// The only pending operation is in flight, so there is no ready candidate.
+	// That is busy, not blocked: SyncAll must wait for it instead of failing.
+	syncAllDone := make(chan error, 1)
+	go func() {
+		syncAllDone <- sm.SyncAll()
+	}()
+	select {
+	case err := <-syncAllDone:
+		t.Fatalf("SyncAll returned %v while the only operation was still running", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseUpload)
+	if err := <-uploadDone; err != nil {
+		t.Fatalf("Upload failed: %v", err)
+	}
+	select {
+	case err := <-syncAllDone:
+		if err != nil {
+			t.Fatalf("SyncAll failed after the in-flight operation completed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SyncAll did not return after the in-flight operation completed")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("backend handler calls = %d, want 1", got)
+	}
 }

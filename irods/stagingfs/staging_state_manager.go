@@ -110,6 +110,7 @@ type StagingStateManager struct {
 	writeLeases    map[string]int        // Paths reserved by a local writer; sync defers while held
 	leasedRoots    map[string]int        // Subtrees reserved by a local recursive operation
 	pathConds      map[string]*sync.Cond // Per-path condition variables
+	progressCond   *sync.Cond            // Signals that pending operations may have become runnable
 	db             *badger.DB
 	mu             sync.RWMutex
 	ActionHandler  ActionHandler
@@ -117,21 +118,16 @@ type StagingStateManager struct {
 
 // NewStagingStateManager creates a new manager (memory only)
 func NewStagingStateManager() *StagingStateManager {
-	return &StagingStateManager{
-		metadata:       make(map[string]*StagingMetadata),
-		dag:            newOperationDAG(),
-		lockedPaths:    make(map[string]bool),
-		lockedSubtrees: make(map[string]bool),
-		writeLeases:    make(map[string]int),
-		leasedRoots:    make(map[string]int),
-		pathConds:      make(map[string]*sync.Cond),
-		db:             nil,
-	}
+	return newStagingStateManager(nil)
 }
 
 // NewStagingStateManagerWithPersistence creates a new manager with Badger persistence
 func NewStagingStateManagerWithPersistence(db *badger.DB) *StagingStateManager {
-	return &StagingStateManager{
+	return newStagingStateManager(db)
+}
+
+func newStagingStateManager(db *badger.DB) *StagingStateManager {
+	sm := &StagingStateManager{
 		metadata:       make(map[string]*StagingMetadata),
 		dag:            newOperationDAG(),
 		lockedPaths:    make(map[string]bool),
@@ -141,6 +137,8 @@ func NewStagingStateManagerWithPersistence(db *badger.DB) *StagingStateManager {
 		pathConds:      make(map[string]*sync.Cond),
 		db:             db,
 	}
+	sm.progressCond = sync.NewCond(&sm.mu)
+	return sm
 }
 
 // pathInSubtree reports whether path is root itself or one of its descendants.
@@ -261,6 +259,7 @@ func (sm *StagingStateManager) ReleaseWriteLease(path string) {
 	if cond := sm.pathConds[path]; cond != nil {
 		cond.Broadcast()
 	}
+	sm.notifyProgressUnlocked()
 }
 
 // AcquireWriteLeaseSubtree reserves an entire subtree while its caller performs
@@ -290,6 +289,7 @@ func (sm *StagingStateManager) ReleaseWriteLeaseSubtree(root string) {
 	if cond := sm.pathConds[root]; cond != nil {
 		cond.Broadcast()
 	}
+	sm.notifyProgressUnlocked()
 }
 
 // leasedPathUnlocked returns a write-leased path that must keep the operation
@@ -326,6 +326,14 @@ func (sm *StagingStateManager) leasedPathUnlocked(meta *StagingMetadata) string 
 		}
 	}
 	return ""
+}
+
+// notifyProgressUnlocked wakes SyncAll waiters after a change that can make a
+// pending operation runnable: an operation finishing or being removed, a write
+// lease being released, or a blocked operation being requeued. The caller must
+// hold sm.mu.
+func (sm *StagingStateManager) notifyProgressUnlocked() {
+	sm.progressCond.Broadcast()
 }
 
 // Create marks a path as newly created
@@ -959,6 +967,7 @@ func (sm *StagingStateManager) unlockOperationUnlocked(meta *StagingMetadata) {
 	if meta.OldPath != "" && sm.pathConds[meta.OldPath] != nil {
 		sm.pathConds[meta.OldPath].Broadcast()
 	}
+	sm.notifyProgressUnlocked()
 }
 
 func (sm *StagingStateManager) completeOperationUnlocked(operationID string, path string) error {
@@ -995,15 +1004,10 @@ func (sm *StagingStateManager) completeOperationUnlocked(operationID string, pat
 // SyncAll performs all pending iRODS operations and clears metadata one by one (exclusive lock)
 func (sm *StagingStateManager) SyncAll() error {
 	for {
-		metas := sm.getSyncCandidates(0, true)
-		if len(metas) == 0 {
-			break
-		}
 		// A candidate may be skipped because another worker took it or a local
-		// writer holds a lease. Stop once a full pass executes nothing, so the
-		// loop cannot spin on candidates it can never run.
+		// writer holds a lease, so a pass can execute nothing at all.
 		progressed := false
-		for _, meta := range metas {
+		for _, meta := range sm.getSyncCandidates(0, true) {
 			executed, err := sm.syncCandidate(meta, 0, true)
 			if err != nil {
 				return err
@@ -1013,19 +1017,44 @@ func (sm *StagingStateManager) SyncAll() error {
 				break
 			}
 		}
-		if !progressed {
-			break
+		if progressed {
+			continue
+		}
+
+		sm.mu.Lock()
+		remaining := len(sm.dag.nodes)
+		if remaining == 0 {
+			sm.mu.Unlock()
+			return nil
+		}
+		if !sm.progressPossibleUnlocked() {
+			sm.mu.Unlock()
+			return errors.Newf("operation DAG has %d blocked or cyclic nodes", remaining)
+		}
+		// Work owned by someone else is still in flight. Wait for it rather than
+		// reporting a DAG that is merely busy as blocked or cyclic.
+		sm.progressCond.Wait()
+		sm.mu.Unlock()
+	}
+}
+
+// progressPossibleUnlocked reports whether a pending operation is expected to
+// become runnable once work owned by someone else finishes: an operation that
+// another worker is running, or one held back by a local writer's lease. The
+// caller must hold sm.mu.
+func (sm *StagingStateManager) progressPossibleUnlocked() bool {
+	for _, op := range sm.dag.nodes {
+		if op.State == OperationRunning {
+			return true
+		}
+		if op.State == OperationBlocked || len(op.Dependencies) != 0 {
+			continue
+		}
+		if sm.leasedPathUnlocked(op.Metadata) != "" {
+			return true
 		}
 	}
-
-	sm.mu.RLock()
-	remaining := len(sm.dag.nodes)
-	sm.mu.RUnlock()
-	if remaining != 0 {
-		return errors.Newf("operation DAG has %d blocked or cyclic nodes", remaining)
-	}
-
-	return nil
+	return false
 }
 
 // SyncOld performs sync on items older than gracePeriod (10 seconds) with per-path locking
@@ -1326,6 +1355,8 @@ func (sm *StagingStateManager) rebaseSubtreeUnlocked(oldRoot string, newRoot str
 }
 
 func (sm *StagingStateManager) cancelOperationSubtreeUnlocked(root string, includeRoot bool) error {
+	defer sm.notifyProgressUnlocked()
+
 	removedIDs := make([]string, 0)
 	for id, op := range sm.dag.nodes {
 		if pathInSubtree(op.Metadata.Path, root) && (includeRoot || op.Metadata.Path != root) {
@@ -1379,6 +1410,8 @@ func (sm *StagingStateManager) persistOperationTxn(txn *badger.Txn, operationID 
 
 // deleteMetadata removes metadata from memory and Badger (caller must hold mu)
 func (sm *StagingStateManager) deleteMetadata(path string) error {
+	defer sm.notifyProgressUnlocked()
+
 	meta := sm.metadata[path]
 	delete(sm.metadata, path)
 	if meta != nil {
@@ -1421,6 +1454,7 @@ func (sm *StagingStateManager) markOperationBlockedPublic(operationID string) {
 func (sm *StagingStateManager) retryBlockedOperations() {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	defer sm.notifyProgressUnlocked()
 	for id, op := range sm.dag.nodes {
 		if op.State != OperationBlocked {
 			continue
