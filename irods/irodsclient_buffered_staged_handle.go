@@ -145,6 +145,15 @@ func (h *IRODSFSClientBufferedStagedHandle) WriteAt(data []byte, offset int64) (
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	// Charge the growth against the staging quota before writing: the file size
+	// is otherwise only counted when the handle is closed, so a single handle
+	// could write far past the quota.
+	if h.client != nil && h.client.staging != nil {
+		if err := h.client.staging.ReserveFileGrowth(h.irodsPath, offset+int64(len(data))); err != nil {
+			return 0, err
+		}
+	}
+
 	n, err := h.file.WriteAt(data, offset)
 	if err != nil {
 		return n, err
@@ -164,6 +173,12 @@ func (h *IRODSFSClientBufferedStagedHandle) Truncate(size int64) error {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	if h.client != nil && h.client.staging != nil {
+		if err := h.client.staging.ReserveFileGrowth(h.irodsPath, size); err != nil {
+			return err
+		}
+	}
 
 	if err := h.file.Truncate(size); err != nil {
 		return err

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	cockroach_errors "github.com/cockroachdb/errors"
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
 	irodsclient_common "github.com/cyverse/go-irodsclient/irods/common"
 )
@@ -1760,5 +1761,84 @@ func TestCopyFileConcurrentToSameDestinationKeepsOneCompleteFile(t *testing.T) {
 		if strings.Contains(entry.Name(), ".stage-") {
 			t.Fatalf("temporary copy file was left behind: %s", entry.Name())
 		}
+	}
+}
+
+func TestStagingFSQuotaReservationsDoNotOvercommit(t *testing.T) {
+	const quota = 4096
+	const chunk = 1024
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+		MaxDataSize:   quota,
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	// Every request observes the same free space; only the ones that fit may be
+	// granted, which requires the grant to reserve what it hands out.
+	var granted atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := sf.reserveQuota(chunk); err == nil {
+				granted.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := granted.Load(); got != quota/chunk {
+		t.Fatalf("granted %d reservations of %d bytes against a %d byte quota, want %d", got, chunk, quota, quota/chunk)
+	}
+	if available := sf.GetAvailableDataSize(); available != 0 {
+		t.Fatalf("available space = %d, want 0 while every reservation is held", available)
+	}
+}
+
+func TestStagingFSReserveFileGrowthEnforcesQuota(t *testing.T) {
+	const quota = 4096
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+		MaxDataSize:   quota,
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	const path = "/big.txt"
+	f, err := sf.OpenForWrite(path, false)
+	if err != nil {
+		t.Fatalf("OpenForWrite failed: %v", err)
+	}
+	defer func() {
+		f.Close()
+		sf.ReleaseRef(path)
+	}()
+
+	if err := sf.ReserveFileGrowth(path, quota/2); err != nil {
+		t.Fatalf("growth within the quota was refused: %v", err)
+	}
+	if size := sf.GetCurrentDataSize(); size != quota/2 {
+		t.Fatalf("tracked size = %d, want %d after the accepted growth", size, quota/2)
+	}
+
+	// The open handle must not be able to write past the quota just because its
+	// size is only counted at close.
+	if err := sf.ReserveFileGrowth(path, quota*2); !cockroach_errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("growth beyond the quota returned %v, want ErrQuotaExceeded", err)
+	}
+	if size := sf.GetCurrentDataSize(); size != quota/2 {
+		t.Fatalf("tracked size = %d, want the refused growth not to be counted", size)
 	}
 }

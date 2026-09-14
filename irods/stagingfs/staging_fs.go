@@ -96,6 +96,7 @@ type StagingFS struct {
 	workerWg         sync.WaitGroup
 	sizeMutex        sync.Mutex
 	currentSize      int64 // current total staged data size (dirty + cached)
+	reservedSize     int64 // space promised to in-flight requests but not yet counted in currentSize
 	maxSize          int64 // max allowed data size
 	maxCacheFileSize int64 // files larger than this skip the read cache after sync
 	failedMutex      sync.Mutex
@@ -1355,9 +1356,10 @@ func (sf *StagingFS) StageForBulkUpload(localPath, irodsPath string) error {
 		return errors.Wrap(err, "failed to stat source file")
 	}
 
-	if err := sf.ensureQuota(info.Size()); err != nil {
+	if err := sf.reserveQuota(info.Size()); err != nil {
 		return err
 	}
+	defer sf.releaseQuota(info.Size())
 
 	// Wait for a sync of this path to finish and keep the next one from
 	// starting, so the replacement is never uploaded or cleaned up half-staged.
@@ -1529,43 +1531,119 @@ func (sf *StagingFS) GetMaxDataSize() int64 {
 	return sf.maxSize
 }
 
-// GetAvailableDataSize returns remaining disk quota
+// GetAvailableDataSize returns remaining disk quota, excluding space already
+// promised to in-flight requests.
 func (sf *StagingFS) GetAvailableDataSize() int64 {
 	sf.sizeMutex.Lock()
 	defer sf.sizeMutex.Unlock()
-	return sf.maxSize - sf.currentSize
+	return sf.maxSize - sf.currentSize - sf.reservedSize
 }
 
-// ensureQuota ensures there is room for size additional bytes.
-// If not, it evicts cached files (oldest by LastAccessedAt first),
-// then force-syncs and deletes pending staging files (oldest by LastModifiedAt first).
+// ensureQuota ensures there is room for size additional bytes without holding on
+// to it. Use it only where nothing is written yet (an open, say); anything that
+// is about to consume the space must take it with reserveQuota instead.
 func (sf *StagingFS) ensureQuota(size int64) error {
+	if err := sf.reserveQuota(size); err != nil {
+		return err
+	}
+	sf.releaseQuota(size)
+	return nil
+}
+
+// reserveQuota makes room for size additional bytes and claims them, so that
+// concurrent requests are not all told the same free space is theirs. It evicts
+// cached files (oldest by LastAccessedAt first) and then force-syncs pending
+// staging files (oldest by LastModifiedAt first) when the space is not already
+// free. The caller must pass the same size to releaseQuota once the bytes are
+// counted in currentSize, or once the request that needed them has failed.
+func (sf *StagingFS) reserveQuota(size int64) error {
+	// Reclaiming space can take several rounds: each attempt frees what it can
+	// and then re-checks under the lock, since other requests reserve too.
+	for attempt := 0; ; attempt++ {
+		sf.sizeMutex.Lock()
+		overflow := (sf.currentSize + sf.reservedSize + size) - sf.maxSize
+		if overflow <= 0 {
+			sf.reservedSize += size
+			sf.sizeMutex.Unlock()
+			return nil
+		}
+		current := sf.currentSize
+		sf.sizeMutex.Unlock()
+
+		if attempt >= 2 {
+			return errors.Mark(
+				errors.Newf("staging quota exceeded: current %d + requested %d > max %d", current, size, sf.maxSize),
+				ErrQuotaExceeded,
+			)
+		}
+
+		freed := sf.evictCachedOldest(overflow)
+		if freed < overflow {
+			freed += sf.forceSyncOldest(overflow - freed)
+		}
+		if freed <= 0 {
+			return errors.Mark(
+				errors.Newf("staging quota exceeded: current %d + requested %d > max %d", current, size, sf.maxSize),
+				ErrQuotaExceeded,
+			)
+		}
+	}
+}
+
+// releaseQuota gives back a reservation taken by reserveQuota.
+func (sf *StagingFS) releaseQuota(size int64) {
+	if size == 0 {
+		return
+	}
+
 	sf.sizeMutex.Lock()
-	overflow := (sf.currentSize + size) - sf.maxSize
+	sf.reservedSize -= size
+	if sf.reservedSize < 0 {
+		sf.reservedSize = 0
+	}
 	sf.sizeMutex.Unlock()
+}
 
-	if overflow <= 0 {
+// ReserveFileGrowth accounts for a staged file growing to newSize before the
+// bytes are written, and refuses the growth when the staging quota cannot cover
+// it. Without this a single open handle could write past the quota, because the
+// file size is otherwise only counted when the handle is closed.
+func (sf *StagingFS) ReserveFileGrowth(path string, newSize int64) error {
+	current := sf.getFileSize(path)
+	if newSize <= current {
 		return nil
 	}
 
-	overflow -= sf.evictCachedOldest(overflow)
-	if overflow <= 0 {
-		return nil
+	growth := newSize - current
+	if err := sf.reserveQuota(growth); err != nil {
+		return err
 	}
+	// The bytes move from the reservation into the counted total.
+	sf.growPathSize(path, newSize)
+	sf.releaseQuota(growth)
+	return nil
+}
 
-	overflow -= sf.forceSyncOldest(overflow)
-	if overflow <= 0 {
-		return nil
+// growPathSize records path growing to newSize. Sizes never shrink here: a
+// concurrent writer may already have recorded a larger size. An untracked path
+// falls back to its size on disk, which the global counter already includes.
+func (sf *StagingFS) growPathSize(path string, newSize int64) {
+	sf.pathSizesMu.Lock()
+	old, tracked := sf.pathSizes[path]
+	if !tracked {
+		if info, err := os.Stat(sf.getLocalDataPath(path)); err == nil {
+			old = info.Size()
+		}
 	}
+	if newSize <= old {
+		sf.pathSizes[path] = old
+		sf.pathSizesMu.Unlock()
+		return
+	}
+	sf.pathSizes[path] = newSize
+	sf.pathSizesMu.Unlock()
 
-	sf.sizeMutex.Lock()
-	current := sf.currentSize
-	sf.sizeMutex.Unlock()
-
-	return errors.Mark(
-		errors.Newf("staging quota exceeded: current %d + requested %d > max %d", current, size, sf.maxSize),
-		ErrQuotaExceeded,
-	)
+	sf.addDataSize(newSize - old)
 }
 
 // evictCachedOldest removes the oldest cached files (by LastAccessedAt) until needed bytes are freed.

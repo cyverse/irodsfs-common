@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	cockroach_errors "github.com/cockroachdb/errors"
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
 	irodsclient_common "github.com/cyverse/go-irodsclient/irods/common"
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
@@ -885,4 +886,40 @@ func TestStagedHandleModes(t *testing.T) {
 			handle.Close()
 		})
 	}
+}
+
+func TestStagedHandleWriteRespectsStagingQuota(t *testing.T) {
+	const quota = 4096
+	staging, err := stagingfs.NewStagingFS(&stagingfs.StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &renameRaceStagingClient{},
+		MaxDataSize:   quota,
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = staging.Close() })
+
+	client := &IRODSFSClientBuffered{staging: staging}
+
+	const path = "/quota.txt"
+	handle := newStagedHandleForNewFile(client, nil, path, irodsclient_types.FileOpenModeWriteOnly)
+	file, err := staging.OpenForWriteFor(path, false, handle)
+	require.NoError(t, err)
+	handle.setFile(file)
+	t.Cleanup(func() {
+		_ = file.Close()
+		staging.ReleaseHandle(handle)
+	})
+
+	n, err := handle.WriteAt(make([]byte, quota/2), 0)
+	require.NoError(t, err)
+	require.Equal(t, quota/2, n)
+
+	// Writes go straight to the local file, so the quota has to be charged as
+	// the handle grows it rather than when the handle is closed.
+	_, err = handle.WriteAt(make([]byte, quota*2), quota/2)
+	require.Error(t, err)
+	require.True(t, cockroach_errors.Is(err, stagingfs.ErrQuotaExceeded), "unexpected error: %v", err)
+	require.LessOrEqual(t, staging.GetLocalFileSize(path), int64(quota))
 }
