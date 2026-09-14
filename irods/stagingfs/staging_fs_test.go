@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1553,4 +1554,211 @@ func TestStagingFSCacheEvictionDoesNotRaceWithCachedReads(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+// blockingUploadStagingClient records what each upload actually read and can
+// hold an upload open so a replacement can be attempted mid-sync.
+type blockingUploadStagingClient struct {
+	MockStagingClient
+	started  chan struct{}
+	release  chan struct{}
+	contents chan string
+}
+
+func (c *blockingUploadStagingClient) UploadFileParallel(localPath string, irodsPath string, taskNum int, callback irodsclient_common.TransferTrackerCallback) error {
+	if c.started != nil {
+		close(c.started)
+		c.started = nil
+	}
+	if c.release != nil {
+		<-c.release
+	}
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		return err
+	}
+	if c.contents != nil {
+		c.contents <- string(data)
+	}
+	return nil
+}
+
+func TestStagingFSBulkUploadWaitsForInFlightUpload(t *testing.T) {
+	client := &blockingUploadStagingClient{
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		contents: make(chan string, 2),
+	}
+	started := client.started
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        client,
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	sourceDir := t.TempDir()
+	first := filepath.Join(sourceDir, "first")
+	second := filepath.Join(sourceDir, "second")
+	if err := os.WriteFile(first, []byte("first contents"), 0644); err != nil {
+		t.Fatalf("Failed to write source: %v", err)
+	}
+	if err := os.WriteFile(second, []byte("second contents"), 0644); err != nil {
+		t.Fatalf("Failed to write source: %v", err)
+	}
+
+	const path = "/bulk.txt"
+	if err := sf.StageForBulkUpload(first, path); err != nil {
+		t.Fatalf("StageForBulkUpload failed: %v", err)
+	}
+
+	candidates := sf.sm.getSyncCandidates(0, true)
+	if len(candidates) != 1 {
+		t.Fatalf("sync candidates = %d, want 1", len(candidates))
+	}
+	syncDone := make(chan error, 1)
+	go func() {
+		syncDone <- sf.sm.syncOne(candidates[0])
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Upload did not start")
+	}
+
+	// The replacement must not overwrite the staging file that the in-flight
+	// upload is still reading.
+	stageDone := make(chan error, 1)
+	go func() {
+		stageDone <- sf.StageForBulkUpload(second, path)
+	}()
+	select {
+	case err := <-stageDone:
+		t.Fatalf("replacement was staged (%v) while the previous upload was still reading the file", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(client.release)
+	if err := <-syncDone; err != nil {
+		t.Fatalf("Upload failed: %v", err)
+	}
+	if uploaded := <-client.contents; uploaded != "first contents" {
+		t.Fatalf("uploaded contents = %q, want %q", uploaded, "first contents")
+	}
+	select {
+	case err := <-stageDone:
+		if err != nil {
+			t.Fatalf("StageForBulkUpload failed after the upload completed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("StageForBulkUpload did not finish after the upload completed")
+	}
+
+	if meta := sf.sm.Get(path); meta == nil || meta.Action != ActionBulkUpload {
+		t.Fatalf("staging metadata = %+v, want a pending bulk upload for the replacement", meta)
+	}
+	if data, err := os.ReadFile(sf.getLocalDataPath(path)); err != nil {
+		t.Fatalf("Failed to read staged replacement: %v", err)
+	} else if string(data) != "second contents" {
+		t.Fatalf("staged contents = %q, want %q", data, "second contents")
+	}
+}
+
+func TestStagingFSBulkUploadDiscardsMetadataWhenPublishFails(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	source := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(source, []byte("contents"), 0644); err != nil {
+		t.Fatalf("Failed to write source: %v", err)
+	}
+
+	// A directory at the staging path makes publishing the copy fail.
+	const path = "/blocked/bulk.txt"
+	if err := os.MkdirAll(sf.getLocalDataPath(path), 0755); err != nil {
+		t.Fatalf("Failed to block the staging path: %v", err)
+	}
+
+	if err := sf.StageForBulkUpload(source, path); err == nil {
+		t.Fatal("StageForBulkUpload must fail when the staged copy cannot be published")
+	}
+	if meta := sf.sm.Get(path); meta != nil {
+		t.Fatalf("failed bulk staging left pending metadata with no local data: %+v", meta)
+	}
+
+	entries, err := os.ReadDir(filepath.Dir(sf.getLocalDataPath(path)))
+	if err != nil {
+		t.Fatalf("Failed to inspect the staging directory: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".stage-") {
+			t.Fatalf("temporary staging file was left behind: %s", entry.Name())
+		}
+	}
+}
+
+func TestCopyFileConcurrentToSameDestinationKeepsOneCompleteFile(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "dst")
+
+	const writers = 8
+	sources := make([]string, 0, writers)
+	contents := make(map[string]struct{}, writers)
+	for i := 0; i < writers; i++ {
+		source := filepath.Join(dir, fmt.Sprintf("src-%d", i))
+		// Large and distinct, so a copy interleaved with another is visible.
+		data := strings.Repeat(fmt.Sprintf("%d", i), 1<<20)
+		if err := os.WriteFile(source, []byte(data), 0644); err != nil {
+			t.Fatalf("Failed to write source: %v", err)
+		}
+		sources = append(sources, source)
+		contents[data] = struct{}{}
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for _, source := range sources {
+		wg.Add(1)
+		go func(source string) {
+			defer wg.Done()
+			if err := copyFile(source, dst); err != nil {
+				errs <- err
+			}
+		}(source)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("copyFile failed: %v", err)
+	}
+
+	data, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("Failed to read destination: %v", err)
+	}
+	if _, ok := contents[string(data)]; !ok {
+		t.Fatalf("destination holds %d bytes that match no single source; concurrent copies clobbered each other", len(data))
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("Failed to inspect directory: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".stage-") {
+			t.Fatalf("temporary copy file was left behind: %s", entry.Name())
+		}
+	}
 }

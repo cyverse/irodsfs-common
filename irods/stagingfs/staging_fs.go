@@ -1359,6 +1359,11 @@ func (sf *StagingFS) StageForBulkUpload(localPath, irodsPath string) error {
 		return err
 	}
 
+	// Wait for a sync of this path to finish and keep the next one from
+	// starting, so the replacement is never uploaded or cleaned up half-staged.
+	sf.sm.AcquireWriteLease(irodsPath)
+	defer sf.sm.ReleaseWriteLease(irodsPath)
+
 	// Evict any existing cached entry for this path
 	sf.EvictCachedFile(irodsPath)
 
@@ -1367,47 +1372,75 @@ func (sf *StagingFS) StageForBulkUpload(localPath, irodsPath string) error {
 		return errors.Wrap(err, "failed to create staging directory")
 	}
 
-	if err := copyFile(localPath, stagingPath); err != nil {
+	// Copy into a private temporary file first. The replacement must not appear
+	// at its final path before its metadata exists: the cleanup that follows a
+	// previous bulk upload of the same path deletes the local file whenever no
+	// metadata is registered for it, and would delete the new data instead.
+	tmpPath, err := copyFileToTemp(localPath, stagingPath)
+	if err != nil {
 		return errors.Wrap(err, "failed to copy file to staging")
+	}
+	defer os.Remove(tmpPath) // no-op once published below
+
+	if err := sf.sm.CreateBulkUpload(irodsPath); err != nil {
+		return errors.Wrap(err, "failed to register bulk upload in staging")
+	}
+
+	meta := sf.sm.Get(irodsPath)
+	if err := os.Rename(tmpPath, stagingPath); err != nil {
+		if meta != nil {
+			_ = sf.sm.DiscardPendingOperation(irodsPath, meta.OperationID)
+		}
+		return errors.Wrap(err, "failed to publish staged file")
 	}
 
 	sf.setPathSize(irodsPath, info.Size())
-
-	if err := sf.sm.CreateBulkUpload(irodsPath); err != nil {
-		os.Remove(stagingPath)
-		sf.removePathSize(irodsPath)
-		return errors.Wrap(err, "failed to register bulk upload in staging")
-	}
 
 	return nil
 }
 
 // copyFile copies src to dst atomically via a temp file in the same directory.
 func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+	tmp, err := copyFileToTemp(src, dst)
 	if err != nil {
 		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// copyFileToTemp copies src into a uniquely named temporary file next to dst and
+// returns its path. The name is unique so that concurrent copies to the same
+// destination cannot truncate or publish each other's partial data; the caller
+// renames it into place, or removes it.
+func copyFileToTemp(src, dst string) (string, error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return "", err
 	}
 	defer in.Close()
 
-	tmp := dst + ".tmp"
-	out, err := os.Create(tmp)
+	out, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".stage-*")
 	if err != nil {
-		return err
+		return "", err
 	}
+	tmpPath := out.Name()
 
 	if _, err := io.Copy(out, in); err != nil {
 		out.Close()
-		os.Remove(tmp)
-		return err
+		os.Remove(tmpPath)
+		return "", err
 	}
 
 	if err := out.Close(); err != nil {
-		os.Remove(tmp)
-		return err
+		os.Remove(tmpPath)
+		return "", err
 	}
 
-	return os.Rename(tmp, dst)
+	return tmpPath, nil
 }
 
 // GetLocalFileSize returns the size of the local staged file, or -1 if not found

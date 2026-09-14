@@ -785,6 +785,22 @@ func (sm *StagingStateManager) Touch(path string) error {
 	return sm.persistMetadata(path, meta)
 }
 
+// DiscardPendingOperation removes the pending operation identified by
+// operationID, and the metadata pointing at it, without queuing any backend
+// work. It undoes a registration whose local data could not be staged; nothing
+// happens when the operation has already been replaced or completed.
+func (sm *StagingStateManager) DiscardPendingOperation(path string, operationID string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.waitForPathsUnlocked(path)
+	meta := sm.metadata[path]
+	if meta == nil || meta.OperationID != operationID {
+		return nil
+	}
+	return sm.deleteMetadata(path)
+}
+
 // Get retrieves a copy of metadata for a path.
 func (sm *StagingStateManager) Get(path string) *StagingMetadata {
 	sm.mu.RLock()
