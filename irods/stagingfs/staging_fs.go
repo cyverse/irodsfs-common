@@ -315,7 +315,11 @@ func (sf *StagingFS) OpenForWrite(path string, bulk bool) (*os.File, error) {
 	sf.syncAllMu.Lock()
 	defer sf.syncAllMu.Unlock()
 
-	sf.sm.WaitForSync(path)
+	// The lease waits for an in-flight sync of this path and keeps a new one
+	// from starting until the open ref is in place, so no sync can run against
+	// the file between registering its metadata and handing out the handle.
+	sf.sm.AcquireWriteLease(path)
+	defer sf.sm.ReleaseWriteLease(path)
 
 	if err := sf.ensureQuota(0); err != nil {
 		return nil, err
@@ -333,13 +337,20 @@ func (sf *StagingFS) OpenForWrite(path string, bulk bool) (*os.File, error) {
 		}
 	} else {
 		meta := sf.sm.Get(path)
-		if meta == nil {
+		switch {
+		case meta == nil:
 			if err := sf.sm.Create(path); err != nil {
 				return nil, err
 			}
-		} else if meta.Action != ActionUpload {
+		case meta.Action != ActionUpload:
 			if err := sf.sm.Modify(path); err != nil {
 				return nil, err
+			}
+		default:
+			// The pending upload predates this handle. Restart its grace period
+			// so it is not synced while the handle is still being written.
+			if err := sf.sm.Touch(path); err != nil {
+				return nil, errors.Wrap(err, "failed to refresh staging modification time")
 			}
 		}
 	}
@@ -390,7 +401,11 @@ func (sf *StagingFS) OpenCachedForRead(path string) (file *os.File, metadata *St
 
 // TruncateFile truncates a staged file to the given size.
 func (sf *StagingFS) TruncateFile(path string, size int64) error {
-	sf.sm.WaitForSync(path)
+	// Hold the path against sync for the whole truncate: waiting for an
+	// in-flight sync alone would still let a candidate selected moments earlier
+	// upload the file halfway through this truncate.
+	sf.sm.AcquireWriteLease(path)
+	defer sf.sm.ReleaseWriteLease(path)
 
 	localPath := sf.getLocalDataPath(path)
 
@@ -428,7 +443,10 @@ func (sf *StagingFS) OpenForReadWriteFrom(logicalPath string, sourcePath string,
 	if sourcePath == "" {
 		sourcePath = logicalPath
 	}
-	sf.sm.WaitForSync(logicalPath)
+
+	// See OpenForWrite: the lease spans metadata registration and the open.
+	sf.sm.AcquireWriteLease(logicalPath)
+	defer sf.sm.ReleaseWriteLease(logicalPath)
 
 	if err := sf.ensureQuota(0); err != nil {
 		return nil, err
@@ -460,6 +478,9 @@ func (sf *StagingFS) OpenForReadWriteFrom(logicalPath string, sourcePath string,
 			if err := sf.sm.Modify(logicalPath); err != nil {
 				return nil, err
 			}
+		} else if err := sf.sm.Touch(logicalPath); err != nil {
+			// Restart the pending upload's grace period; see OpenForWrite.
+			return nil, errors.Wrap(err, "failed to refresh staging modification time")
 		}
 	}
 
@@ -947,7 +968,7 @@ func (sf *StagingFS) syncOldItems(gracePeriod time.Duration) {
 				continue
 			}
 
-			if err := sf.sm.syncOne(meta); err != nil {
+			if _, err := sf.sm.syncCandidate(meta, gracePeriod, false); err != nil {
 				log.WithError(err).Warnf("background sync failed for %s (%s), attempt %d", meta.Path, meta.Action, meta.SyncFailCount)
 
 				if sf.config.OnSyncError != nil {

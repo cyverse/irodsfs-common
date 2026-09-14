@@ -1118,3 +1118,117 @@ func TestStagingFSRenameDirExisting(t *testing.T) {
 		t.Error("Expected metadata to be removed after immediate sync")
 	}
 }
+
+// stagePendingUpload writes content to path and ages its pending upload so it
+// becomes a sync candidate.
+func stagePendingUpload(t *testing.T, sf *StagingFS, path string, content string) {
+	t.Helper()
+
+	f, err := sf.OpenForWrite(path, false)
+	if err != nil {
+		t.Fatalf("OpenForWrite failed: %v", err)
+	}
+	if _, err := f.Write([]byte(content)); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	sf.ReleaseRef(path)
+
+	oldTime := time.Now().Add(-2 * time.Hour)
+	sf.sm.mu.Lock()
+	operationID := sf.sm.metadata[path].OperationID
+	sf.sm.metadata[path].LastModifiedAt = oldTime
+	sf.sm.dag.get(operationID).Metadata.LastModifiedAt = oldTime
+	sf.sm.mu.Unlock()
+}
+
+func TestStagingFSStaleCandidateSkipsTruncatedFile(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	const path = "/truncated.txt"
+	stagePendingUpload(t, sf, path, "abcdef")
+
+	// Snapshot the candidate the way a background pass does, then modify the
+	// file locally before the snapshot is executed.
+	candidates := sf.sm.getSyncCandidates(time.Hour, false)
+	if len(candidates) != 1 {
+		t.Fatalf("sync candidates = %d, want 1", len(candidates))
+	}
+
+	var uploaded []string
+	sf.RegisterActionHandler(func(meta *StagingMetadata) error {
+		uploaded = append(uploaded, meta.Path)
+		return nil
+	})
+
+	if err := sf.TruncateFile(path, 3); err != nil {
+		t.Fatalf("TruncateFile failed: %v", err)
+	}
+
+	executed, err := sf.sm.syncCandidate(candidates[0], time.Hour, false)
+	if err != nil {
+		t.Fatalf("Stale sync candidate failed: %v", err)
+	}
+	if executed || len(uploaded) != 0 {
+		t.Fatalf("Stale candidate uploaded %v after the file was truncated", uploaded)
+	}
+	if meta := sf.sm.Get(path); meta == nil || meta.Action != ActionUpload {
+		t.Fatalf("staging metadata = %+v, want a pending upload for the truncated file", meta)
+	}
+}
+
+func TestStagingFSStaleCandidateSkipsReopenedFile(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	const path = "/reopened.txt"
+	stagePendingUpload(t, sf, path, "abcdef")
+
+	candidates := sf.sm.getSyncCandidates(time.Hour, false)
+	if len(candidates) != 1 {
+		t.Fatalf("sync candidates = %d, want 1", len(candidates))
+	}
+
+	var uploaded []string
+	sf.RegisterActionHandler(func(meta *StagingMetadata) error {
+		uploaded = append(uploaded, meta.Path)
+		return nil
+	})
+
+	// Reopening a path that already has a pending upload must restart its grace
+	// period, otherwise the older candidate is synced while the new handle writes.
+	f, err := sf.OpenForWrite(path, false)
+	if err != nil {
+		t.Fatalf("OpenForWrite failed: %v", err)
+	}
+	defer func() {
+		f.Close()
+		sf.ReleaseRef(path)
+	}()
+
+	executed, err := sf.sm.syncCandidate(candidates[0], time.Hour, false)
+	if err != nil {
+		t.Fatalf("Stale sync candidate failed: %v", err)
+	}
+	if executed || len(uploaded) != 0 {
+		t.Fatalf("Stale candidate uploaded %v while a write handle was open", uploaded)
+	}
+	if candidates := sf.sm.getSyncCandidates(time.Hour, false); len(candidates) != 0 {
+		t.Fatalf("reopen did not reset the grace period; got %d sync candidates", len(candidates))
+	}
+}

@@ -341,3 +341,102 @@ func TestRecursiveRmdirWaitsForInFlightChildSync(t *testing.T) {
 		t.Fatal("Rmdir backend handler was not called during sync")
 	}
 }
+
+func TestWriteLeaseDefersSyncCandidate(t *testing.T) {
+	sm := NewStagingStateManager()
+	const path = "/leased.txt"
+	if err := sm.Create(path); err != nil {
+		t.Fatalf("Failed to stage file: %v", err)
+	}
+	candidate := *sm.Get(path)
+
+	var actions []ActionType
+	sm.RegisterActionHandler(func(meta *StagingMetadata) error {
+		actions = append(actions, meta.Action)
+		return nil
+	})
+
+	sm.AcquireWriteLease(path)
+	executed, err := sm.syncCandidate(&candidate, 0, true)
+	if err != nil {
+		t.Fatalf("Leased sync candidate failed: %v", err)
+	}
+	if executed {
+		t.Fatal("Sync ran while a local writer held the path lease")
+	}
+	if len(actions) != 0 {
+		t.Fatalf("Expected no backend action while leased, got %v", actions)
+	}
+
+	// SyncAll must give up on a leased path instead of spinning on a candidate
+	// it can never run.
+	syncAllDone := make(chan error, 1)
+	go func() {
+		syncAllDone <- sm.SyncAll()
+	}()
+	select {
+	case err := <-syncAllDone:
+		if err == nil {
+			t.Fatal("SyncAll reported success while a leased operation remained pending")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SyncAll did not return while a path lease was held")
+	}
+
+	sm.ReleaseWriteLease(path)
+	if err := sm.SyncAll(); err != nil {
+		t.Fatalf("Failed to sync after releasing the lease: %v", err)
+	}
+	if len(actions) != 1 || actions[0] != ActionUpload {
+		t.Fatalf("Expected a single UPLOAD after the lease was released, got %v", actions)
+	}
+}
+
+func TestWriteLeaseWaitsForInFlightSync(t *testing.T) {
+	sm := NewStagingStateManager()
+	const path = "/in-flight.txt"
+	if err := sm.Create(path); err != nil {
+		t.Fatalf("Failed to stage file: %v", err)
+	}
+	candidate := *sm.Get(path)
+
+	uploadStarted := make(chan struct{})
+	releaseUpload := make(chan struct{})
+	sm.RegisterActionHandler(func(meta *StagingMetadata) error {
+		close(uploadStarted)
+		<-releaseUpload
+		return nil
+	})
+
+	uploadDone := make(chan error, 1)
+	go func() {
+		uploadDone <- sm.syncOne(&candidate)
+	}()
+	select {
+	case <-uploadStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Upload did not start")
+	}
+
+	leaseAcquired := make(chan struct{})
+	go func() {
+		sm.AcquireWriteLease(path)
+		close(leaseAcquired)
+	}()
+	select {
+	case <-leaseAcquired:
+		t.Fatal("Write lease was granted while the path was being uploaded")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseUpload)
+	if err := <-uploadDone; err != nil {
+		t.Fatalf("Upload failed: %v", err)
+	}
+	select {
+	case <-leaseAcquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Write lease was not granted after the upload completed")
+	}
+	sm.ReleaseWriteLease(path)
+}

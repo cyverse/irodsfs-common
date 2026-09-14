@@ -98,6 +98,7 @@ type StagingStateManager struct {
 	dag            *OperationDAG
 	lockedPaths    map[string]bool       // Paths locked during sync operations
 	lockedSubtrees map[string]bool       // Directory trees locked during recursive operations
+	writeLeases    map[string]int        // Paths reserved by a local writer; sync defers while held
 	pathConds      map[string]*sync.Cond // Per-path condition variables
 	db             *badger.DB
 	mu             sync.RWMutex
@@ -111,6 +112,7 @@ func NewStagingStateManager() *StagingStateManager {
 		dag:            newOperationDAG(),
 		lockedPaths:    make(map[string]bool),
 		lockedSubtrees: make(map[string]bool),
+		writeLeases:    make(map[string]int),
 		pathConds:      make(map[string]*sync.Cond),
 		db:             nil,
 	}
@@ -123,6 +125,7 @@ func NewStagingStateManagerWithPersistence(db *badger.DB) *StagingStateManager {
 		dag:            newOperationDAG(),
 		lockedPaths:    make(map[string]bool),
 		lockedSubtrees: make(map[string]bool),
+		writeLeases:    make(map[string]int),
 		pathConds:      make(map[string]*sync.Cond),
 		db:             db,
 	}
@@ -215,6 +218,59 @@ func (sm *StagingStateManager) waitForLockedDescendants(root string) {
 		}
 		sm.pathConds[blocker].Wait()
 	}
+}
+
+// AcquireWriteLease reserves path while its caller mutates the local staging
+// file. It first waits for an in-flight sync of the same path (or of an
+// enclosing recursive operation) and then keeps sync from starting on that path
+// until ReleaseWriteLease is called, so a local modification can never be
+// interleaved with the upload of a candidate that was selected just before it.
+//
+// A lease deliberately does not block metadata mutations such as Create,
+// Modify, or Touch: the lease holder itself registers those, and blocking them
+// would deadlock.
+func (sm *StagingStateManager) AcquireWriteLease(path string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.waitForPathsUnlocked(path)
+	sm.writeLeases[path]++
+}
+
+// ReleaseWriteLease drops one reservation taken by AcquireWriteLease.
+func (sm *StagingStateManager) ReleaseWriteLease(path string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.writeLeases[path]--
+	if sm.writeLeases[path] <= 0 {
+		delete(sm.writeLeases, path)
+	}
+	if cond := sm.pathConds[path]; cond != nil {
+		cond.Broadcast()
+	}
+}
+
+// leasedPathUnlocked returns a write-leased path that must keep the operation
+// described by meta from running, or "" when none does. Directory operations
+// are held back by a lease anywhere in the subtrees they touch. The caller must
+// hold sm.mu.
+func (sm *StagingStateManager) leasedPathUnlocked(meta *StagingMetadata) string {
+	if meta.Action == ActionRmdir || meta.Action == ActionRenameDir {
+		for leased := range sm.writeLeases {
+			if pathInSubtree(leased, meta.Path) || (meta.OldPath != "" && pathInSubtree(leased, meta.OldPath)) {
+				return leased
+			}
+		}
+		return ""
+	}
+	if sm.writeLeases[meta.Path] > 0 {
+		return meta.Path
+	}
+	if meta.OldPath != "" && sm.writeLeases[meta.OldPath] > 0 {
+		return meta.OldPath
+	}
+	return ""
 }
 
 // Create marks a path as newly created
@@ -722,9 +778,22 @@ func (sm *StagingStateManager) GetPendingRenames() []*StagingMetadata {
 	return result
 }
 
-// syncOne performs handler call and removes metadata for a single path with internal locking
-// Acquires and releases lock for the path
+// syncOne performs the operation described by meta regardless of its age. It is
+// used by SyncAll, which must drain every pending operation.
 func (sm *StagingStateManager) syncOne(meta *StagingMetadata) error {
+	_, err := sm.syncCandidate(meta, 0, true)
+	return err
+}
+
+// syncCandidate performs handler call and removes metadata for a single path
+// with internal locking. Acquires and releases lock for the path.
+//
+// meta is a snapshot taken by getSyncCandidates, so the live operation is
+// re-validated against the same readiness rule once the path lock is held:
+// anything modified, leased by a local writer, or already picked up by another
+// worker in the meantime is left for a later pass. executed reports whether the
+// handler actually ran, which lets callers detect a pass that made no progress.
+func (sm *StagingStateManager) syncCandidate(meta *StagingMetadata, gracePeriod time.Duration, includeAll bool) (executed bool, err error) {
 	sm.mu.Lock()
 	directoryOperation := meta.Action == ActionRmdir || meta.Action == ActionRenameDir
 	if directoryOperation {
@@ -738,7 +807,16 @@ func (sm *StagingStateManager) syncOne(meta *StagingMetadata) error {
 	op := sm.dag.get(meta.OperationID)
 	if op == nil || len(op.Dependencies) != 0 || op.State == OperationRunning {
 		sm.mu.Unlock()
-		return nil
+		return false, nil
+	}
+	if !includeAll && !op.Urgent && time.Since(op.Metadata.LastModifiedAt) < gracePeriod {
+		// A local modification landed after this candidate was selected.
+		sm.mu.Unlock()
+		return false, nil
+	}
+	if sm.leasedPathUnlocked(op.Metadata) != "" {
+		sm.mu.Unlock()
+		return false, nil
 	}
 	op.State = OperationRunning
 	if directoryOperation {
@@ -780,7 +858,7 @@ func (sm *StagingStateManager) syncOne(meta *StagingMetadata) error {
 			}
 			sm.unlockOperationUnlocked(meta)
 			sm.mu.Unlock()
-			return errors.Wrapf(err, "handler failed for %q action on %q", meta.Action, meta.Path)
+			return true, errors.Wrapf(err, "handler failed for %q action on %q", meta.Action, meta.Path)
 		}
 	}
 
@@ -792,7 +870,7 @@ func (sm *StagingStateManager) syncOne(meta *StagingMetadata) error {
 	sm.unlockOperationUnlocked(meta)
 	sm.mu.Unlock()
 
-	return deleteErr
+	return true, deleteErr
 }
 
 func (sm *StagingStateManager) markAncestorDirectoriesTouchedUnlocked(path string) error {
@@ -864,17 +942,32 @@ func (sm *StagingStateManager) SyncAll() error {
 	for {
 		metas := sm.getSyncCandidates(0, true)
 		if len(metas) == 0 {
-			sm.mu.RLock()
-			remaining := len(sm.dag.nodes)
-			sm.mu.RUnlock()
-			if remaining != 0 {
-				return errors.Newf("operation DAG has %d blocked or cyclic nodes", remaining)
-			}
 			break
 		}
-		if err := sm.syncOne(metas[0]); err != nil {
-			return err
+		// A candidate may be skipped because another worker took it or a local
+		// writer holds a lease. Stop once a full pass executes nothing, so the
+		// loop cannot spin on candidates it can never run.
+		progressed := false
+		for _, meta := range metas {
+			executed, err := sm.syncCandidate(meta, 0, true)
+			if err != nil {
+				return err
+			}
+			if executed {
+				progressed = true
+				break
+			}
 		}
+		if !progressed {
+			break
+		}
+	}
+
+	sm.mu.RLock()
+	remaining := len(sm.dag.nodes)
+	sm.mu.RUnlock()
+	if remaining != 0 {
+		return errors.Newf("operation DAG has %d blocked or cyclic nodes", remaining)
 	}
 
 	return nil
@@ -887,10 +980,18 @@ func (sm *StagingStateManager) SyncOld(gracePeriod time.Duration) error {
 		if len(metas) == 0 {
 			return nil
 		}
+		progressed := false
 		for _, meta := range metas {
-			if err := sm.syncOne(meta); err != nil {
+			executed, err := sm.syncCandidate(meta, gracePeriod, false)
+			if err != nil {
 				return err
 			}
+			progressed = progressed || executed
+		}
+		// Candidates that are still leased or were touched while syncing are
+		// left for the next pass instead of being retried in a busy loop.
+		if !progressed {
+			return nil
 		}
 	}
 }
