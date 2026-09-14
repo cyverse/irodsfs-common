@@ -2,8 +2,10 @@ package stagingfs
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1495,4 +1497,60 @@ func TestStagingFSReleaseHandleIgnoresUnregisteredHolder(t *testing.T) {
 	if sf.hasOpenRef(path) {
 		t.Fatal("the writer's open ref was not released")
 	}
+}
+
+func TestStagingFSCacheEvictionDoesNotRaceWithCachedReads(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	const count = 200
+	paths := make([]string, 0, count)
+	now := time.Now()
+	sf.cacheMutex.Lock()
+	for i := 0; i < count; i++ {
+		path := fmt.Sprintf("/cache/file-%d.txt", i)
+		localPath := sf.getLocalDataPath(path)
+		if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+			sf.cacheMutex.Unlock()
+			t.Fatalf("Failed to create cache directory: %v", err)
+		}
+		if err := os.WriteFile(localPath, []byte("cached"), 0644); err != nil {
+			sf.cacheMutex.Unlock()
+			t.Fatalf("Failed to write cached file: %v", err)
+		}
+		sf.cachedItems[path] = &StagingMetadata{
+			Path:           path,
+			FileState:      StagingFileCached,
+			LastAccessedAt: now.Add(-time.Duration(i) * time.Second),
+		}
+		paths = append(paths, path)
+	}
+	sf.cacheMutex.Unlock()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		// Free more than the cache holds so eviction walks every entry.
+		sf.evictCachedOldest(1 << 40)
+	}()
+	go func() {
+		defer wg.Done()
+		// Each successful open refreshes LastAccessedAt, which eviction used to
+		// read after dropping the cache lock.
+		for _, path := range paths {
+			file, _, found, err := sf.OpenCachedForRead(path)
+			if err != nil || !found {
+				continue
+			}
+			file.Close()
+		}
+	}()
+	wg.Wait()
 }

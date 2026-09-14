@@ -113,7 +113,10 @@ type StagingStateManager struct {
 	progressCond   *sync.Cond            // Signals that pending operations may have become runnable
 	db             *badger.DB
 	mu             sync.RWMutex
-	ActionHandler  ActionHandler
+	// ActionHandler is read under mu by every sync. Change it with
+	// RegisterActionHandler; assigning to it directly races with a sync that is
+	// selecting the handler to call.
+	ActionHandler ActionHandler
 }
 
 // NewStagingStateManager creates a new manager (memory only)
@@ -903,10 +906,13 @@ func (sm *StagingStateManager) syncCandidate(meta *StagingMetadata, gracePeriod 
 	if sm.db != nil {
 		_ = sm.db.Update(func(txn *badger.Txn) error { return sm.persistOperationTxn(txn, op.ID) })
 	}
+	// Read the handler while the lock is held: a concurrent
+	// RegisterActionHandler writes it under the same lock.
+	handler := sm.ActionHandler
 	sm.mu.Unlock()
 
-	if sm.ActionHandler != nil {
-		if err := sm.ActionHandler(meta); err != nil {
+	if handler != nil {
+		if err := handler(meta); err != nil {
 			sm.mu.Lock()
 			if live := sm.dag.get(meta.OperationID); live != nil {
 				live.State = OperationFailed

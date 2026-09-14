@@ -2,6 +2,8 @@ package stagingfs
 
 import (
 	"errors"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -580,5 +582,55 @@ func TestSyncAllWaitsForOperationRunningElsewhere(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("backend handler calls = %d, want 1", got)
+	}
+}
+
+func TestSyncDoesNotRaceWithHandlerRegistration(t *testing.T) {
+	sm := NewStagingStateManager()
+
+	const count = 50
+	candidates := make([]StagingMetadata, 0, count)
+	for i := 0; i < count; i++ {
+		path := fmt.Sprintf("/race/file-%d.txt", i)
+		if err := sm.Create(path); err != nil {
+			t.Fatalf("Failed to stage %s: %v", path, err)
+		}
+		candidates = append(candidates, *sm.Get(path))
+	}
+
+	var calls atomic.Int32
+	handler := func(*StagingMetadata) error {
+		calls.Add(1)
+		return nil
+	}
+	sm.RegisterActionHandler(handler)
+
+	syncErrors := make(chan error, count)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := range candidates {
+			if err := sm.syncOne(&candidates[i]); err != nil {
+				syncErrors <- err
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		// Re-registering while syncs are picking the handler to call is what
+		// used to race: the write is under the lock, the read was not.
+		for i := 0; i < count; i++ {
+			sm.RegisterActionHandler(handler)
+		}
+	}()
+	wg.Wait()
+	close(syncErrors)
+
+	for err := range syncErrors {
+		t.Fatalf("Sync failed: %v", err)
+	}
+	if got := calls.Load(); got != count {
+		t.Fatalf("backend handler calls = %d, want %d", got, count)
 	}
 }

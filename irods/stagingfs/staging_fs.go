@@ -1538,19 +1538,21 @@ func (sf *StagingFS) ensureQuota(size int64) error {
 // evictCachedOldest removes the oldest cached files (by LastAccessedAt) until needed bytes are freed.
 // Returns the number of bytes freed.
 func (sf *StagingFS) evictCachedOldest(needed int64) int64 {
+	// Copy the access times out under the lock. Keeping the metadata pointers
+	// instead would race with OpenCachedForRead refreshing LastAccessedAt.
 	sf.cacheMutex.Lock()
 	type kv struct {
-		path string
-		meta *StagingMetadata
+		path           string
+		lastAccessedAt time.Time
 	}
 	items := make([]kv, 0, len(sf.cachedItems))
 	for p, m := range sf.cachedItems {
-		items = append(items, kv{p, m})
+		items = append(items, kv{p, m.LastAccessedAt})
 	}
 	sf.cacheMutex.Unlock()
 
 	sort.Slice(items, func(i, j int) bool {
-		return items[i].meta.LastAccessedAt.Before(items[j].meta.LastAccessedAt)
+		return items[i].lastAccessedAt.Before(items[j].lastAccessedAt)
 	})
 
 	var freed int64
