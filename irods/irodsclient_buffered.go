@@ -139,7 +139,10 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 	})
 
 	// Packed directories live on the same staging disk and share its quota, so
-	// they need a staging root just as staged writes do.
+	// they need a staging root just as staged writes do. Their trees sit beside
+	// the staging root rather than inside it: StagingFS removes its whole root
+	// once its own uploads have synced, which would delete a packed tree whose
+	// archive had failed to upload and take the only copy of it with it.
 	var packedManager *packedfs.Manager
 	if config.StagingRootPath != "" && config.PackedDirectories != nil {
 		var inodeResolver func(string) (uint64, error)
@@ -159,7 +162,7 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 			Config:        config.PackedDirectories,
 			Backend:       directClient,
 			Quota:         packedQuota,
-			LocalRootPath: filepath.Join(config.StagingRootPath, "packed"),
+			LocalRootPath: packedRootPathFor(config.StagingRootPath),
 			Owner:         fs.GetAccount().ClientUser,
 			InodeResolver: inodeResolver,
 			Logger:        logger,
@@ -188,6 +191,14 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 		packed:           packedManager,
 		logger:           logger,
 	}, nil
+}
+
+// packedRootPathFor returns the directory holding extracted packed trees for a
+// session, a sibling of the staging root so that staging cleanup cannot remove
+// data whose upload has not succeeded yet.
+func packedRootPathFor(stagingRootPath string) string {
+	cleaned := filepath.Clean(stagingRootPath)
+	return filepath.Join(filepath.Dir(cleaned), filepath.Base(cleaned)+"-packed")
 }
 
 func (c *IRODSFSClientBuffered) Release() error {

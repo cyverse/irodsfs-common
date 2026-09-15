@@ -4,6 +4,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	cockroach_errors "github.com/cockroachdb/errors"
@@ -29,6 +30,7 @@ func (b *emptyPackedBackend) List(irodsPath string) ([]*irodsclient_fs.Entry, er
 }
 
 func (b *emptyPackedBackend) ExistsDir(string) bool                 { return false }
+func (b *emptyPackedBackend) ExistsFile(string) bool                { return false }
 func (b *emptyPackedBackend) MakeDir(string, bool) error            { return nil }
 func (b *emptyPackedBackend) RemoveFile(string, bool) error         { return nil }
 func (b *emptyPackedBackend) RemoveDir(string, bool, bool) error    { return nil }
@@ -281,4 +283,20 @@ func TestPackedRemoveDirDropsTheWholeDirectory(t *testing.T) {
 	assert.Empty(t, client.packed.Mounts(), "the mount is gone")
 	_, statErr := os.Stat(localPath)
 	assert.True(t, os.IsNotExist(statErr), "the local tree is gone")
+}
+
+// StagingFS removes its whole root once its own uploads have synced. A packed
+// tree inside that root would be deleted along with it even when its archive
+// had failed to upload, taking the only copy of the data, so the two roots must
+// be siblings.
+func TestPackedRootIsNotInsideTheStagingRoot(t *testing.T) {
+	const stagingRoot = "/irodsfs_pool/staging/session-1234"
+
+	packedRoot := packedRootPathFor(stagingRoot)
+
+	assert.Equal(t, "/irodsfs_pool/staging/session-1234-packed", packedRoot)
+	assert.False(t, strings.HasPrefix(packedRoot, stagingRoot+string(filepath.Separator)),
+		"%q must not sit inside the staging root that StagingFS deletes", packedRoot)
+	// A trailing separator must not change where the tree lands.
+	assert.Equal(t, packedRoot, packedRootPathFor(stagingRoot+"/"))
 }

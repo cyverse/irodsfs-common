@@ -36,6 +36,7 @@ type Backend interface {
 	Stat(irodsPath string) (*irodsclient_fs.Entry, error)
 	List(irodsPath string) ([]*irodsclient_fs.Entry, error)
 	ExistsDir(irodsPath string) bool
+	ExistsFile(irodsPath string) bool
 	MakeDir(irodsPath string, recurse bool) error
 	RemoveFile(irodsPath string, force bool) error
 	RemoveDir(irodsPath string, recurse bool, force bool) error

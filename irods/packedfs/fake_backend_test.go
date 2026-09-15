@@ -27,8 +27,13 @@ type fakeBackend struct {
 	uploadErr error
 	// renameErr fails the next rename into place.
 	renameErr error
-	uploads   int
-	downloads int
+	// deleteMissingErr is returned when something that is not there is deleted.
+	// CyVerse's zone answers such a request with a rule outcome
+	// (CUT_ACTION_PROCESSED_ERR) rather than a file-not-found, which is what
+	// aborted the very first upload of every packed directory.
+	deleteMissingErr error
+	uploads          int
+	downloads        int
 }
 
 func newFakeBackend(t *testing.T) *fakeBackend {
@@ -140,9 +145,20 @@ func (b *fakeBackend) MakeDir(irodsPath string, recurse bool) error {
 	return os.MkdirAll(b.localOf(irodsPath), 0755)
 }
 
+func (b *fakeBackend) ExistsFile(irodsPath string) bool {
+	info, err := os.Stat(b.localOf(irodsPath))
+	return err == nil && !info.IsDir()
+}
+
 func (b *fakeBackend) RemoveFile(irodsPath string, force bool) error {
 	err := os.Remove(b.localOf(irodsPath))
 	if err != nil && os.IsNotExist(err) {
+		b.mu.Lock()
+		zoneErr := b.deleteMissingErr
+		b.mu.Unlock()
+		if zoneErr != nil {
+			return zoneErr
+		}
 		return irodsclient_types.NewFileNotFoundError(irodsPath)
 	}
 	return err

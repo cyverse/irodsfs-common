@@ -866,3 +866,155 @@ func TestGrowthBeyondTheSizeLimitIsRefused(t *testing.T) {
 	require.NoError(t, h.manager.ReserveGrowth(mount, 96))
 	assert.Equal(t, int64(4096), mount.ReservedSize())
 }
+
+// The zone this first ran against answers a delete of something that is not
+// there with a policy outcome, CUT_ACTION_PROCESSED_ERR, instead of a
+// file-not-found. Clearing the previous archive unconditionally therefore
+// aborted the very first upload of every packed directory, which by definition
+// has no previous archive, and nothing ever reached iRODS.
+func TestFirstUploadSucceedsWhenDeletingAMissingArchiveErrors(t *testing.T) {
+	h := newHarness(t, nil)
+
+	h.backend.mu.Lock()
+	h.backend.deleteMissingErr = errors.New("failed to delete data object: CUT_ACTION_PROCESSED_ERR")
+	h.backend.mu.Unlock()
+
+	mount, err := h.manager.EnsureMounted(testRoot, true)
+	require.NoError(t, err)
+	h.writeInMount(t, mount, testRoot+"/pyvenv.cfg", "home = /usr/bin\n")
+
+	require.NoError(t, h.manager.Unmount(mount), "the first upload must not depend on a previous archive")
+
+	assert.True(t, h.backend.exists(testRoot+".mount.tar"))
+
+	// No temporary object was abandoned along the way.
+	for _, name := range h.backend.names(t, "/z/home/u/proj") {
+		assert.False(t, IsTransientArchiveName(name), "leftover temporary object %q", name)
+	}
+
+	// And a second session, which does have a previous archive to replace,
+	// still works.
+	remounted, err := h.manager.EnsureMounted(testRoot, false)
+	require.NoError(t, err)
+	h.writeInMount(t, remounted, testRoot+"/added.cfg", "more\n")
+	require.NoError(t, h.manager.Unmount(remounted))
+
+	final, err := h.manager.EnsureMounted(testRoot, false)
+	require.NoError(t, err)
+	assert.True(t, h.manager.ExistsFile(final, testRoot+"/pyvenv.cfg"))
+	assert.True(t, h.manager.ExistsFile(final, testRoot+"/added.cfg"))
+}
+
+// Releasing a session flushes staging and then unmounts, so an unchanged tree
+// would otherwise be packed and uploaded twice back to back.
+func TestUnmountDoesNotRepackAnUnchangedTree(t *testing.T) {
+	h := newHarness(t, nil)
+
+	mount, err := h.manager.EnsureMounted(testRoot, true)
+	require.NoError(t, err)
+	h.writeInMount(t, mount, testRoot+"/lib.py", "x = 1\n")
+
+	require.NoError(t, h.manager.Pack(mount))
+
+	h.backend.mu.Lock()
+	uploadsAfterFlush := h.backend.uploads
+	h.backend.mu.Unlock()
+
+	require.NoError(t, h.manager.Unmount(mount))
+
+	h.backend.mu.Lock()
+	uploadsAfterUnmount := h.backend.uploads
+	h.backend.mu.Unlock()
+
+	assert.Equal(t, uploadsAfterFlush, uploadsAfterUnmount,
+		"a tree unchanged since its last pack is not uploaded again")
+	assert.True(t, h.backend.exists(testRoot+".mount.tar"))
+	assert.Empty(t, h.manager.Statuses(), "the mount is still released")
+}
+
+func TestUnmountRepacksWhenTheTreeChangedAfterTheFlush(t *testing.T) {
+	h := newHarness(t, nil)
+
+	mount, err := h.manager.EnsureMounted(testRoot, true)
+	require.NoError(t, err)
+	h.writeInMount(t, mount, testRoot+"/lib.py", "x = 1\n")
+	require.NoError(t, h.manager.Pack(mount))
+
+	// A write lands after the flush, so the release must pick it up.
+	h.writeInMount(t, mount, testRoot+"/late.py", "y = 2\n")
+	require.NoError(t, h.manager.Unmount(mount))
+
+	remounted, err := h.manager.EnsureMounted(testRoot, false)
+	require.NoError(t, err)
+	assert.True(t, h.manager.ExistsFile(remounted, testRoot+"/late.py"),
+		"a change made after the flush still reaches iRODS")
+}
+
+// A tree that was only read is identical to its archive, so releasing it must
+// not re-upload it. For a multi-gigabyte virtualenv that is the difference
+// between a free unmount and a full repack.
+func TestUnmountDoesNotUploadAReadOnlyTree(t *testing.T) {
+	h := newHarness(t, nil)
+
+	source := t.TempDir()
+	writeFile(t, filepath.Join(source, "pyvenv.cfg"), "home = /usr/bin\n", 0644)
+	h.backend.seedArchive(t, testRoot+".mount.tar", source, CompressionNone)
+
+	mount, err := h.manager.EnsureMounted(testRoot, false)
+	require.NoError(t, err)
+	require.False(t, mount.IsDirty())
+
+	// Reading does not dirty the tree.
+	_, err = h.manager.List(mount, testRoot)
+	require.NoError(t, err)
+
+	h.backend.mu.Lock()
+	uploadsBefore := h.backend.uploads
+	h.backend.mu.Unlock()
+
+	require.NoError(t, h.manager.Unmount(mount))
+
+	h.backend.mu.Lock()
+	uploadsAfter := h.backend.uploads
+	h.backend.mu.Unlock()
+
+	assert.Equal(t, uploadsBefore, uploadsAfter, "an untouched tree is not re-uploaded on release")
+	assert.True(t, h.backend.exists(testRoot+".mount.tar"), "its archive is left in place")
+}
+
+// A tree whose archive failed to upload is the only copy of that data. Close
+// must leave it on disk rather than clearing the root along with the session.
+func TestCloseKeepsTreesWhoseArchiveFailedToUpload(t *testing.T) {
+	h := newHarness(t, nil)
+
+	mount, err := h.manager.EnsureMounted(testRoot, true)
+	require.NoError(t, err)
+	h.writeInMount(t, mount, testRoot+"/irreplaceable.txt", "the only copy\n")
+
+	h.backend.mu.Lock()
+	h.backend.uploadErr = errors.New("iRODS unavailable")
+	h.backend.mu.Unlock()
+
+	require.Error(t, h.manager.Close())
+
+	localPath, err := h.manager.LocalPath(mount, testRoot+"/irreplaceable.txt")
+	require.NoError(t, err)
+	content, readErr := os.ReadFile(localPath)
+	require.NoError(t, readErr, "the tree must survive a failed upload")
+	assert.Equal(t, "the only copy\n", string(content))
+}
+
+func TestCloseClearsTheRootWhenEverythingReachedIRODS(t *testing.T) {
+	h := newHarness(t, nil)
+
+	mount, err := h.manager.EnsureMounted(testRoot, true)
+	require.NoError(t, err)
+	h.writeInMount(t, mount, testRoot+"/a.txt", "content\n")
+
+	require.NoError(t, h.manager.Close())
+
+	assert.True(t, h.backend.exists(testRoot+".mount.tar"))
+	_, statErr := os.Stat(h.manager.localRootPath)
+	assert.True(t, os.IsNotExist(statErr), "nothing is left behind once every archive is uploaded")
+	_ = mount
+}

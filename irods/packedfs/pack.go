@@ -72,13 +72,20 @@ func (m *Manager) packLocked(mount *Mount, unmount bool) error {
 	mount.setState(MountStatePacking)
 
 	mark := mount.dirtyMark()
-	uploadErr := m.uploadArchive(mount, logger)
-	if uploadErr != nil {
-		mount.setState(previousState)
-		return uploadErr
-	}
 
-	mount.markPacked(mark, time.Now())
+	// Releasing a session flushes it and then unmounts it, so without this the
+	// same tree would be packed and uploaded twice in a row. A clean tree is
+	// identical to its archive either way, whether it was just flushed or was
+	// only ever read, so there is nothing to send.
+	if unmount && !mount.IsDirty() {
+		logger.Debug("Skipping the pack of an unchanged packed directory")
+	} else {
+		if uploadErr := m.uploadArchive(mount, logger); uploadErr != nil {
+			mount.setState(previousState)
+			return uploadErr
+		}
+		mount.markPacked(mark, time.Now())
+	}
 
 	if !unmount {
 		mount.setState(previousState)
@@ -97,6 +104,33 @@ func (m *Manager) packLocked(mount *Mount, unmount bool) error {
 
 	logger.Info("Unmounted packed directory")
 	return nil
+}
+
+// removeArchiveIfPresent clears a data object so a rename can take its name.
+//
+// The check before the delete is not an optimization. A zone that runs policy
+// on delete can answer a request to remove something that is not there with a
+// rule outcome such as CUT_ACTION_PROCESSED_ERR rather than a recognizable
+// file-not-found, and treating that as a failure aborted the very first upload
+// of every packed directory, which by definition has no previous archive.
+//
+// The delete is likewise confirmed by looking rather than by reading the error,
+// for the same reason: what matters is whether the name is free.
+func (m *Manager) removeArchiveIfPresent(archivePath string) error {
+	if !m.backend.ExistsFile(archivePath) {
+		return nil
+	}
+
+	err := m.backend.RemoveFile(archivePath, true)
+	if err == nil || irodsclient_types.IsFileNotFoundError(err) {
+		return nil
+	}
+
+	if !m.backend.ExistsFile(archivePath) {
+		return nil
+	}
+
+	return errors.Wrapf(err, "failed to remove the archive %q", archivePath)
 }
 
 // uploadArchive builds the archive and puts it in place.
@@ -138,9 +172,9 @@ func (m *Manager) uploadArchive(mount *Mount, logger *log.Entry) error {
 	// iRODS will not rename onto an existing data object, so the previous
 	// archive goes first. The gap between the two is the only window in which
 	// the directory has no archive, and it is a metadata operation wide.
-	if err := m.backend.RemoveFile(mount.ArchivePath, true); err != nil && !irodsclient_types.IsFileNotFoundError(err) {
+	if err := m.removeArchiveIfPresent(mount.ArchivePath); err != nil {
 		m.backend.RemoveFile(remoteTempPath, true)
-		return errors.Wrapf(err, "failed to remove the previous archive %q", mount.ArchivePath)
+		return errors.Wrapf(err, "failed to clear the previous archive of %q", mount.Root)
 	}
 
 	if err := m.backend.RenameFileToFile(remoteTempPath, mount.ArchivePath); err != nil {
@@ -314,6 +348,11 @@ func (m *Manager) UnmountAll() error {
 }
 
 // Close stops the snapshot worker and flushes every mounted directory to iRODS.
+//
+// The local root is removed only when every directory reached iRODS. A tree
+// whose archive failed to upload is the only copy of that data, so it is left
+// on disk for an operator to recover rather than deleted along with the
+// session.
 func (m *Manager) Close() error {
 	if m == nil {
 		return nil
@@ -324,7 +363,18 @@ func (m *Manager) Close() error {
 	})
 	m.wg.Wait()
 
-	return m.UnmountAll()
+	if err := m.UnmountAll(); err != nil {
+		m.logger.WithError(err).Warnf(
+			"keeping the packed directory trees under %q: their archives did not reach iRODS",
+			m.localRootPath)
+		return err
+	}
+
+	if err := os.RemoveAll(m.localRootPath); err != nil {
+		return errors.Wrapf(err, "failed to remove the packed directory root %q", m.localRootPath)
+	}
+
+	return nil
 }
 
 // Remove deletes a packed directory outright: the local tree is discarded
@@ -346,8 +396,8 @@ func (m *Manager) Remove(mount *Mount) error {
 	m.mu.Unlock()
 
 	var combined error
-	if err := m.backend.RemoveFile(mount.ArchivePath, true); err != nil && !irodsclient_types.IsFileNotFoundError(err) {
-		combined = errors.Wrapf(err, "failed to remove archive %q", mount.ArchivePath)
+	if err := m.removeArchiveIfPresent(mount.ArchivePath); err != nil {
+		combined = err
 	}
 
 	// A directory that was still a collection, or one a crash recovery
@@ -387,8 +437,8 @@ func (m *Manager) RenameRoot(mount *Mount, destRoot string) error {
 	destArchivePath := m.config.ArchivePath(destRoot)
 	logger := m.logger.WithFields(log.Fields{"root": mount.Root, "dest": destRoot})
 
-	if err := m.backend.RemoveFile(destArchivePath, true); err != nil && !irodsclient_types.IsFileNotFoundError(err) {
-		return errors.Wrapf(err, "failed to clear the destination archive %q", destArchivePath)
+	if err := m.removeArchiveIfPresent(destArchivePath); err != nil {
+		return err
 	}
 	if err := m.backend.RenameFileToFile(mount.ArchivePath, destArchivePath); err != nil {
 		return errors.Wrapf(err, "failed to rename archive %q to %q", mount.ArchivePath, destArchivePath)
