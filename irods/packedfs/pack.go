@@ -54,17 +54,23 @@ func (m *Manager) packLocked(mount *Mount, unmount bool) error {
 	// Packing is CPU and disk bound, so only a few run at once. A release that
 	// waits here still finishes; it just does not compete with every other
 	// session closing at the same moment.
+	//
+	// Whether a slot was actually taken has to be tracked: releasing one that
+	// was never acquired takes a token belonging to another pack and lets more
+	// of them run at once than the limit allows, which is exactly the wrong
+	// thing during a shutdown that is flushing every mount.
+	acquired := false
 	select {
 	case m.packSem <- struct{}{}:
+		acquired = true
 	case <-m.stopCh:
 		// Shutdown still has to flush this tree, so proceed without a slot
 		// rather than dropping data on the floor.
 		logger.Debug("Packing without a concurrency slot because the manager is stopping")
 	}
 	defer func() {
-		select {
-		case <-m.packSem:
-		default:
+		if acquired {
+			<-m.packSem
 		}
 	}()
 
@@ -93,6 +99,16 @@ func (m *Manager) packLocked(mount *Mount, unmount bool) error {
 		// accounting, so bring the quota charge back in line.
 		m.reconcileSize(mount, logger)
 		return nil
+	}
+
+	// Discarding the tree destroys the only copy of anything not in the
+	// archive, so never do it while a change is outstanding. Callers release
+	// their file handles before unmounting, which is what normally makes this
+	// impossible; if it happens anyway, keeping the tree and reporting it beats
+	// deleting data that was never uploaded.
+	if mount.IsDirty() {
+		mount.setState(previousState)
+		return errors.Newf("packed directory %q changed while it was being unmounted; its tree is kept", mount.Root)
 	}
 
 	m.discardLocalTree(mount, logger)
@@ -212,17 +228,29 @@ func (m *Manager) uploadArchive(mount *Mount, logger *log.Entry) error {
 
 // reconcileSize brings the quota charge in line with what the tree occupies.
 func (m *Manager) reconcileSize(mount *Mount, logger *log.Entry) {
+	mount.mu.RLock()
+	before := mount.reservedSize
+	mount.mu.RUnlock()
+
+	// Walking the tree is slow and runs unlocked, so a write may charge growth
+	// while it happens. Apply the difference the walk found rather than the
+	// figure itself, so that charge is not overwritten and lost.
 	actual := treeSize(mount.LocalPath)
+	drift := actual - before
 
 	mount.mu.Lock()
 	previous := mount.reservedSize
+	target := previous + drift
+	if target < 0 {
+		target = 0
+	}
 	mount.mu.Unlock()
 
-	if actual == previous {
+	if target == previous {
 		return
 	}
 
-	if err := m.rebalance(previous, actual); err != nil {
+	if err := m.rebalance(previous, target); err != nil {
 		// The tree grew past what staging can cover. It stays mounted and
 		// charged at the old figure; the next write hits the quota instead.
 		logger.WithError(err).Warn("failed to grow the staging reservation for a packed directory")
@@ -230,7 +258,7 @@ func (m *Manager) reconcileSize(mount *Mount, logger *log.Entry) {
 	}
 
 	mount.mu.Lock()
-	mount.reservedSize = actual
+	mount.reservedSize += target - previous
 	mount.mu.Unlock()
 }
 

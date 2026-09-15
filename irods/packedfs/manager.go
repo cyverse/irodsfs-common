@@ -588,22 +588,31 @@ func (m *Manager) ReserveGrowth(mount *Mount, delta int64) error {
 	// grew past it during a session would pack and upload fine and then be
 	// refused on the next mount, leaving the directory unreadable; failing the
 	// write that crosses the line keeps the directory usable.
-	mount.mu.RLock()
-	projected := mount.reservedSize + delta
-	mount.mu.RUnlock()
-	if projected > m.config.MaxPackedDirSize {
+	//
+	// The check and the charge are one step: concurrent writers that each only
+	// read the current size would every one of them see room and every one of
+	// them take it. The staging reservation is left outside the lock, since it
+	// can block on eviction, and is rolled back if it fails.
+	mount.mu.Lock()
+	if mount.reservedSize+delta > m.config.MaxPackedDirSize {
+		projected := mount.reservedSize + delta
+		mount.mu.Unlock()
 		return errors.Wrapf(ErrArchiveTooLarge,
 			"packed directory %q would reach %d bytes, over the %d byte limit",
 			mount.Root, projected, m.config.MaxPackedDirSize)
 	}
-
-	if err := m.reserve(delta); err != nil {
-		return err
-	}
-
-	mount.mu.Lock()
 	mount.reservedSize += delta
 	mount.mu.Unlock()
+
+	if err := m.reserve(delta); err != nil {
+		mount.mu.Lock()
+		mount.reservedSize -= delta
+		if mount.reservedSize < 0 {
+			mount.reservedSize = 0
+		}
+		mount.mu.Unlock()
+		return err
+	}
 
 	return nil
 }

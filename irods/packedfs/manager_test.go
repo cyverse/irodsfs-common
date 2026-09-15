@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -1017,4 +1018,129 @@ func TestCloseClearsTheRootWhenEverythingReachedIRODS(t *testing.T) {
 	_, statErr := os.Stat(h.manager.localRootPath)
 	assert.True(t, os.IsNotExist(statErr), "nothing is left behind once every archive is uploaded")
 	_ = mount
+}
+
+// Two writers growing the same tree must not both see room for the same bytes.
+// The limit here leaves room for exactly one chunk, so any second grant is a
+// check that ran against a size another writer had already claimed.
+func TestConcurrentGrowthCannotExceedTheDirectoryLimit(t *testing.T) {
+	const chunk = 32 * 1024
+	const limit = chunk + 1024
+
+	h := newHarness(t, func(config *Config, quota *fakeQuota) {
+		config.MaxPackedDirSize = limit
+	})
+
+	mount, err := h.manager.EnsureMounted(testRoot, true)
+	require.NoError(t, err)
+
+	const writers = 64
+	var granted int64
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := h.manager.ReserveGrowth(mount, chunk); err == nil {
+				mu.Lock()
+				granted += chunk
+				mu.Unlock()
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	assert.Equal(t, int64(chunk), granted, "only one writer fits under the limit")
+	assert.Equal(t, granted, mount.ReservedSize(), "the charge matches what was granted")
+}
+
+// Packing is CPU and disk bound and is capped for that reason. This covers the
+// ordinary path only: during shutdown the cap is deliberately bypassed so every
+// tree still gets flushed.
+func TestConcurrentPackingStaysWithinItsLimit(t *testing.T) {
+	h := newHarness(t, func(config *Config, quota *fakeQuota) {
+		config.ConcurrentPackLimit = 2
+	})
+
+	roots := []string{
+		"/z/home/u/proj/.venv",
+		"/z/home/u/proj/.git",
+		"/z/home/u/other/.venv",
+		"/z/home/u/other/.git",
+	}
+	h.backend.seedDir(t, "/z/home/u/proj")
+	h.backend.seedDir(t, "/z/home/u/other")
+
+	mounts := make([]*Mount, 0, len(roots))
+	for _, root := range roots {
+		mount, err := h.manager.EnsureMounted(root, true)
+		require.NoError(t, err)
+		h.writeInMount(t, mount, root+"/file.txt", "content\n")
+		mounts = append(mounts, mount)
+	}
+
+	var inFlight, peak int64
+	var mu sync.Mutex
+	h.backend.beforeUpload = func() {
+		mu.Lock()
+		inFlight++
+		if inFlight > peak {
+			peak = inFlight
+		}
+		mu.Unlock()
+
+		time.Sleep(20 * time.Millisecond)
+
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+	}
+
+	var wg sync.WaitGroup
+	for _, mount := range mounts {
+		wg.Add(1)
+		go func(mount *Mount) {
+			defer wg.Done()
+			assert.NoError(t, h.manager.Pack(mount))
+		}(mount)
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.LessOrEqual(t, peak, int64(2), "more packs ran at once than the configured limit")
+}
+
+// Unmounting discards the local tree, which is the only copy of anything the
+// archive does not hold. A change that lands while the archive is being built
+// is not in that archive, so the tree must be kept rather than deleted with it.
+func TestUnmountKeepsATreeThatChangedWhileItWasPacked(t *testing.T) {
+	h := newHarness(t, nil)
+
+	mount, err := h.manager.EnsureMounted(testRoot, true)
+	require.NoError(t, err)
+	h.writeInMount(t, mount, testRoot+"/a.txt", "one\n")
+
+	// A write landing mid-upload moves the change counter, so the pack that is
+	// already running must not report the tree as clean.
+	h.backend.beforeUpload = func() { mount.MarkDirty() }
+
+	err = h.manager.Unmount(mount)
+	require.Error(t, err, "a tree with unsaved changes must not be discarded")
+	assert.Contains(t, err.Error(), "changed while it was being unmounted")
+
+	assert.True(t, mount.IsDirty())
+	assert.True(t, h.manager.ExistsFile(mount, testRoot+"/a.txt"), "the tree survives")
+
+	// A retry with nothing further arriving completes normally.
+	h.backend.beforeUpload = nil
+	require.NoError(t, h.manager.Unmount(mount))
+	assert.True(t, h.backend.exists(testRoot+".mount.tar"))
+	_, statErr := os.Stat(mount.LocalPath)
+	assert.True(t, os.IsNotExist(statErr))
 }

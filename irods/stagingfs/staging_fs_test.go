@@ -2159,3 +2159,105 @@ func TestStagingFSCreateFileWhereDirectoryRemovalIsPending(t *testing.T) {
 		t.Fatalf("actions = %v, want %v", actions, want)
 	}
 }
+
+// A packed directory tree is held on the same disk and charged against the same
+// quota, but it lives under its own root and carries no staging metadata.
+// SyncAll empties the staging data directory and used to zero the whole counter
+// with it, so a flush made the quota forget a tree that was still on disk and
+// admit writes the disk could not hold.
+func TestSyncAllKeepsExternallyReservedSpaceCharged(t *testing.T) {
+	staging, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+		MaxDataSize:   1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("failed to create staging fs: %v", err)
+	}
+	defer staging.Close()
+
+	if err := staging.ReserveSpace(600 * 1024); err != nil {
+		t.Fatalf("ReserveSpace: %v", err)
+	}
+	if got := staging.GetCurrentDataSize(); got != 600*1024 {
+		t.Fatalf("GetCurrentDataSize() = %d, want %d", got, 600*1024)
+	}
+
+	if err := staging.SyncAll(); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+
+	if got := staging.GetCurrentDataSize(); got != 600*1024 {
+		t.Fatalf("after SyncAll GetCurrentDataSize() = %d, want %d: the tree is still on disk", got, 600*1024)
+	}
+	if got, want := staging.GetAvailableDataSize(), int64(1024*1024-600*1024); got != want {
+		t.Fatalf("GetAvailableDataSize() = %d, want %d", got, want)
+	}
+
+	// The quota still knows the space is gone, so an oversized request fails.
+	err = staging.ReserveSpace(600 * 1024)
+	if err == nil {
+		t.Fatalf("ReserveSpace succeeded although the packed tree still holds the space")
+	}
+	if !cockroach_errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("ReserveSpace error = %v, want ErrQuotaExceeded", err)
+	}
+
+	// Releasing it frees the space for good.
+	staging.ReleaseSpace(600 * 1024)
+	if got := staging.GetCurrentDataSize(); got != 0 {
+		t.Fatalf("after ReleaseSpace GetCurrentDataSize() = %d, want 0", got)
+	}
+	if err := staging.ReserveSpace(600 * 1024); err != nil {
+		t.Fatalf("ReserveSpace after release: %v", err)
+	}
+}
+
+func TestClearKeepsExternallyReservedSpaceCharged(t *testing.T) {
+	staging, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+		MaxDataSize:   1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("failed to create staging fs: %v", err)
+	}
+	defer staging.Close()
+
+	if err := staging.ReserveSpace(256 * 1024); err != nil {
+		t.Fatalf("ReserveSpace: %v", err)
+	}
+	if err := staging.Clear(); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+
+	if got := staging.GetCurrentDataSize(); got != 256*1024 {
+		t.Fatalf("GetCurrentDataSize() = %d, want %d: discarding staged data does not remove a packed tree", got, 256*1024)
+	}
+}
+
+// Releasing more than was charged must not drive the counter below zero, which
+// would hand out space that does not exist.
+func TestReleaseSpaceDoesNotUnderflow(t *testing.T) {
+	staging, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+		MaxDataSize:   1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("failed to create staging fs: %v", err)
+	}
+	defer staging.Close()
+
+	if err := staging.ReserveSpace(1024); err != nil {
+		t.Fatalf("ReserveSpace: %v", err)
+	}
+	staging.ReleaseSpace(4096)
+
+	if got := staging.GetCurrentDataSize(); got != 0 {
+		t.Fatalf("GetCurrentDataSize() = %d, want 0", got)
+	}
+	if got := staging.GetAvailableDataSize(); got != 1024*1024 {
+		t.Fatalf("GetAvailableDataSize() = %d, want %d", got, 1024*1024)
+	}
+}

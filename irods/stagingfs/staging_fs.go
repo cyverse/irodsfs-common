@@ -96,7 +96,8 @@ type StagingFS struct {
 	stopOnce         sync.Once
 	workerWg         sync.WaitGroup
 	sizeMutex        sync.Mutex
-	currentSize      int64 // current total staged data size (dirty + cached)
+	currentSize      int64 // staged data size (dirty + cached) held under this root
+	externalSize     int64 // bytes charged by holders outside the staging metadata, such as packed directory trees
 	reservedSize     int64 // space promised to in-flight requests but not yet counted in currentSize
 	maxSize          int64 // max allowed data size
 	maxCacheFileSize int64 // files larger than this skip the read cache after sync
@@ -990,6 +991,9 @@ func (sf *StagingFS) SyncAll() error {
 		return errors.Wrap(err, "failed to clean up data directory")
 	}
 
+	// Only the staged data under this root was removed. Bytes charged by a
+	// packed directory tree are still on disk under its own root, so clearing
+	// them here would let the quota admit writes the disk cannot hold.
 	sf.sizeMutex.Lock()
 	sf.currentSize = 0
 	sf.sizeMutex.Unlock()
@@ -1349,7 +1353,7 @@ func (sf *StagingFS) transitionToCached(meta *StagingMetadata) {
 
 	// Proactively evict old cached files if total size exceeds the quota
 	sf.sizeMutex.Lock()
-	overflow := sf.currentSize - sf.maxSize
+	overflow := sf.usedSizeUnlocked() - sf.maxSize
 	sf.sizeMutex.Unlock()
 	if overflow > 0 {
 		sf.evictCachedOldest(overflow)
@@ -1574,6 +1578,9 @@ func (sf *StagingFS) Clear() error {
 		return errors.Wrap(err, "failed to remove data directory")
 	}
 
+	// Only the staged data under this root was removed. Bytes charged by a
+	// packed directory tree are still on disk under its own root, so clearing
+	// them here would let the quota admit writes the disk cannot hold.
 	sf.sizeMutex.Lock()
 	sf.currentSize = 0
 	sf.sizeMutex.Unlock()
@@ -1586,11 +1593,18 @@ func (sf *StagingFS) Clear() error {
 	return os.MkdirAll(dataPath, 0755)
 }
 
-// GetCurrentDataSize returns the current total staged data size
+// GetCurrentDataSize returns the current total staged data size, including the
+// packed directory trees that share this quota.
 func (sf *StagingFS) GetCurrentDataSize() int64 {
 	sf.sizeMutex.Lock()
 	defer sf.sizeMutex.Unlock()
-	return sf.currentSize
+	return sf.usedSizeUnlocked()
+}
+
+// usedSizeUnlocked is every byte charged against the quota, whatever holds it.
+// The caller must hold sizeMutex.
+func (sf *StagingFS) usedSizeUnlocked() int64 {
+	return sf.currentSize + sf.externalSize
 }
 
 // GetMaxDataSize returns the configured max data size
@@ -1603,7 +1617,7 @@ func (sf *StagingFS) GetMaxDataSize() int64 {
 func (sf *StagingFS) GetAvailableDataSize() int64 {
 	sf.sizeMutex.Lock()
 	defer sf.sizeMutex.Unlock()
-	return sf.maxSize - sf.currentSize - sf.reservedSize
+	return sf.maxSize - sf.usedSizeUnlocked() - sf.reservedSize
 }
 
 // ensureQuota ensures there is room for size additional bytes without holding on
@@ -1628,13 +1642,13 @@ func (sf *StagingFS) reserveQuota(size int64) error {
 	// and then re-checks under the lock, since other requests reserve too.
 	for attempt := 0; ; attempt++ {
 		sf.sizeMutex.Lock()
-		overflow := (sf.currentSize + sf.reservedSize + size) - sf.maxSize
+		overflow := (sf.usedSizeUnlocked() + sf.reservedSize + size) - sf.maxSize
 		if overflow <= 0 {
 			sf.reservedSize += size
 			sf.sizeMutex.Unlock()
 			return nil
 		}
-		current := sf.currentSize
+		current := sf.usedSizeUnlocked()
 		sf.sizeMutex.Unlock()
 
 		if attempt >= 2 {
@@ -1675,7 +1689,10 @@ func (sf *StagingFS) ReserveSpace(size int64) error {
 		return err
 	}
 
-	sf.addDataSize(size)
+	sf.sizeMutex.Lock()
+	sf.externalSize += size
+	sf.sizeMutex.Unlock()
+
 	sf.releaseQuota(size)
 	return nil
 }
@@ -1686,7 +1703,12 @@ func (sf *StagingFS) ReleaseSpace(size int64) {
 		return
 	}
 
-	sf.subtractDataSize(size)
+	sf.sizeMutex.Lock()
+	sf.externalSize -= size
+	if sf.externalSize < 0 {
+		sf.externalSize = 0
+	}
+	sf.sizeMutex.Unlock()
 }
 
 // releaseQuota gives back a reservation taken by reserveQuota.

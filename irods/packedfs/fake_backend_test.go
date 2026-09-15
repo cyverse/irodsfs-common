@@ -34,6 +34,8 @@ type fakeBackend struct {
 	deleteMissingErr error
 	uploads          int
 	downloads        int
+	// beforeUpload runs at the start of every upload, to observe concurrency.
+	beforeUpload func()
 }
 
 func newFakeBackend(t *testing.T) *fakeBackend {
@@ -200,6 +202,13 @@ func (b *fakeBackend) DownloadFileParallel(irodsPath string, localPath string, t
 }
 
 func (b *fakeBackend) UploadFileParallel(localPath string, irodsPath string, taskNum int, callback irodsclient_common.TransferTrackerCallback) error {
+	b.mu.Lock()
+	hook := b.beforeUpload
+	b.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+
 	b.mu.Lock()
 	b.uploads++
 	if b.uploadErr != nil {
