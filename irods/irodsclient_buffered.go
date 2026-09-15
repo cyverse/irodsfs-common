@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -17,6 +18,7 @@ import (
 	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 	"github.com/cyverse/irodsfs-common/irods/cache"
 	"github.com/cyverse/irodsfs-common/irods/inode"
+	"github.com/cyverse/irodsfs-common/irods/packedfs"
 	"github.com/cyverse/irodsfs-common/irods/stagingfs"
 	"github.com/cyverse/irodsfs-common/util"
 	"github.com/rs/xid"
@@ -37,6 +39,11 @@ type IRODSFSClientBufferedConfig struct {
 	GracePeriod        time.Duration              // Grace period before sync (default: 10s)
 	UsePersistence     bool                       // Use BadgerDB for crash recovery
 	OnSyncError        stagingfs.SyncErrorHandler // Optional error callback
+
+	// PackedDirectories configures directories that are stored in iRODS as one
+	// archive data object rather than as a collection of many small files. Nil
+	// or disabled leaves every directory handled normally.
+	PackedDirectories *packedfs.Config
 }
 
 // IRODSFSClientBuffered wraps IRODSFSClient with block-level read-through caching
@@ -49,6 +56,7 @@ type IRODSFSClientBuffered struct {
 	cache            *cache.MemoryCacheManager
 	helper           *util.FileBlockHelper
 	staging          *stagingfs.StagingFS
+	packed           *packedfs.Manager
 	inodeManager     *inode.InodeManager
 	logger           *log.Entry
 	cacheHit         uint64
@@ -130,6 +138,44 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 		"fsclient_buffered_id": clientID,
 	})
 
+	// Packed directories live on the same staging disk and share its quota, so
+	// they need a staging root just as staged writes do.
+	var packedManager *packedfs.Manager
+	if config.StagingRootPath != "" && config.PackedDirectories != nil {
+		var inodeResolver func(string) (uint64, error)
+		if inodeManager != nil {
+			inodeResolver = inodeManager.CreateOrGetInodeIDForStagingEntry
+		}
+
+		// Assign through an interface variable only when staging really exists:
+		// a typed nil would make the manager's nil check pass and then panic on
+		// the first reservation.
+		var packedQuota packedfs.Quota
+		if staging != nil {
+			packedQuota = staging
+		}
+
+		packedManager, err = packedfs.NewManager(&packedfs.ManagerConfig{
+			Config:        config.PackedDirectories,
+			Backend:       directClient,
+			Quota:         packedQuota,
+			LocalRootPath: filepath.Join(config.StagingRootPath, "packed"),
+			Owner:         fs.GetAccount().ClientUser,
+			InodeResolver: inodeResolver,
+			Logger:        logger,
+		})
+		if err != nil {
+			if inodeManager != nil {
+				inodeManager.Close()
+			}
+			if staging != nil {
+				staging.Close()
+			}
+			directClient.Release()
+			return nil, errors.Wrap(err, "failed to create packed directory manager")
+		}
+	}
+
 	return &IRODSFSClientBuffered{
 		id:               clientID,
 		fs:               fs,
@@ -139,12 +185,20 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 		inodeManager:     inodeManager,
 		helper:           util.NewFileBlockHelper(blockSize),
 		staging:          staging,
+		packed:           packedManager,
 		logger:           logger,
 	}, nil
 }
 
 func (c *IRODSFSClientBuffered) Release() error {
 	var releaseErr error
+
+	// Packed directories go first: Close packs every mounted tree and uploads
+	// it, which needs both the backend client and the staging disk still up.
+	if c.packed != nil {
+		releaseErr = errors.CombineErrors(releaseErr, c.packed.Close())
+		c.packed = nil
+	}
 
 	if c.inodeManager != nil {
 		releaseErr = errors.CombineErrors(releaseErr, c.inodeManager.Close())
@@ -165,14 +219,32 @@ func (c *IRODSFSClientBuffered) Release() error {
 }
 
 func (c *IRODSFSClientBuffered) Sync() error {
+	var packedErr error
+	if c.packed != nil {
+		c.logger.Info("packing mounted packed directories to iRODS")
+		// Snapshot rather than unmount: an explicit sync flushes data without
+		// throwing away trees the session is still using.
+		for _, mount := range c.packed.Mounts() {
+			if !mount.IsDirty() {
+				continue
+			}
+			if err := c.packed.Pack(mount); err != nil {
+				packedErr = errors.CombineErrors(packedErr, err)
+			}
+		}
+	}
+
 	if c.staging == nil {
-		return nil
+		return packedErr
 	}
 
 	c.logger.Info("syncing all staged data to iRODS")
 
 	if err := c.staging.SyncAll(); err != nil {
-		return errors.Wrap(err, "failed to sync staged data")
+		return errors.CombineErrors(packedErr, errors.Wrap(err, "failed to sync staged data"))
+	}
+	if packedErr != nil {
+		return packedErr
 	}
 
 	c.cache.Clear(true)
@@ -197,6 +269,12 @@ func (c *IRODSFSClientBuffered) GetStagingFS() *stagingfs.StagingFS {
 	return c.staging
 }
 
+// GetPackedFS returns the packed directory manager, or nil when packed
+// directories are disabled.
+func (c *IRODSFSClientBuffered) GetPackedFS() *packedfs.Manager {
+	return c.packed
+}
+
 func (c *IRODSFSClientBuffered) GetOpenConnections() int {
 	return c.client.GetOpenConnections()
 }
@@ -209,6 +287,12 @@ func (c *IRODSFSClientBuffered) GetMetrics() *irodsclient_metrics.IRODSMetrics {
 }
 
 func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, error) {
+	// A directory inside a packed one is listed from its extracted tree; iRODS
+	// holds no collection to list there at all.
+	if entries, handled, err := c.packedList(dirPath); handled {
+		return entries, err
+	}
+
 	entries, remoteDirPath, err := executeWithRenameFallback(dirPath, c.resolvePendingRenameSource, c.client.List)
 	if err != nil {
 		entries = []*irodsclient_fs.Entry{}
@@ -218,7 +302,9 @@ func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, e
 		if err != nil {
 			return nil, err
 		}
-		return entries, nil
+		// An archive data object stands in for the directory it holds, so the
+		// caller sees ".venv" rather than ".venv.mount.tar".
+		return c.packedRewriteListing(dirPath, entries), nil
 	}
 
 	// Build a map for quick lookup and modification
@@ -440,7 +526,7 @@ func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, e
 	for _, e := range entryMap {
 		result = append(result, e)
 	}
-	return result, nil
+	return c.packedRewriteListing(dirPath, result), nil
 }
 
 func addImpliedStagingDirectories(entryMap map[string]*irodsclient_fs.Entry, allMeta map[string]*stagingfs.StagingMetadata, dirPath string, owner string, inodeManager *inode.InodeManager) error {
@@ -482,6 +568,10 @@ func addImpliedStagingDirectories(entryMap map[string]*irodsclient_fs.Entry, all
 }
 
 func (c *IRODSFSClientBuffered) Stat(filePath string) (*irodsclient_fs.Entry, error) {
+	if entry, handled, err := c.packedStat(filePath); handled {
+		return entry, err
+	}
+
 	if c.staging != nil {
 		// Check staging state first
 		meta := c.staging.Get(filePath)
@@ -734,6 +824,10 @@ func (c *IRODSFSClientBuffered) getPendingRenameEntry(filePath string) (*irodscl
 }
 
 func (c *IRODSFSClientBuffered) ExistsDir(dirPath string) bool {
+	if handled, exists := c.packedExistsDir(dirPath); handled {
+		return exists
+	}
+
 	if c.staging != nil {
 		meta := c.staging.Get(dirPath)
 		if meta != nil {
@@ -755,6 +849,10 @@ func (c *IRODSFSClientBuffered) ExistsDir(dirPath string) bool {
 }
 
 func (c *IRODSFSClientBuffered) ExistsFile(filePath string) bool {
+	if handled, exists := c.packedExistsFile(filePath); handled {
+		return exists
+	}
+
 	if c.staging != nil {
 		meta := c.staging.Get(filePath)
 		if meta != nil {
@@ -788,6 +886,10 @@ func (c *IRODSFSClientBuffered) hasPendingRenameDestination(filePath string, act
 }
 
 func (c *IRODSFSClientBuffered) RemoveFile(irodsPath string, force bool) error {
+	if handled, err := c.packedRemoveFile(irodsPath, force); handled {
+		return err
+	}
+
 	if c.staging != nil {
 		if err := c.staging.DeleteWithForce(irodsPath, force); err != nil {
 			return err
@@ -799,6 +901,10 @@ func (c *IRODSFSClientBuffered) RemoveFile(irodsPath string, force bool) error {
 }
 
 func (c *IRODSFSClientBuffered) RemoveDir(irodsPath string, recurse bool, force bool) error {
+	if handled, err := c.packedRemoveDir(irodsPath, recurse, force); handled {
+		return err
+	}
+
 	if c.staging != nil {
 		return c.staging.Rmdir(irodsPath, recurse, force)
 	}
@@ -806,6 +912,10 @@ func (c *IRODSFSClientBuffered) RemoveDir(irodsPath string, recurse bool, force 
 }
 
 func (c *IRODSFSClientBuffered) MakeDir(irodsPath string, recurse bool) error {
+	if handled, err := c.packedMakeDir(irodsPath, recurse); handled {
+		return err
+	}
+
 	if c.staging != nil {
 		return c.staging.Mkdir(irodsPath)
 	}
@@ -813,6 +923,10 @@ func (c *IRODSFSClientBuffered) MakeDir(irodsPath string, recurse bool) error {
 }
 
 func (c *IRODSFSClientBuffered) RenameDirToDir(srcPath string, destPath string) error {
+	if handled, err := c.packedRenameDir(srcPath, destPath); handled {
+		return err
+	}
+
 	if c.staging != nil {
 		if err := c.staging.RenameDir(srcPath, destPath); err != nil {
 			return err
@@ -826,6 +940,10 @@ func (c *IRODSFSClientBuffered) RenameDirToDir(srcPath string, destPath string) 
 }
 
 func (c *IRODSFSClientBuffered) RenameFileToFile(srcPath string, destPath string) error {
+	if handled, err := c.packedRenameWithin(srcPath, destPath); handled {
+		return err
+	}
+
 	if c.staging != nil {
 		if err := c.staging.Rename(srcPath, destPath); err != nil {
 			return err
@@ -856,6 +974,12 @@ func (c *IRODSFSClientBuffered) CreateFile(path string, mode string) (IRODSFSFil
 	})
 
 	defer util.StackTraceFromPanic(logger)
+
+	// A packed directory holds its files on staging disk with no block cache
+	// and no staging metadata, so the invalidation below does not apply.
+	if handle, handled, err := c.packedOpen(path, irodsclient_types.FileOpenMode(mode), true); handled {
+		return handle, err
+	}
 
 	// Invalidate cache before creating (file may be overwritten)
 	if err := c.invalidateFileCacheBlocks(path); err != nil {
@@ -917,6 +1041,10 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 	defer util.StackTraceFromPanic(logger)
 
 	openMode := irodsclient_types.FileOpenMode(mode)
+
+	if handle, handled, err := c.packedOpen(path, openMode, false); handled {
+		return handle, err
+	}
 
 	// Use staging for write modes
 	if c.staging != nil && openMode.IsWrite() {
@@ -1016,6 +1144,12 @@ func (c *IRODSFSClientBuffered) CreateFileBulk(path string, mode string) (IRODSF
 
 	defer util.StackTraceFromPanic(logger)
 
+	// Bulk mode exists to avoid keeping a synced copy as read cache. A packed
+	// file is neither synced on its own nor cached, so it needs no distinction.
+	if handle, handled, err := c.packedOpen(path, irodsclient_types.FileOpenMode(mode), true); handled {
+		return handle, err
+	}
+
 	if err := c.invalidateFileCacheBlocks(path); err != nil {
 		logger.WithError(err).Warn("failed to invalidate cache before file creation")
 	}
@@ -1057,6 +1191,10 @@ func (c *IRODSFSClientBuffered) OpenFileBulk(path string, mode string) (IRODSFSF
 	defer util.StackTraceFromPanic(logger)
 
 	openMode := irodsclient_types.FileOpenMode(mode)
+
+	if handle, handled, err := c.packedOpen(path, openMode, false); handled {
+		return handle, err
+	}
 
 	if c.staging != nil && openMode.IsWrite() {
 		entry, err := c.Stat(path)
@@ -1133,6 +1271,10 @@ func (c *IRODSFSClientBuffered) OpenFileBulk(path string, mode string) (IRODSFSF
 }
 
 func (c *IRODSFSClientBuffered) TruncateFile(path string, size int64) error {
+	if handled, err := c.packedTruncateFile(path, size); handled {
+		return err
+	}
+
 	logger := c.logger.WithField("path", path)
 	if err := c.invalidateFileCacheBlocks(path); err != nil {
 		logger.WithError(err).Warn("failed to invalidate cache before truncating file")

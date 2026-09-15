@@ -1657,6 +1657,38 @@ func (sf *StagingFS) reserveQuota(size int64) error {
 	}
 }
 
+// ReserveSpace charges size bytes of staging disk to a holder outside the
+// staging metadata, such as a packed directory's extracted tree.
+//
+// The bytes are counted in currentSize, so every other quota decision sees
+// them, but no metadata is registered for them. That is deliberate: a packed
+// directory must not be evicted or force-synced file by file, since the whole
+// point of holding it is to upload it once as an archive. When staging is full
+// the reservation therefore fails, and the write that needed it fails with it,
+// rather than the tree being quietly uploaded the slow way.
+func (sf *StagingFS) ReserveSpace(size int64) error {
+	if size <= 0 {
+		return nil
+	}
+
+	if err := sf.reserveQuota(size); err != nil {
+		return err
+	}
+
+	sf.addDataSize(size)
+	sf.releaseQuota(size)
+	return nil
+}
+
+// ReleaseSpace returns bytes charged by ReserveSpace.
+func (sf *StagingFS) ReleaseSpace(size int64) {
+	if size <= 0 {
+		return
+	}
+
+	sf.subtractDataSize(size)
+}
+
 // releaseQuota gives back a reservation taken by reserveQuota.
 func (sf *StagingFS) releaseQuota(size int64) {
 	if size == 0 {
