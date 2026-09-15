@@ -1,8 +1,6 @@
 module github.com/cyverse/irodsfs-common
 
-go 1.24.9
-
-toolchain go1.24.12
+go 1.25.0
 
 require (
 	github.com/cockroachdb/errors v1.12.0
