@@ -1,6 +1,7 @@
 package packedfs
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -628,4 +629,240 @@ func TestManagerWorksWithoutQuotaAccounting(t *testing.T) {
 
 	require.NoError(t, manager.Unmount(mount))
 	assert.True(t, backend.exists(testRoot+".mount.tar"))
+}
+
+// git appends to its reflogs, so it opens .git/logs/HEAD with O_APPEND and then
+// writes at an absolute offset. Passing O_APPEND through to the local file made
+// Go refuse every such write, which surfaced as "Remote I/O error" and broke
+// git clone into a packed .git.
+func TestAppendModeHandlesWriteAt(t *testing.T) {
+	h := newHarness(t, nil)
+
+	mount, err := h.manager.EnsureMounted(testRoot, true)
+	require.NoError(t, err)
+
+	logPath := testRoot + "/logs/HEAD"
+	file, _, err := h.manager.CreateFile(mount, logPath, irodsclient_types.FileOpenModeAppend)
+	require.NoError(t, err)
+
+	first := []byte("0000 1111 checkout\n")
+	n, err := file.WriteAt(first, 0)
+	require.NoError(t, err, "a write to an append-mode handle must succeed")
+	assert.Equal(t, len(first), n)
+
+	second := []byte("1111 2222 commit\n")
+	n, err = file.WriteAt(second, int64(len(first)))
+	require.NoError(t, err)
+	assert.Equal(t, len(second), n)
+	require.NoError(t, file.Close())
+
+	// Reopening for append and writing at the end works the same way.
+	reopened, _, err := h.manager.OpenFile(mount, logPath, irodsclient_types.FileOpenModeAppend)
+	require.NoError(t, err)
+	third := []byte("2222 3333 merge\n")
+	_, err = reopened.WriteAt(third, int64(len(first)+len(second)))
+	require.NoError(t, err)
+	require.NoError(t, reopened.Close())
+
+	localPath, err := h.manager.LocalPath(mount, logPath)
+	require.NoError(t, err)
+	content, err := os.ReadFile(localPath)
+	require.NoError(t, err)
+	assert.Equal(t, string(first)+string(second)+string(third), string(content))
+}
+
+func TestOpenForWriteCanReadBack(t *testing.T) {
+	h := newHarness(t, nil)
+
+	mount, err := h.manager.EnsureMounted(testRoot, true)
+	require.NoError(t, err)
+
+	filePath := testRoot + "/index"
+	file, _, err := h.manager.CreateFile(mount, filePath, irodsclient_types.FileOpenModeWriteOnly)
+	require.NoError(t, err)
+	_, err = file.WriteAt([]byte("payload"), 0)
+	require.NoError(t, err)
+
+	// A write-only request still gets a read-write descriptor, because callers
+	// read back through the handle they created a file with.
+	buffer := make([]byte, 7)
+	_, err = file.ReadAt(buffer, 0)
+	require.NoError(t, err, "a write-mode handle must still be readable")
+	assert.Equal(t, "payload", string(buffer))
+	require.NoError(t, file.Close())
+}
+
+// Truncation arrives as its own operation, so opening must never discard data.
+func TestOpenForWriteDoesNotTruncate(t *testing.T) {
+	h := newHarness(t, nil)
+
+	mount, err := h.manager.EnsureMounted(testRoot, true)
+	require.NoError(t, err)
+
+	filePath := testRoot + "/config"
+	h.writeInMount(t, mount, filePath, "[core]\n")
+
+	for _, mode := range []irodsclient_types.FileOpenMode{
+		irodsclient_types.FileOpenModeWriteOnly,
+		irodsclient_types.FileOpenModeWriteTruncate,
+		irodsclient_types.FileOpenModeAppend,
+		irodsclient_types.FileOpenModeReadWrite,
+	} {
+		t.Run(string(mode), func(t *testing.T) {
+			file, entry, err := h.manager.OpenFile(mount, filePath, mode)
+			require.NoError(t, err)
+			assert.Equal(t, int64(7), entry.Size, "opening in mode %q must not discard content", mode)
+			require.NoError(t, file.Close())
+
+			localPath, err := h.manager.LocalPath(mount, filePath)
+			require.NoError(t, err)
+			content, err := os.ReadFile(localPath)
+			require.NoError(t, err)
+			assert.Equal(t, "[core]\n", string(content))
+		})
+	}
+}
+
+// An unrecognized local error reaches the FUSE client as a generic failure and
+// shows up as "Remote I/O error", so the conditions callers act on must map to
+// the iRODS error types the stack understands.
+func TestLocalErrorsMapToRecognizedIRODSErrors(t *testing.T) {
+	h := newHarness(t, nil)
+
+	mount, err := h.manager.EnsureMounted(testRoot, true)
+	require.NoError(t, err)
+
+	h.writeInMount(t, mount, testRoot+"/lib/mod.py", "x = 1\n")
+
+	t.Run("missing path is not found", func(t *testing.T) {
+		err := h.manager.RemoveFile(mount, testRoot+"/absent.py", false)
+		require.Error(t, err)
+		assert.True(t, irodsclient_types.IsFileNotFoundError(err), "got %v", err)
+	})
+
+	t.Run("non-empty directory", func(t *testing.T) {
+		err := h.manager.RemoveDir(mount, testRoot+"/lib", false, false)
+		require.Error(t, err)
+		assert.True(t, irodsclient_types.IsCollectionNotEmptyError(err),
+			"a non-recursive rmdir of a populated directory must be ENOTEMPTY, got %v", err)
+	})
+
+	t.Run("already existing directory", func(t *testing.T) {
+		err := h.manager.MakeDir(mount, testRoot+"/lib", false)
+		require.Error(t, err)
+		assert.True(t, irodsclient_types.IsFileAlreadyExistError(err), "got %v", err)
+	})
+}
+
+// gitCloneWorkload exercises the file patterns a git clone drives through a
+// packed .git: deep directory creation, many small objects, the write-then-
+// rename lock pattern, appends to reflogs, and reopening files for update.
+func TestGitCloneWorkload(t *testing.T) {
+	h := newHarness(t, nil)
+
+	const gitRoot = "/z/home/u/proj/.git"
+	mount, err := h.manager.EnsureMounted(gitRoot, true)
+	require.NoError(t, err)
+
+	// git init: the directory skeleton.
+	for _, dir := range []string{
+		"/objects/pack", "/objects/info", "/refs/heads", "/refs/tags",
+		"/logs/refs/remotes/origin", "/hooks", "/info",
+	} {
+		require.NoError(t, h.manager.MakeDir(mount, gitRoot+dir, true), "mkdir %s", dir)
+	}
+
+	// Receiving objects: many small loose objects across fanout directories.
+	for i := 0; i < 256; i++ {
+		objectDir := fmt.Sprintf("%s/objects/%02x", gitRoot, i)
+		require.NoError(t, h.manager.MakeDir(mount, objectDir, true))
+		h.writeInMount(t, mount, fmt.Sprintf("%s/%040x", objectDir, i), fmt.Sprintf("object %d\n", i))
+	}
+
+	// The pack file is written under a temporary name and renamed into place,
+	// which is how git makes its writes atomic.
+	tempPack := gitRoot + "/objects/pack/tmp_pack_abc123"
+	h.writeInMount(t, mount, tempPack, "PACK...binary...")
+	require.NoError(t, h.manager.Rename(mount, tempPack, gitRoot+"/objects/pack/pack-deadbeef.pack"))
+	assert.False(t, h.manager.ExistsFile(mount, tempPack))
+	assert.True(t, h.manager.ExistsFile(mount, gitRoot+"/objects/pack/pack-deadbeef.pack"))
+
+	// The lock-file pattern: create .lock, write, rename over the target.
+	h.writeInMount(t, mount, gitRoot+"/config", "[core]\n\trepositoryformatversion = 0\n")
+	h.writeInMount(t, mount, gitRoot+"/config.lock", "[core]\n\tbare = false\n")
+	require.NoError(t, h.manager.Rename(mount, gitRoot+"/config.lock", gitRoot+"/config"))
+
+	configPath, err := h.manager.LocalPath(mount, gitRoot+"/config")
+	require.NoError(t, err)
+	configContent, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, "[core]\n\tbare = false\n", string(configContent), "the rename replaced the target")
+
+	// update_ref: append to the reflogs. This is where the clone failed.
+	for _, reflog := range []string{"/logs/HEAD", "/logs/refs/remotes/origin/HEAD"} {
+		file, _, err := h.manager.CreateFile(mount, gitRoot+reflog, irodsclient_types.FileOpenModeAppend)
+		require.NoError(t, err, "create %s", reflog)
+
+		var offset int64
+		for _, line := range []string{
+			"0000000 1111111 clone: from https://example.invalid/repo.git\n",
+			"1111111 2222222 checkout: moving from main to main\n",
+		} {
+			n, err := file.WriteAt([]byte(line), offset)
+			require.NoError(t, err, "append to %s", reflog)
+			offset += int64(n)
+		}
+		require.NoError(t, file.Close())
+	}
+
+	// Writing HEAD and the branch ref.
+	h.writeInMount(t, mount, gitRoot+"/HEAD", "ref: refs/heads/main\n")
+	h.writeInMount(t, mount, gitRoot+"/refs/heads/main", "2222222\n")
+
+	// The whole repository survives a snapshot and a remount.
+	require.NoError(t, h.manager.Pack(mount))
+	require.NoError(t, h.manager.Unmount(mount))
+
+	remounted, err := h.manager.EnsureMounted(gitRoot, false)
+	require.NoError(t, err)
+
+	assert.True(t, h.manager.ExistsFile(remounted, gitRoot+"/HEAD"))
+	assert.True(t, h.manager.ExistsFile(remounted, gitRoot+"/objects/pack/pack-deadbeef.pack"))
+	assert.True(t, h.manager.ExistsFile(remounted, gitRoot+"/refs/heads/main"))
+
+	reflogPath, err := h.manager.LocalPath(remounted, gitRoot+"/logs/HEAD")
+	require.NoError(t, err)
+	reflog, err := os.ReadFile(reflogPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(reflog), "clone: from")
+	assert.Contains(t, string(reflog), "checkout: moving")
+
+	objects, err := h.manager.List(remounted, gitRoot+"/objects/00")
+	require.NoError(t, err)
+	assert.Len(t, objects, 1)
+}
+
+// The per-directory cap has to hold while a session writes, not only at mount
+// time. A tree that outgrew it in-session would upload fine and then be refused
+// on the next mount, leaving the directory unreadable.
+func TestGrowthBeyondTheSizeLimitIsRefused(t *testing.T) {
+	h := newHarness(t, func(config *Config, quota *fakeQuota) {
+		config.MaxPackedDirSize = 4096
+	})
+
+	mount, err := h.manager.EnsureMounted(testRoot, true)
+	require.NoError(t, err)
+
+	require.NoError(t, h.manager.ReserveGrowth(mount, 4000))
+
+	err = h.manager.ReserveGrowth(mount, 500)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrArchiveTooLarge), "got %v", err)
+
+	// The refused growth is not charged, so the tree stays exactly where it was.
+	assert.Equal(t, int64(4000), mount.ReservedSize())
+
+	// And the directory is still usable up to the cap.
+	require.NoError(t, h.manager.ReserveGrowth(mount, 96))
+	assert.Equal(t, int64(4096), mount.ReservedSize())
 }

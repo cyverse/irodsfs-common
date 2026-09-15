@@ -583,6 +583,19 @@ func (m *Manager) ReserveGrowth(mount *Mount, delta int64) error {
 		return nil
 	}
 
+	// Enforce the per-directory cap here as well as at mount time. A tree that
+	// grew past it during a session would pack and upload fine and then be
+	// refused on the next mount, leaving the directory unreadable; failing the
+	// write that crosses the line keeps the directory usable.
+	mount.mu.RLock()
+	projected := mount.reservedSize + delta
+	mount.mu.RUnlock()
+	if projected > m.config.MaxPackedDirSize {
+		return errors.Wrapf(ErrArchiveTooLarge,
+			"packed directory %q would reach %d bytes, over the %d byte limit",
+			mount.Root, projected, m.config.MaxPackedDirSize)
+	}
+
 	if err := m.reserve(delta); err != nil {
 		return err
 	}

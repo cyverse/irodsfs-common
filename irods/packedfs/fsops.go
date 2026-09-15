@@ -5,6 +5,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"syscall"
 
 	"github.com/cockroachdb/errors"
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
@@ -304,22 +305,36 @@ func (m *Manager) CreateFile(mount *Mount, irodsPath string, mode irodsclient_ty
 	return file, m.entryFor(irodsPath, info), nil
 }
 
-// openFlagFor maps an iRODS open mode to local open flags and reports whether
-// the handle can write.
+// openFlagFor maps an iRODS open mode to the flags used for the local backing
+// file, and reports whether the caller's handle may write.
+//
+// The local descriptor is deliberately not a faithful copy of the requested
+// mode. Two flags must never reach it:
+//
+//   - O_APPEND, because the kernel resolves append semantics before a write
+//     reaches us and then sends an absolute offset. Go refuses WriteAt on a
+//     descriptor opened with O_APPEND, so passing it through fails every write
+//     to a file a caller opened for appending, such as git's reflogs.
+//   - O_TRUNC, because truncation arrives as its own operation. Applying it at
+//     open would discard a file the caller only meant to write into.
+//
+// A write mode also opens read-write rather than write-only, for the same
+// reason StagingFS does: a caller that created a file with O_RDWR reads back
+// through the same handle, and a write-only descriptor fails those reads with
+// EBADF. Which operations are permitted stays a property of the caller's
+// handle, not of this local descriptor.
 func openFlagFor(mode irodsclient_types.FileOpenMode) (int, bool, error) {
 	switch mode {
 	case irodsclient_types.FileOpenModeReadOnly:
 		return os.O_RDONLY, false, nil
-	case irodsclient_types.FileOpenModeReadWrite:
-		return os.O_RDWR, true, nil
-	case irodsclient_types.FileOpenModeWriteOnly:
-		return os.O_WRONLY | os.O_CREATE, true, nil
-	case irodsclient_types.FileOpenModeWriteTruncate:
-		return os.O_WRONLY | os.O_CREATE | os.O_TRUNC, true, nil
-	case irodsclient_types.FileOpenModeAppend:
-		return os.O_WRONLY | os.O_CREATE | os.O_APPEND, true, nil
-	case irodsclient_types.FileOpenModeReadAppend:
-		return os.O_RDWR | os.O_CREATE | os.O_APPEND, true, nil
+
+	case irodsclient_types.FileOpenModeReadWrite,
+		irodsclient_types.FileOpenModeWriteOnly,
+		irodsclient_types.FileOpenModeWriteTruncate,
+		irodsclient_types.FileOpenModeAppend,
+		irodsclient_types.FileOpenModeReadAppend:
+		return os.O_RDWR | os.O_CREATE, true, nil
+
 	default:
 		return 0, false, errors.Newf("unknown file open mode %q", string(mode))
 	}
@@ -327,13 +342,26 @@ func openFlagFor(mode irodsclient_types.FileOpenMode) (int, bool, error) {
 
 // translateLocalError turns a local filesystem error into the iRODS error the
 // rest of the stack already knows how to map to an errno.
+//
+// Anything left unrecognized reaches the FUSE client as a generic failure and
+// surfaces as EREMOTEIO, which tells a user nothing, so the conditions callers
+// actually act on are named here.
 func translateLocalError(err error, irodsPath string) error {
 	if err == nil {
 		return nil
 	}
 
-	if os.IsNotExist(err) {
+	switch {
+	case os.IsNotExist(err):
 		return irodsclient_types.NewFileNotFoundError(irodsPath)
+
+	case errors.Is(err, syscall.ENOTEMPTY):
+		// rmdir of a directory that still has entries: the client turns this
+		// into ENOTEMPTY, which is what a shell expects.
+		return irodsclient_types.NewCollectionNotEmptyError(irodsPath)
+
+	case os.IsExist(err):
+		return irodsclient_types.NewFileAlreadyExistError(irodsPath)
 	}
 
 	return errors.Wrapf(err, "packed directory operation failed for %q", irodsPath)
