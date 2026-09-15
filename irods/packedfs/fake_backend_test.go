@@ -210,10 +210,13 @@ func (b *fakeBackend) UploadFileParallel(localPath string, irodsPath string, tas
 	}
 	b.mu.Unlock()
 
+	// iRODS has no data object without a collection to hold it, so an upload
+	// into a collection that does not exist must fail here too.
 	target := b.localOf(irodsPath)
-	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-		return err
+	if info, err := os.Stat(filepath.Dir(target)); err != nil || !info.IsDir() {
+		return errors.Newf("collection %q does not exist", path.Dir(irodsPath))
 	}
+
 	return copyLocal(localPath, target)
 }
 

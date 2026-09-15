@@ -160,6 +160,17 @@ func (m *Manager) uploadArchive(mount *Mount, logger *log.Entry) error {
 		return errors.Wrapf(closeErr, "failed to finalize local archive %q", localArchivePath)
 	}
 
+	// The archive is a data object inside the packed directory's parent
+	// collection, and that collection may still be a pending staging operation:
+	// a session short enough to close before the background sync creates it
+	// would have nowhere to put the archive. MakeDir with recurse returns
+	// cleanly when the collection is already there, so this is safe to repeat
+	// and does not depend on when staging catches up.
+	parentCollection := path.Dir(mount.ArchivePath)
+	if err := m.backend.MakeDir(parentCollection, true); err != nil {
+		return errors.Wrapf(err, "failed to create the collection %q holding the archive", parentCollection)
+	}
+
 	remoteTempPath := mount.ArchivePath + uploadTempSuffix + "." + xid.New().String()
 	if err := m.backend.UploadFileParallel(localArchivePath, remoteTempPath, m.transferTaskNum, nil); err != nil {
 		// The partial object would otherwise linger in the collection.
