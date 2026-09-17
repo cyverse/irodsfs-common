@@ -15,6 +15,9 @@ const FileLockEndOfFile uint64 = math.MaxUint64
 var (
 	// ErrFileLockConflict is returned when a lock request conflicts with a lock held by another owner
 	ErrFileLockConflict = errors.New("file lock conflict")
+
+	// ErrFileLockManagerUnavailable is returned when a file handle has no lock manager to serve locks
+	ErrFileLockManagerUnavailable = errors.New("file lock manager is unavailable")
 )
 
 // FileLockType is a type of a file lock
@@ -42,25 +45,56 @@ func (t FileLockType) String() string {
 	}
 }
 
+// FileLockOwner identifies who holds a lock.
+//
+// The kernel hands FUSE a lock owner that already carries the right identity for
+// each locking mechanism, so the two are keyed differently:
+//
+//   - flock() and OFD locks are owned by an open file description. Owner is
+//     unique per open, and Handle is compared as well so that two opens never
+//     look like one owner.
+//   - fcntl() POSIX locks are owned by the process. The kernel sends the same
+//     Owner for every file descriptor the process has on the file, so Handle is
+//     not compared - otherwise a process that opens the same file twice would
+//     conflict with itself.
+//
+// Scope separates owners that belong to different clients of one lock manager.
+// It is empty for a lock manager serving a single process, and holds the
+// session id when a pool server serves many mounts from one table.
+type FileLockOwner struct {
+	Scope  string // client/session the owner belongs to
+	Handle string // file handle that requested the lock
+	Owner  uint64 // lock owner id given by the caller (FUSE lock_owner)
+	Flock  bool   // the request came from flock(), not from fcntl()
+}
+
+// sameAs returns true if both locks are owned by the same owner.
+// Locks taken through different mechanisms never share an owner.
+func (o *FileLockOwner) sameAs(other *FileLockOwner) bool {
+	if o.Flock != other.Flock {
+		return false
+	}
+
+	if o.Scope != other.Scope || o.Owner != other.Owner {
+		return false
+	}
+
+	if o.Flock {
+		// an open file description, not a process
+		return o.Handle == other.Handle
+	}
+
+	return true
+}
+
 // FileLock is a byte-range lock request or a lock held on a file.
 // Start and End are both inclusive.
 type FileLock struct {
 	Type  FileLockType
-	Owner uint64 // lock owner id given by the caller (e.g. FUSE lock_owner)
+	Owner FileLockOwner
 	Pid   uint32 // pid of the process that requested the lock, reported back by Test
 	Start uint64
 	End   uint64
-}
-
-// heldFileLock is a lock stored in a FileLockManager
-type heldFileLock struct {
-	FileLock
-	handleID string // file handle that holds the lock
-}
-
-// sameOwner returns true if the lock is held by the given file handle and lock owner
-func (l *heldFileLock) sameOwner(handleID string, owner uint64) bool {
-	return l.handleID == handleID && l.Owner == owner
 }
 
 func overlaps(start1 uint64, end1 uint64, start2 uint64, end2 uint64) bool {
@@ -70,66 +104,77 @@ func overlaps(start1 uint64, end1 uint64, start2 uint64, end2 uint64) bool {
 // FileLockManager manages byte-range file locks in memory.
 //
 // Locks are tracked per file path, not per file handle, so that two handles on
-// the same file - in the same process - see each other's locks. A lock owner is
-// identified by the pair (file handle id, lock owner id) which matches the
-// open file description semantics of flock() and OFD locks.
+// the same file see each other's locks. See FileLockOwner for how a holder is
+// identified.
 //
-// The locks live in this process only. A client that reaches iRODS without
-// going through this process does not see them. Deadlocks between waiters are
-// not detected; a blocking request waits until the conflicting lock is released
-// or the given context is canceled.
+// flock() locks and fcntl() locks are kept in one table but never conflict with
+// each other, which is how the kernel treats them: a file can be locked through
+// both mechanisms at once.
+//
+// Known deviations from POSIX:
+//
+//   - A process that closes one of several file descriptors on a file keeps the
+//     locks it took through the others. POSIX drops them all. The locks are
+//     released when the handle that took them is closed, as flock() and OFD
+//     locks are. (The FUSE library this serves does not report the lock owner of
+//     a FLUSH, so owner-wide release on close cannot be implemented here.)
+//   - Deadlocks between waiters are not detected, so no waiter fails with
+//     EDEADLK; a blocking request waits until the conflicting lock is released
+//     or the given context is canceled.
+//   - The locks live in this process only. A client that reaches iRODS without
+//     going through this process does not see them.
 type FileLockManager struct {
 	mutex   sync.Mutex
-	locks   map[string][]*heldFileLock // key is a file path
+	locks   map[string][]*FileLock // key is a file path
 	waiters map[chan struct{}]struct{}
 }
 
 // NewFileLockManager creates a new FileLockManager
 func NewFileLockManager() *FileLockManager {
 	return &FileLockManager{
-		locks:   map[string][]*heldFileLock{},
+		locks:   map[string][]*FileLock{},
 		waiters: map[chan struct{}]struct{}{},
 	}
 }
 
 // Test returns a lock that conflicts with the given request, or nil if the
 // request can be granted
-func (m *FileLockManager) Test(path string, handleID string, lock *FileLock) *FileLock {
+func (m *FileLockManager) Test(path string, lock *FileLock) *FileLock {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	conflict := m.findConflict(path, handleID, lock)
+	conflict := m.findConflict(path, lock)
 	if conflict == nil {
 		return nil
 	}
 
-	conflictCopy := conflict.FileLock
+	conflictCopy := *conflict
 	return &conflictCopy
 }
 
 // Lock acquires, downgrades, upgrades or releases a lock without waiting.
 // It returns ErrFileLockConflict if another owner holds a conflicting lock.
-func (m *FileLockManager) Lock(path string, handleID string, lock *FileLock) error {
+func (m *FileLockManager) Lock(path string, lock *FileLock) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	if conflict := m.findConflict(path, handleID, lock); conflict != nil {
+	if conflict := m.findConflict(path, lock); conflict != nil {
 		return errors.Wrapf(ErrFileLockConflict, "%s lock on %q [%d, %d] conflicts with a %s lock held by pid %d", lock.Type.String(), path, lock.Start, lock.End, conflict.Type.String(), conflict.Pid)
 	}
 
-	m.apply(path, handleID, lock)
+	m.apply(path, lock)
 	return nil
 }
 
 // LockWait acquires a lock, waiting until it becomes available or the context
 // is canceled. Releasing a lock never waits.
-func (m *FileLockManager) LockWait(ctx context.Context, path string, handleID string, lock *FileLock) error {
+func (m *FileLockManager) LockWait(ctx context.Context, path string, lock *FileLock) error {
 	for {
 		m.mutex.Lock()
 
-		conflict := m.findConflict(path, handleID, lock)
+		conflict := m.findConflict(path, lock)
 		if conflict == nil {
-			m.apply(path, handleID, lock)
+			m.apply(path, lock)
 			m.mutex.Unlock()
 			return nil
 		}
@@ -150,7 +195,7 @@ func (m *FileLockManager) LockWait(ctx context.Context, path string, handleID st
 	}
 }
 
-// Release releases every lock held by the given file handle.
+// Release releases every lock taken by the given file handle.
 // It scans all files rather than taking a path, so that a handle whose file was
 // renamed while it was open does not leak its locks.
 func (m *FileLockManager) Release(handleID string) {
@@ -160,9 +205,9 @@ func (m *FileLockManager) Release(handleID string) {
 	released := false
 
 	for path, held := range m.locks {
-		remaining := make([]*heldFileLock, 0, len(held))
+		remaining := make([]*FileLock, 0, len(held))
 		for _, l := range held {
-			if l.handleID != handleID {
+			if l.Owner.Handle != handleID {
 				remaining = append(remaining, l)
 			}
 		}
@@ -205,14 +250,19 @@ func (m *FileLockManager) Move(oldPath string, newPath string) {
 
 // findConflict returns a lock held by another owner that conflicts with the
 // given request. The caller must hold the mutex.
-func (m *FileLockManager) findConflict(path string, handleID string, lock *FileLock) *heldFileLock {
+func (m *FileLockManager) findConflict(path string, lock *FileLock) *FileLock {
 	if lock.Type == FileLockTypeUnlock {
 		// releasing never conflicts
 		return nil
 	}
 
 	for _, held := range m.locks[path] {
-		if held.sameOwner(handleID, lock.Owner) {
+		if held.Owner.Flock != lock.Owner.Flock {
+			// flock() locks and fcntl() locks are independent
+			continue
+		}
+
+		if held.Owner.sameAs(&lock.Owner) {
 			// an owner never conflicts with itself
 			continue
 		}
@@ -232,13 +282,13 @@ func (m *FileLockManager) findConflict(path string, handleID string, lock *FileL
 
 // apply replaces the owner's locks in the requested range with the requested
 // lock. The caller must hold the mutex and must have checked for conflicts.
-func (m *FileLockManager) apply(path string, handleID string, lock *FileLock) {
+func (m *FileLockManager) apply(path string, lock *FileLock) {
 	held := m.locks[path]
-	updated := make([]*heldFileLock, 0, len(held)+2)
+	updated := make([]*FileLock, 0, len(held)+2)
 	replaced := false
 
 	for _, l := range held {
-		if !l.sameOwner(handleID, lock.Owner) || !overlaps(l.Start, l.End, lock.Start, lock.End) {
+		if !l.Owner.sameAs(&lock.Owner) || !overlaps(l.Start, l.End, lock.Start, lock.End) {
 			updated = append(updated, l)
 			continue
 		}
@@ -265,11 +315,8 @@ func (m *FileLockManager) apply(path string, handleID string, lock *FileLock) {
 	released := replaced && lock.Type != FileLockTypeWrite
 
 	if lock.Type != FileLockTypeUnlock {
-		newLock := &heldFileLock{
-			FileLock: *lock,
-			handleID: handleID,
-		}
-		updated = append(updated, newLock)
+		newLock := *lock
+		updated = append(updated, &newLock)
 	}
 
 	m.store(path, updated)
@@ -282,7 +329,7 @@ func (m *FileLockManager) apply(path string, handleID string, lock *FileLock) {
 
 // store saves the lock list of a file, dropping the entry when it is empty.
 // The caller must hold the mutex.
-func (m *FileLockManager) store(path string, locks []*heldFileLock) {
+func (m *FileLockManager) store(path string, locks []*FileLock) {
 	if len(locks) == 0 {
 		delete(m.locks, path)
 		return
@@ -306,8 +353,14 @@ func (m *FileLockManager) removeWaiter(waiter chan struct{}) {
 	delete(m.waiters, waiter)
 }
 
-// ErrFileLockManagerUnavailable is returned when a file handle has no lock manager to serve locks
-var ErrFileLockManagerUnavailable = errors.New("file lock manager is unavailable")
+// forHandle returns a copy of the lock owned by the given file handle. Callers
+// of a file handle do not know the handle id it uses to identify its owner, so
+// the handle fills it in.
+func forHandle(handleID string, lock *FileLock) *FileLock {
+	lockCopy := *lock
+	lockCopy.Owner.Handle = handleID
+	return &lockCopy
+}
 
 // testFileLock is a helper for IRODSFSFileHandle.Getlk implementations
 func testFileLock(manager *FileLockManager, path string, handleID string, lock *FileLock) (*FileLock, error) {
@@ -315,7 +368,7 @@ func testFileLock(manager *FileLockManager, path string, handleID string, lock *
 		return nil, ErrFileLockManagerUnavailable
 	}
 
-	return manager.Test(path, handleID, lock), nil
+	return manager.Test(path, forHandle(handleID, lock)), nil
 }
 
 // setFileLock is a helper for IRODSFSFileHandle.Setlk implementations
@@ -324,7 +377,7 @@ func setFileLock(manager *FileLockManager, path string, handleID string, lock *F
 		return ErrFileLockManagerUnavailable
 	}
 
-	return manager.Lock(path, handleID, lock)
+	return manager.Lock(path, forHandle(handleID, lock))
 }
 
 // setFileLockWait is a helper for IRODSFSFileHandle.Setlkw implementations
@@ -333,7 +386,7 @@ func setFileLockWait(ctx context.Context, manager *FileLockManager, path string,
 		return ErrFileLockManagerUnavailable
 	}
 
-	return manager.LockWait(ctx, path, handleID, lock)
+	return manager.LockWait(ctx, path, forHandle(handleID, lock))
 }
 
 // releaseFileLocks is a helper for IRODSFSFileHandle.Close implementations

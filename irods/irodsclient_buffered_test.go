@@ -128,15 +128,15 @@ func (h *mockFileHandle) Flush() error                                { return n
 func (h *mockFileHandle) Close() error                                { return nil }
 
 func (h *mockFileHandle) Getlk(lock *FileLock) (*FileLock, error) {
-	return h.locks.Test(h.entry.Path, h.id, lock), nil
+	return testFileLock(h.locks, h.entry.Path, h.id, lock)
 }
 
 func (h *mockFileHandle) Setlk(lock *FileLock) error {
-	return h.locks.Lock(h.entry.Path, h.id, lock)
+	return setFileLock(h.locks, h.entry.Path, h.id, lock)
 }
 
 func (h *mockFileHandle) Setlkw(ctx context.Context, lock *FileLock) error {
-	return h.locks.LockWait(ctx, h.entry.Path, h.id, lock)
+	return setFileLockWait(ctx, h.locks, h.entry.Path, h.id, lock)
 }
 func (h *mockFileHandle) Truncate(size int64) error {
 	if size < int64(len(h.data)) {
