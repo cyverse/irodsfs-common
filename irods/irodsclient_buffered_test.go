@@ -1054,3 +1054,59 @@ func TestStagedHandleCreatedForReadWriteCanReadBack(t *testing.T) {
 	require.Equal(t, len(header), n)
 	require.Equal(t, header, readBack)
 }
+
+// Several handles writing to one staged file is what a POSIX caller expects and
+// what the direct client now serves by sharing its iRODS handle. Staging has no
+// such limit - the file is local - so the handles get one open file each, and
+// the staged file outlives the first of them to close.
+func TestSeveralStagedWriteHandlesOnOnePath(t *testing.T) {
+	staging, err := stagingfs.NewStagingFS(&stagingfs.StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &renameRaceStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = staging.Close() })
+
+	client := &IRODSFSClientBuffered{
+		staging: staging,
+		cache:   newTestCacheManager(t),
+		helper:  util.NewFileBlockHelper(4 * 1024 * 1024),
+		logger:  newTestLogger(),
+	}
+
+	const path = "/two-writers.txt"
+
+	openStagedWriter := func() *IRODSFSClientBufferedStagedHandle {
+		handle := newStagedHandleForNewFile(client, nil, path, irodsclient_types.FileOpenModeReadWrite)
+		file, err := staging.OpenForWriteFor(path, false, handle)
+		require.NoError(t, err)
+		handle.setFile(file)
+		return handle
+	}
+
+	first := openStagedWriter()
+	second := openStagedWriter()
+
+	_, err = first.WriteAt([]byte("AAAA"), 0)
+	require.NoError(t, err)
+	_, err = second.WriteAt([]byte("BBBB"), 4)
+	require.NoError(t, err)
+
+	buffer := make([]byte, 8)
+	_, err = second.ReadAt(buffer, 0)
+	require.NoError(t, err)
+	assert.Equal(t, "AAAABBBB", string(buffer), "each handle must see what the other wrote")
+
+	// the staged file belongs to both handles, so closing one leaves it in place
+	require.NoError(t, first.Close())
+	staging.ReleaseHandle(first)
+
+	_, err = second.WriteAt([]byte("CCCC"), 8)
+	require.NoError(t, err, "the surviving handle must keep writing")
+	assert.Equal(t, int64(12), staging.GetLocalFileSize(path))
+
+	require.NoError(t, second.Close())
+	staging.ReleaseHandle(second)
+}
