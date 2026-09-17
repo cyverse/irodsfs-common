@@ -3,6 +3,7 @@ package irods
 import (
 	"context"
 	"io"
+	"sync"
 
 	"github.com/cockroachdb/errors"
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
@@ -21,7 +22,13 @@ type IRODSFSClientDirect struct {
 	id              string
 	fs              *irodsclient_fs.FileSystem
 	fileLockManager *FileLockManager
-	logger          *log.Entry
+
+	// writeHandles holds the one iRODS write handle each open file has, shared
+	// by every file handle writing to it. See sharedWriteHandle.
+	writeHandles     map[string]*sharedWriteHandle
+	writeHandleMutex sync.Mutex
+
+	logger *log.Entry
 }
 
 // NewIRODSFSClientDirect creates IRODSFSClient using IRODSFSClientDirect
@@ -40,6 +47,7 @@ func NewIRODSFSClientDirect(fs *irodsclient_fs.FileSystem) (IRODSFSClient, error
 		id:              clientID,
 		fs:              fs,
 		fileLockManager: NewFileLockManager(),
+		writeHandles:    map[string]*sharedWriteHandle{},
 		logger:          logger,
 	}, nil
 }
@@ -221,8 +229,10 @@ func (c *IRODSFSClientDirect) RenameFileToFile(srcPath string, destPath string) 
 		return err
 	}
 
-	// locks are keyed by path, so they have to follow the file
+	// locks and the shared write handle are keyed by path, so they have to
+	// follow the file
 	moveFileLocks(c.fileLockManager, srcPath, destPath)
+	c.renameWriteHandle(srcPath, destPath)
 	return nil
 }
 
@@ -235,7 +245,11 @@ func (c *IRODSFSClientDirect) CreateFile(path string, mode string) (IRODSFSFileH
 
 	defer util.StackTraceFromPanic(logger)
 
-	handle, err := c.fs.CreateFile(path, "", mode)
+	openMode := irodsclient_types.FileOpenMode(mode)
+
+	handle, err := c.openFileHandle(path, openMode, func() (*irodsclient_fs.FileHandle, error) {
+		return c.fs.CreateFile(path, "", mode)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -250,6 +264,7 @@ func (c *IRODSFSClientDirect) CreateFile(path string, mode string) (IRODSFSFileH
 		client:    c,
 		handle:    handle,
 		irodsPath: path,
+		openMode:  openMode,
 		logger:    handleLogger,
 	}
 
@@ -265,7 +280,11 @@ func (c *IRODSFSClientDirect) OpenFile(path string, mode string) (IRODSFSFileHan
 
 	defer util.StackTraceFromPanic(logger)
 
-	handle, err := c.fs.OpenFile(path, "", mode)
+	openMode := irodsclient_types.FileOpenMode(mode)
+
+	handle, err := c.openFileHandle(path, openMode, func() (*irodsclient_fs.FileHandle, error) {
+		return c.fs.OpenFile(path, "", mode)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -280,10 +299,23 @@ func (c *IRODSFSClientDirect) OpenFile(path string, mode string) (IRODSFSFileHan
 		client:    c,
 		handle:    handle,
 		irodsPath: path,
+		openMode:  openMode,
 		logger:    handleLogger,
 	}
 
 	return fileHandle, nil
+}
+
+// openFileHandle opens a file handle, sharing the iRODS handle of a file that
+// is already open for writing. Read-only opens are not shared: iRODS serves as
+// many of them as asked for, and sharing would tie their lifetimes together for
+// no gain.
+func (c *IRODSFSClientDirect) openFileHandle(path string, mode irodsclient_types.FileOpenMode, open func() (*irodsclient_fs.FileHandle, error)) (*irodsclient_fs.FileHandle, error) {
+	if !mode.IsWrite() {
+		return open()
+	}
+
+	return c.acquireWriteHandle(path, mode, open)
 }
 
 // CreateFileBulk delegates to CreateFile (Direct has no staging distinction)
@@ -404,11 +436,20 @@ type IRODSFSClientDirectFileHandle struct {
 	client    *IRODSFSClientDirect
 	handle    *irodsclient_fs.FileHandle
 	irodsPath string
-	logger    *log.Entry
+	openMode  irodsclient_types.FileOpenMode
+
+	closed      bool
+	closedMutex sync.Mutex
+
+	logger *log.Entry
 }
 
+// GetID returns the id of this file handle.
+//
+// It is the id of the handle itself, not of the iRODS handle underneath, which
+// several file handles can share. Callers key their open handles by it.
 func (h *IRODSFSClientDirectFileHandle) GetID() string {
-	return h.handle.GetID()
+	return h.id
 }
 
 func (h *IRODSFSClientDirectFileHandle) GetEntry() *irodsclient_fs.Entry {
@@ -493,12 +534,26 @@ func (h *IRODSFSClientDirectFileHandle) Setlkw(ctx context.Context, lock *FileLo
 func (h *IRODSFSClientDirectFileHandle) Close() error {
 	defer util.StackTraceFromPanic(h.logger)
 
+	h.closedMutex.Lock()
+	if h.closed {
+		h.closedMutex.Unlock()
+		return nil
+	}
+	h.closed = true
+	h.closedMutex.Unlock()
+
 	// locks are released on close, like the kernel does for flock() and OFD locks
 	releaseFileLocks(h.client.fileLockManager, h.id)
 
-	err := h.handle.Close()
+	// a write handle is shared with the other file handles on this file, and
+	// closing it is up to the last of them
+	shared, err := h.client.releaseWriteHandle(h.irodsPath, h.handle)
 	if err != nil {
 		return err
 	}
-	return nil
+	if shared {
+		return nil
+	}
+
+	return h.handle.Close()
 }
