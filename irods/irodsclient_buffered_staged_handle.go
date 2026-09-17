@@ -1,6 +1,7 @@
 package irods
 
 import (
+	"context"
 	"io"
 	"os"
 	"path"
@@ -201,8 +202,54 @@ func (h *IRODSFSClientBufferedStagedHandle) Flush() error {
 // to keep the handle's path in sync after a rename while the handle is open.
 func (h *IRODSFSClientBufferedStagedHandle) UpdateStagingPath(newPath string) {
 	h.mu.Lock()
+	oldPath := h.irodsPath
 	h.irodsPath = newPath
 	h.mu.Unlock()
+
+	// locks are keyed by path, so they have to follow the file
+	moveFileLocks(h.fileLockManager(), oldPath, newPath)
+}
+
+// Getlk returns a lock that conflicts with the given lock, or nil if the lock
+// can be acquired
+func (h *IRODSFSClientBufferedStagedHandle) Getlk(lock *FileLock) (*FileLock, error) {
+	defer util.StackTraceFromPanic(h.logger)
+
+	return testFileLock(h.fileLockManager(), h.currentPath(), h.id, lock)
+}
+
+// Setlk acquires or releases a lock without waiting. It returns
+// ErrFileLockConflict if the lock is held by another owner.
+func (h *IRODSFSClientBufferedStagedHandle) Setlk(lock *FileLock) error {
+	defer util.StackTraceFromPanic(h.logger)
+
+	return setFileLock(h.fileLockManager(), h.currentPath(), h.id, lock)
+}
+
+// Setlkw acquires a lock, waiting until it becomes available or the context is
+// canceled
+func (h *IRODSFSClientBufferedStagedHandle) Setlkw(ctx context.Context, lock *FileLock) error {
+	defer util.StackTraceFromPanic(h.logger)
+
+	return setFileLockWait(ctx, h.fileLockManager(), h.currentPath(), h.id, lock)
+}
+
+// fileLockManager returns the lock manager shared by every handle of the client
+func (h *IRODSFSClientBufferedStagedHandle) fileLockManager() *FileLockManager {
+	if h.client == nil {
+		return nil
+	}
+
+	return h.client.GetFileLockManager()
+}
+
+// currentPath returns the iRODS path the handle currently points at, which
+// changes when the file is renamed while the handle is open
+func (h *IRODSFSClientBufferedStagedHandle) currentPath() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.irodsPath
 }
 
 func (h *IRODSFSClientBufferedStagedHandle) Close() error {
@@ -212,6 +259,9 @@ func (h *IRODSFSClientBufferedStagedHandle) Close() error {
 	err := h.file.Close()
 	currentPath := h.irodsPath
 	h.mu.Unlock() // release before calling staging methods to avoid deadlock with Rename
+
+	// locks are released on close, like the kernel does for flock() and OFD locks
+	releaseFileLocks(h.fileLockManager(), h.id)
 
 	if err != nil {
 		return err

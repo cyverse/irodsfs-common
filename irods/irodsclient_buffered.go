@@ -1,6 +1,7 @@
 package irods
 
 import (
+	"context"
 	"encoding/binary"
 	"io"
 	"os"
@@ -964,6 +965,10 @@ func (c *IRODSFSClientBuffered) RenameFileToFile(srcPath string, destPath string
 		}
 		c.invalidateFileCacheBlocks(srcPath)
 		c.invalidateFileCacheBlocks(destPath)
+
+		// staged handles move their own locks, this covers the handles that do
+		// not go through staging
+		moveFileLocks(c.GetFileLockManager(), srcPath, destPath)
 		return nil
 	}
 	return c.client.RenameFileToFile(srcPath, destPath)
@@ -976,6 +981,17 @@ func (c *IRODSFSClientBuffered) reuseStagingInodeID(entry *irodsclient_fs.Entry)
 	if inodeID, ok := c.inodeManager.GetInodeIDForStagingEntry(entry.Path); ok {
 		entry.ID = int64(inodeID)
 	}
+}
+
+// GetFileLockManager returns the file lock manager shared by the handles of this client
+func (c *IRODSFSClientBuffered) GetFileLockManager() *FileLockManager {
+	if c.client == nil {
+		return nil
+	}
+
+	// the direct client owns the manager, so direct and buffered handles on the
+	// same file share one lock table
+	return c.client.GetFileLockManager()
 }
 
 func (c *IRODSFSClientBuffered) CreateFile(path string, mode string) (IRODSFSFileHandle, error) {
@@ -1034,6 +1050,7 @@ func (c *IRODSFSClientBuffered) CreateFile(path string, mode string) (IRODSFSFil
 	})
 
 	return &IRODSFSClientBufferedFileHandle{
+		id:        xid.New().String(),
 		client:    c,
 		handle:    handle,
 		cache:     c.cache,
@@ -1138,6 +1155,7 @@ func (c *IRODSFSClientBuffered) OpenFile(path string, mode string) (IRODSFSFileH
 	})
 
 	return &IRODSFSClientBufferedFileHandle{
+		id:        xid.New().String(),
 		client:    c,
 		handle:    handle,
 		cache:     c.cache,
@@ -1943,6 +1961,7 @@ func (c *IRODSFSClientBuffered) invalidateFileCacheBlocksHint(irodsPath string, 
 
 // IRODSFSClientBufferedFileHandle wraps IRODSFSFileHandle with block-level caching
 type IRODSFSClientBufferedFileHandle struct {
+	id        string // handle id used as the file lock owner
 	client    *IRODSFSClientBuffered
 	handle    IRODSFSFileHandle
 	cache     *cache.MemoryCacheManager
@@ -2160,7 +2179,38 @@ func (h *IRODSFSClientBufferedFileHandle) Flush() error {
 	return h.handle.Flush()
 }
 
+// Getlk returns a lock that conflicts with the given lock, or nil if the lock
+// can be acquired
+func (h *IRODSFSClientBufferedFileHandle) Getlk(lock *FileLock) (*FileLock, error) {
+	return testFileLock(h.fileLockManager(), h.irodsPath, h.id, lock)
+}
+
+// Setlk acquires or releases a lock without waiting. It returns
+// ErrFileLockConflict if the lock is held by another owner.
+func (h *IRODSFSClientBufferedFileHandle) Setlk(lock *FileLock) error {
+	return setFileLock(h.fileLockManager(), h.irodsPath, h.id, lock)
+}
+
+// Setlkw acquires a lock, waiting until it becomes available or the context is
+// canceled
+func (h *IRODSFSClientBufferedFileHandle) Setlkw(ctx context.Context, lock *FileLock) error {
+	return setFileLockWait(ctx, h.fileLockManager(), h.irodsPath, h.id, lock)
+}
+
+// fileLockManager returns the lock manager shared by every handle of the client.
+// Locks are keyed by the iRODS path the caller opened, so a buffered handle, a
+// staged handle and a packed handle on the same file see each other's locks.
+func (h *IRODSFSClientBufferedFileHandle) fileLockManager() *FileLockManager {
+	if h.client == nil {
+		return nil
+	}
+
+	return h.client.GetFileLockManager()
+}
+
 func (h *IRODSFSClientBufferedFileHandle) Close() error {
+	releaseFileLocks(h.fileLockManager(), h.id)
+
 	return h.handle.Close()
 }
 

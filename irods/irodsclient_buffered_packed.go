@@ -247,7 +247,7 @@ func (c *IRODSFSClientBuffered) packedOpen(irodsPath string, mode irodsclient_ty
 		return nil, true, err
 	}
 
-	return newPackedFileHandle(c.packed, mount, file, irodsPath, mode, entry, c.logger), true, nil
+	return newPackedFileHandle(c.packed, mount, file, irodsPath, mode, entry, c.GetFileLockManager(), c.logger), true, nil
 }
 
 // packedList serves a directory listing from inside a packed directory.

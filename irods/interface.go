@@ -1,6 +1,8 @@
 package irods
 
 import (
+	"context"
+
 	"github.com/cockroachdb/errors"
 	irodsclient_fs "github.com/cyverse/go-irodsclient/fs"
 	irodsclient_common "github.com/cyverse/go-irodsclient/irods/common"
@@ -66,4 +68,15 @@ type IRODSFSFileHandle interface {
 	Truncate(size int64) error
 	Flush() error
 	Close() error
+
+	// Locks
+	// Getlk returns a lock that conflicts with the given lock, or nil if the
+	// lock can be acquired
+	Getlk(lock *FileLock) (*FileLock, error)
+	// Setlk acquires or releases a lock without waiting. It returns
+	// ErrFileLockConflict if another owner holds a conflicting lock.
+	Setlk(lock *FileLock) error
+	// Setlkw acquires a lock, waiting until it becomes available or the
+	// context is canceled
+	Setlkw(ctx context.Context, lock *FileLock) error
 }

@@ -1,6 +1,7 @@
 package irods
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -97,6 +98,7 @@ type mockFileHandle struct {
 	entry    *irodsclient_fs.Entry
 	openMode irodsclient_types.FileOpenMode
 	data     []byte
+	locks    *FileLockManager
 }
 
 func newMockFileHandle(path string, data []byte, mode irodsclient_types.FileOpenMode) *mockFileHandle {
@@ -112,6 +114,7 @@ func newMockFileHandle(path string, data []byte, mode irodsclient_types.FileOpen
 		},
 		openMode: mode,
 		data:     data,
+		locks:    NewFileLockManager(),
 	}
 }
 
@@ -123,6 +126,18 @@ func (h *mockFileHandle) IsWriteMode() bool                           { return h
 func (h *mockFileHandle) GetAvailable(offset int64) int64             { return int64(len(h.data)) - offset }
 func (h *mockFileHandle) Flush() error                                { return nil }
 func (h *mockFileHandle) Close() error                                { return nil }
+
+func (h *mockFileHandle) Getlk(lock *FileLock) (*FileLock, error) {
+	return h.locks.Test(h.entry.Path, h.id, lock), nil
+}
+
+func (h *mockFileHandle) Setlk(lock *FileLock) error {
+	return h.locks.Lock(h.entry.Path, h.id, lock)
+}
+
+func (h *mockFileHandle) Setlkw(ctx context.Context, lock *FileLock) error {
+	return h.locks.LockWait(ctx, h.entry.Path, h.id, lock)
+}
 func (h *mockFileHandle) Truncate(size int64) error {
 	if size < int64(len(h.data)) {
 		h.data = h.data[:size]

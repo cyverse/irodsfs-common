@@ -1,6 +1,7 @@
 package irods
 
 import (
+	"context"
 	"io"
 
 	"github.com/cockroachdb/errors"
@@ -17,9 +18,10 @@ import (
 // direct access to iRODS server
 // implements interfaces defined in interface.go
 type IRODSFSClientDirect struct {
-	id     string
-	fs     *irodsclient_fs.FileSystem
-	logger *log.Entry
+	id              string
+	fs              *irodsclient_fs.FileSystem
+	fileLockManager *FileLockManager
+	logger          *log.Entry
 }
 
 // NewIRODSFSClientDirect creates IRODSFSClient using IRODSFSClientDirect
@@ -35,9 +37,10 @@ func NewIRODSFSClientDirect(fs *irodsclient_fs.FileSystem) (IRODSFSClient, error
 	})
 
 	return &IRODSFSClientDirect{
-		id:     clientID,
-		fs:     fs,
-		logger: logger,
+		id:              clientID,
+		fs:              fs,
+		fileLockManager: NewFileLockManager(),
+		logger:          logger,
 	}, nil
 }
 
@@ -54,6 +57,11 @@ func (c *IRODSFSClientDirect) GetApplicationName() string {
 // GetFSClient returns iRODS fs client
 func (c *IRODSFSClientDirect) GetFSClient() *irodsclient_fs.FileSystem {
 	return c.fs
+}
+
+// GetFileLockManager returns the file lock manager that serves locks of this client
+func (c *IRODSFSClientDirect) GetFileLockManager() *FileLockManager {
+	return c.fileLockManager
 }
 
 // GetOpenConnections() returns total number of open connections
@@ -212,6 +220,9 @@ func (c *IRODSFSClientDirect) RenameFileToFile(srcPath string, destPath string) 
 	if err != nil {
 		return err
 	}
+
+	// locks are keyed by path, so they have to follow the file
+	moveFileLocks(c.fileLockManager, srcPath, destPath)
 	return nil
 }
 
@@ -235,10 +246,11 @@ func (c *IRODSFSClientDirect) CreateFile(path string, mode string) (IRODSFSFileH
 	})
 
 	fileHandle := &IRODSFSClientDirectFileHandle{
-		id:     handleID,
-		client: c,
-		handle: handle,
-		logger: handleLogger,
+		id:        handleID,
+		client:    c,
+		handle:    handle,
+		irodsPath: path,
+		logger:    handleLogger,
 	}
 
 	return fileHandle, nil
@@ -264,10 +276,11 @@ func (c *IRODSFSClientDirect) OpenFile(path string, mode string) (IRODSFSFileHan
 	})
 
 	fileHandle := &IRODSFSClientDirectFileHandle{
-		id:     handleID,
-		client: c,
-		handle: handle,
-		logger: handleLogger,
+		id:        handleID,
+		client:    c,
+		handle:    handle,
+		irodsPath: path,
+		logger:    handleLogger,
 	}
 
 	return fileHandle, nil
@@ -387,10 +400,11 @@ func (c *IRODSFSClientDirect) UploadFileParallel(localPath string, irodsPath str
 
 // IRODSFSClientDirectFileHandle implements IRODSFSFileHandle
 type IRODSFSClientDirectFileHandle struct {
-	id     string
-	client *IRODSFSClientDirect
-	handle *irodsclient_fs.FileHandle
-	logger *log.Entry
+	id        string
+	client    *IRODSFSClientDirect
+	handle    *irodsclient_fs.FileHandle
+	irodsPath string
+	logger    *log.Entry
 }
 
 func (h *IRODSFSClientDirectFileHandle) GetID() string {
@@ -452,8 +466,35 @@ func (h *IRODSFSClientDirectFileHandle) Flush() error {
 	return nil
 }
 
+// Getlk returns a lock that conflicts with the given lock, or nil if the lock
+// can be acquired
+func (h *IRODSFSClientDirectFileHandle) Getlk(lock *FileLock) (*FileLock, error) {
+	defer util.StackTraceFromPanic(h.logger)
+
+	return testFileLock(h.client.fileLockManager, h.irodsPath, h.id, lock)
+}
+
+// Setlk acquires or releases a lock without waiting. It returns
+// ErrFileLockConflict if the lock is held by another owner.
+func (h *IRODSFSClientDirectFileHandle) Setlk(lock *FileLock) error {
+	defer util.StackTraceFromPanic(h.logger)
+
+	return setFileLock(h.client.fileLockManager, h.irodsPath, h.id, lock)
+}
+
+// Setlkw acquires a lock, waiting until it becomes available or the context is
+// canceled
+func (h *IRODSFSClientDirectFileHandle) Setlkw(ctx context.Context, lock *FileLock) error {
+	defer util.StackTraceFromPanic(h.logger)
+
+	return setFileLockWait(ctx, h.client.fileLockManager, h.irodsPath, h.id, lock)
+}
+
 func (h *IRODSFSClientDirectFileHandle) Close() error {
 	defer util.StackTraceFromPanic(h.logger)
+
+	// locks are released on close, like the kernel does for flock() and OFD locks
+	releaseFileLocks(h.client.fileLockManager, h.id)
 
 	err := h.handle.Close()
 	if err != nil {

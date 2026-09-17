@@ -1,6 +1,7 @@
 package irods
 
 import (
+	"context"
 	"io"
 	"os"
 	"sync"
@@ -24,18 +25,19 @@ var _ IRODSFSFileHandle = (*packedFileHandle)(nil)
 // wrong here. What it does keep is quota accounting, so a runaway write inside
 // a packed directory fails instead of filling the staging disk.
 type packedFileHandle struct {
-	id        string
-	manager   *packedfs.Manager
-	mount     *packedfs.Mount
-	file      *os.File
-	irodsPath string
-	openMode  irodsclient_types.FileOpenMode
-	entry     *irodsclient_fs.Entry
-	logger    *log.Entry
-	mu        sync.Mutex
+	id              string
+	manager         *packedfs.Manager
+	mount           *packedfs.Mount
+	file            *os.File
+	irodsPath       string
+	openMode        irodsclient_types.FileOpenMode
+	entry           *irodsclient_fs.Entry
+	fileLockManager *FileLockManager
+	logger          *log.Entry
+	mu              sync.Mutex
 }
 
-func newPackedFileHandle(manager *packedfs.Manager, mount *packedfs.Mount, file *os.File, irodsPath string, mode irodsclient_types.FileOpenMode, entry *irodsclient_fs.Entry, logger *log.Entry) *packedFileHandle {
+func newPackedFileHandle(manager *packedfs.Manager, mount *packedfs.Mount, file *os.File, irodsPath string, mode irodsclient_types.FileOpenMode, entry *irodsclient_fs.Entry, fileLockManager *FileLockManager, logger *log.Entry) *packedFileHandle {
 	handleID := xid.New().String()
 
 	if logger == nil {
@@ -43,13 +45,14 @@ func newPackedFileHandle(manager *packedfs.Manager, mount *packedfs.Mount, file 
 	}
 
 	return &packedFileHandle{
-		id:        handleID,
-		manager:   manager,
-		mount:     mount,
-		file:      file,
-		irodsPath: irodsPath,
-		openMode:  mode,
-		entry:     entry,
+		id:              handleID,
+		manager:         manager,
+		mount:           mount,
+		file:            file,
+		irodsPath:       irodsPath,
+		openMode:        mode,
+		entry:           entry,
+		fileLockManager: fileLockManager,
 		logger: logger.WithFields(log.Fields{
 			"handle_id": handleID,
 			"path":      irodsPath,
@@ -178,8 +181,35 @@ func (h *packedFileHandle) Flush() error {
 	return h.file.Sync()
 }
 
+// Getlk returns a lock that conflicts with the given lock, or nil if the lock
+// can be acquired
+func (h *packedFileHandle) Getlk(lock *FileLock) (*FileLock, error) {
+	defer util.StackTraceFromPanic(h.logger)
+
+	return testFileLock(h.fileLockManager, h.irodsPath, h.id, lock)
+}
+
+// Setlk acquires or releases a lock without waiting. It returns
+// ErrFileLockConflict if the lock is held by another owner.
+func (h *packedFileHandle) Setlk(lock *FileLock) error {
+	defer util.StackTraceFromPanic(h.logger)
+
+	return setFileLock(h.fileLockManager, h.irodsPath, h.id, lock)
+}
+
+// Setlkw acquires a lock, waiting until it becomes available or the context is
+// canceled
+func (h *packedFileHandle) Setlkw(ctx context.Context, lock *FileLock) error {
+	defer util.StackTraceFromPanic(h.logger)
+
+	return setFileLockWait(ctx, h.fileLockManager, h.irodsPath, h.id, lock)
+}
+
 func (h *packedFileHandle) Close() error {
 	defer util.StackTraceFromPanic(h.logger)
+
+	// locks are released on close, like the kernel does for flock() and OFD locks
+	releaseFileLocks(h.fileLockManager, h.id)
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
