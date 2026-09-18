@@ -900,7 +900,7 @@ func (sm *StagingStateManager) GetPendingRenames() []*StagingMetadata {
 // syncOne performs the operation described by meta regardless of its age. It is
 // used by SyncAll, which must drain every pending operation.
 func (sm *StagingStateManager) syncOne(meta *StagingMetadata) error {
-	_, err := sm.syncCandidate(meta, 0, true)
+	_, _, err := sm.syncCandidate(meta, 0, true)
 	return err
 }
 
@@ -911,8 +911,10 @@ func (sm *StagingStateManager) syncOne(meta *StagingMetadata) error {
 // re-validated against the same readiness rule once the path lock is held:
 // anything modified, leased by a local writer, or already picked up by another
 // worker in the meantime is left for a later pass. executed reports whether the
-// handler actually ran, which lets callers detect a pass that made no progress.
-func (sm *StagingStateManager) syncCandidate(meta *StagingMetadata, gracePeriod time.Duration, includeAll bool) (executed bool, err error) {
+// handler actually ran, and stale reports a candidate that no longer describes
+// the operation it was taken from, which together let callers tell a pass that
+// made no progress from one that has to take a fresh snapshot.
+func (sm *StagingStateManager) syncCandidate(meta *StagingMetadata, gracePeriod time.Duration, includeAll bool) (executed bool, stale bool, err error) {
 	sm.mu.Lock()
 	directoryOperation := meta.Action == ActionRmdir || meta.Action == ActionRenameDir
 	if directoryOperation {
@@ -926,16 +928,25 @@ func (sm *StagingStateManager) syncCandidate(meta *StagingMetadata, gracePeriod 
 	op := sm.dag.get(meta.OperationID)
 	if op == nil || len(op.Dependencies) != 0 || op.State == OperationRunning {
 		sm.mu.Unlock()
-		return false, nil
+		return false, false, nil
+	}
+	if !operationMatchesCandidate(op.Metadata, meta) {
+		// A queued operation is edited in place, keeping its ID: removing a
+		// directory turns a queued upload below it into a delete, and renaming
+		// one rebases the paths below it. The snapshot then describes work the
+		// caller no longer asked for, so it is dropped in favour of a fresh one
+		// rather than handed to the handler.
+		sm.mu.Unlock()
+		return false, true, nil
 	}
 	if !includeAll && !op.Urgent && time.Since(op.Metadata.LastModifiedAt) < gracePeriod {
 		// A local modification landed after this candidate was selected.
 		sm.mu.Unlock()
-		return false, nil
+		return false, false, nil
 	}
 	if sm.leasedPathUnlocked(op.Metadata) != "" {
 		sm.mu.Unlock()
-		return false, nil
+		return false, false, nil
 	}
 	op.State = OperationRunning
 	if directoryOperation {
@@ -976,7 +987,7 @@ func (sm *StagingStateManager) syncCandidate(meta *StagingMetadata, gracePeriod 
 			}
 			sm.unlockOperationUnlocked(meta)
 			sm.mu.Unlock()
-			return true, errors.Wrapf(err, "handler failed for %q action on %q", meta.Action, meta.Path)
+			return true, false, errors.Wrapf(err, "handler failed for %q action on %q", meta.Action, meta.Path)
 		}
 	}
 
@@ -996,7 +1007,19 @@ func (sm *StagingStateManager) syncCandidate(meta *StagingMetadata, gracePeriod 
 	sm.unlockOperationUnlocked(meta)
 	sm.mu.Unlock()
 
-	return true, deleteErr
+	return true, false, deleteErr
+}
+
+// operationMatchesCandidate reports whether a snapshot still describes the
+// queued operation it was taken from. Only the fields the path locks and the
+// handler act on are compared; bookkeeping such as the failure count or the
+// modification time is expected to move under a running sync.
+func operationMatchesCandidate(live *StagingMetadata, candidate *StagingMetadata) bool {
+	return live.Action == candidate.Action &&
+		live.Path == candidate.Path &&
+		live.OldPath == candidate.OldPath &&
+		live.Force == candidate.Force &&
+		live.Recurse == candidate.Recurse
 }
 
 func (sm *StagingStateManager) markAncestorDirectoriesTouchedUnlocked(path string) error {
@@ -1088,15 +1111,22 @@ func (sm *StagingStateManager) SyncAll() error {
 	for {
 		// A candidate may be skipped because another worker took it or a local
 		// writer holds a lease, so a pass can execute nothing at all.
+		//
+		// The whole snapshot is consumed before a new one is taken. Rebuilding
+		// it after every executed operation would walk, copy and sort the
+		// entire backlog once per operation, which is what dominates the flush
+		// of a large staging area. syncCandidate re-reads every candidate
+		// under the lock, so one that no longer describes runnable work by the
+		// time the pass reaches it is skipped instead of acted on, and work
+		// queued during the pass is picked up by the next one.
 		progressed := false
 		for _, meta := range sm.getSyncCandidates(0, true) {
-			executed, err := sm.syncCandidate(meta, 0, true)
+			executed, stale, err := sm.syncCandidate(meta, 0, true)
 			if err != nil {
 				return err
 			}
-			if executed {
+			if executed || stale {
 				progressed = true
-				break
 			}
 		}
 		if progressed {
@@ -1108,6 +1138,14 @@ func (sm *StagingStateManager) SyncAll() error {
 		if remaining == 0 {
 			sm.mu.Unlock()
 			return nil
+		}
+		if sm.runnableCandidateExistsUnlocked() {
+			// Work queued or edited while the pass ran is not in the snapshot
+			// the pass consumed. Take a fresh one instead of waiting for a
+			// completion that nothing is going to signal, or reporting a DAG
+			// that merely changed as blocked.
+			sm.mu.Unlock()
+			continue
 		}
 		if !sm.progressPossibleUnlocked() {
 			sm.mu.Unlock()
@@ -1139,6 +1177,22 @@ func (sm *StagingStateManager) progressPossibleUnlocked() bool {
 	return false
 }
 
+// runnableCandidateExistsUnlocked reports whether an operation could run right
+// now: nothing blocks it, it waits on nothing, it is not already running, and
+// no local writer holds its data. The caller must hold sm.mu.
+func (sm *StagingStateManager) runnableCandidateExistsUnlocked() bool {
+	for _, op := range sm.dag.nodes {
+		if op.State == OperationRunning || op.State == OperationBlocked || len(op.Dependencies) != 0 {
+			continue
+		}
+		if sm.leasedPathUnlocked(op.Metadata) != "" {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // SyncOld performs sync on items older than gracePeriod (10 seconds) with per-path locking
 func (sm *StagingStateManager) SyncOld(gracePeriod time.Duration) error {
 	for {
@@ -1148,11 +1202,11 @@ func (sm *StagingStateManager) SyncOld(gracePeriod time.Duration) error {
 		}
 		progressed := false
 		for _, meta := range metas {
-			executed, err := sm.syncCandidate(meta, gracePeriod, false)
+			executed, stale, err := sm.syncCandidate(meta, gracePeriod, false)
 			if err != nil {
 				return err
 			}
-			progressed = progressed || executed
+			progressed = progressed || executed || stale
 		}
 		// Candidates that are still leased or were touched while syncing are
 		// left for the next pass instead of being retried in a busy loop.

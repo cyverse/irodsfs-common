@@ -167,3 +167,101 @@ func TestCompleteOperationKeepsStateWhenPersistenceFails(t *testing.T) {
 		t.Fatalf("sync candidates = %d, want the operation to be runnable again", len(candidates))
 	}
 }
+
+// TestSyncAllSkipsOperationCancelledDuringPass covers the candidate snapshot
+// that SyncAll consumes: a pass runs every candidate it selected, so an
+// operation that is cancelled while an earlier one is running must be skipped
+// rather than handed to the handler.
+func TestSyncAllSkipsOperationCancelledDuringPass(t *testing.T) {
+	manager := NewStagingStateManager()
+
+	const (
+		firstPath     = "/mdtest/a.txt"
+		cancelledPath = "/mdtest/b.txt"
+		lastPath      = "/mdtest/c.txt"
+	)
+	for _, path := range []string{firstPath, cancelledPath, lastPath} {
+		if err := manager.Create(path); err != nil {
+			t.Fatalf("Create(%q): %v", path, err)
+		}
+	}
+
+	synced := []string{}
+	manager.RegisterActionHandler(func(metadata *StagingMetadata) error {
+		synced = append(synced, metadata.Path)
+		if metadata.Path == firstPath {
+			// An unrelated path may be mutated from a handler, and a
+			// never-synced upload is cancelled outright.
+			if err := manager.Delete(cancelledPath); err != nil {
+				t.Errorf("Delete(%q): %v", cancelledPath, err)
+			}
+		}
+		return nil
+	})
+
+	if err := manager.SyncAll(); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+
+	for _, path := range synced {
+		if path == cancelledPath {
+			t.Fatalf("Expected the cancelled operation to be skipped, synced %v", synced)
+		}
+	}
+	if len(synced) != 2 {
+		t.Fatalf("Expected the two remaining operations to sync, got %v", synced)
+	}
+	if manager.Get(cancelledPath) != nil {
+		t.Fatal("Expected no metadata for the cancelled path")
+	}
+}
+
+// TestSyncAllSkipsOperationEditedDuringPass covers a queued operation that is
+// edited in place, keeping its ID, after the pass took its candidates. Removing
+// a directory turns a queued upload below it into a delete, so acting on the
+// snapshot would upload a file the caller has just removed.
+func TestSyncAllSkipsOperationEditedDuringPass(t *testing.T) {
+	manager := NewStagingStateManager()
+
+	const (
+		firstPath  = "/mdtest/a/first.txt"
+		editedPath = "/mdtest/b/edited.txt"
+	)
+	if err := manager.Create(firstPath); err != nil {
+		t.Fatalf("Create(%q): %v", firstPath, err)
+	}
+	// Modify, not Create: the file exists in the backend, so removing its
+	// directory turns the queued upload into a delete instead of cancelling it.
+	if err := manager.Modify(editedPath); err != nil {
+		t.Fatalf("Modify(%q): %v", editedPath, err)
+	}
+
+	synced := map[string]ActionType{}
+	manager.RegisterActionHandler(func(metadata *StagingMetadata) error {
+		if previous, repeated := synced[metadata.Path]; repeated {
+			t.Errorf("Path %q synced twice, as %s then %s", metadata.Path, previous, metadata.Action)
+		}
+		synced[metadata.Path] = metadata.Action
+		if metadata.Path == firstPath {
+			// An unrelated subtree may be mutated from a handler.
+			if _, err := manager.Rmdir("/mdtest/b", false, true); err != nil {
+				t.Errorf("Rmdir: %v", err)
+			}
+		}
+		return nil
+	})
+
+	if err := manager.SyncAll(); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+
+	if action, ok := synced[editedPath]; !ok || action != ActionDelete {
+		t.Fatalf("Expected the edited operation to sync as %s, got %q -> %v", ActionDelete, editedPath, synced)
+	}
+	if action, ok := synced["/mdtest/b"]; !ok || action != ActionRmdir {
+		t.Fatalf("Expected the directory removal to sync, got %v", synced)
+	}
+	if manager.Get(editedPath) != nil {
+		t.Fatal("Expected no metadata left for the edited path")
+	}
+}

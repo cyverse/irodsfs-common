@@ -291,3 +291,57 @@ func TestLateDeleteBecomesParentRmdirDependency(t *testing.T) {
 		t.Fatalf("Expected %v, got %v", want, actions)
 	}
 }
+
+func TestOperationDAGDependentsIndexTracksEdges(t *testing.T) {
+	dag := newOperationDAG()
+	first, err := dag.add(&StagingMetadata{Path: "/first", Action: ActionMkdir}, nil, false)
+	if err != nil {
+		t.Fatalf("Failed to add first node: %v", err)
+	}
+	second, err := dag.add(&StagingMetadata{Path: "/first/second", Action: ActionUpload}, []string{first.ID}, false)
+	if err != nil {
+		t.Fatalf("Failed to add second node: %v", err)
+	}
+	third, err := dag.add(&StagingMetadata{Path: "/first/third", Action: ActionUpload}, []string{first.ID}, false)
+	if err != nil {
+		t.Fatalf("Failed to add third node: %v", err)
+	}
+
+	dependents := dag.dependentsOf(first.ID)
+	if len(dependents) != 2 {
+		t.Fatalf("Expected two dependents of the first node, got %v", dependents)
+	}
+
+	// Completing the dependency must drop the edge from both dependents, and
+	// leave no index entry behind for the node that is gone.
+	dag.remove(first.ID)
+	for _, op := range []*StagingOperation{second, third} {
+		if len(dag.get(op.ID).Dependencies) != 0 {
+			t.Fatalf("Expected node %q to lose its dependency, got %v", op.Metadata.Path, dag.get(op.ID).Dependencies)
+		}
+	}
+	if dependents := dag.dependentsOf(first.ID); len(dependents) != 0 {
+		t.Fatalf("Expected no dependents of the removed node, got %v", dependents)
+	}
+
+	// An edge added after insertion is indexed the same way, and reinsert
+	// restores both directions so a failed removal leaves the DAG as it was.
+	dag.addDependency(third.ID, second.ID)
+	if dependents := dag.dependentsOf(second.ID); len(dependents) != 1 || dependents[0] != third.ID {
+		t.Fatalf("Expected the third node to depend on the second, got %v", dependents)
+	}
+
+	dependents = dag.dependentsOf(second.ID)
+	removed := dag.get(second.ID)
+	dag.remove(second.ID)
+	dag.reinsert(removed, dependents)
+	if dependents := dag.dependentsOf(second.ID); len(dependents) != 1 || dependents[0] != third.ID {
+		t.Fatalf("Expected reinsert to restore the dependent edge, got %v", dependents)
+	}
+
+	dag.remove(third.ID)
+	dag.remove(second.ID)
+	if len(dag.nodes) != 0 || len(dag.dependents) != 0 {
+		t.Fatalf("Expected an empty DAG, got %d nodes and %d index entries", len(dag.nodes), len(dag.dependents))
+	}
+}

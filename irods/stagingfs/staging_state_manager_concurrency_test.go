@@ -360,7 +360,7 @@ func TestWriteLeaseDefersSyncCandidate(t *testing.T) {
 	})
 
 	sm.AcquireWriteLease(path)
-	executed, err := sm.syncCandidate(&candidate, 0, true)
+	executed, _, err := sm.syncCandidate(&candidate, 0, true)
 	if err != nil {
 		t.Fatalf("Leased sync candidate failed: %v", err)
 	}
@@ -461,7 +461,7 @@ func TestSubtreeWriteLeaseDefersDescendantSync(t *testing.T) {
 	})
 
 	sm.AcquireWriteLeaseSubtree("/dir")
-	executed, err := sm.syncCandidate(&candidate, 0, true)
+	executed, _, err := sm.syncCandidate(&candidate, 0, true)
 	if err != nil {
 		t.Fatalf("Leased descendant sync candidate failed: %v", err)
 	}
@@ -470,7 +470,7 @@ func TestSubtreeWriteLeaseDefersDescendantSync(t *testing.T) {
 	}
 
 	sm.ReleaseWriteLeaseSubtree("/dir")
-	if executed, err = sm.syncCandidate(&candidate, 0, true); err != nil {
+	if executed, _, err = sm.syncCandidate(&candidate, 0, true); err != nil {
 		t.Fatalf("Failed to sync descendant after releasing the subtree lease: %v", err)
 	}
 	if !executed || len(actions) != 1 || actions[0] != ActionUpload {

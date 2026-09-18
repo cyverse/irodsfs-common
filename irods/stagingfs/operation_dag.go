@@ -34,10 +34,48 @@ type StagingOperation struct {
 // metadata. It is protected by StagingStateManager.mu.
 type OperationDAG struct {
 	nodes map[string]*StagingOperation
+
+	// dependents is the reverse of the Dependencies edges: it maps an
+	// operation to the operations waiting on it. A sync completes one
+	// operation at a time, and each completion has to drop the edges that
+	// pointed at it. Finding them by walking every node costs the size of the
+	// whole backlog per completed operation, which makes flushing a large
+	// staging area quadratic, so the edges are indexed as they are created.
+	dependents map[string]map[string]struct{}
 }
 
 func newOperationDAG() *OperationDAG {
-	return &OperationDAG{nodes: make(map[string]*StagingOperation)}
+	return &OperationDAG{
+		nodes:      make(map[string]*StagingOperation),
+		dependents: make(map[string]map[string]struct{}),
+	}
+}
+
+// linkDependencies records op as a dependent of every operation it waits on.
+func (dag *OperationDAG) linkDependencies(op *StagingOperation) {
+	for _, dependencyID := range op.Dependencies {
+		dag.linkDependency(op.ID, dependencyID)
+	}
+}
+
+func (dag *OperationDAG) linkDependency(id string, dependencyID string) {
+	dependents := dag.dependents[dependencyID]
+	if dependents == nil {
+		dependents = map[string]struct{}{}
+		dag.dependents[dependencyID] = dependents
+	}
+	dependents[id] = struct{}{}
+}
+
+func (dag *OperationDAG) unlinkDependency(id string, dependencyID string) {
+	dependents := dag.dependents[dependencyID]
+	if dependents == nil {
+		return
+	}
+	delete(dependents, id)
+	if len(dependents) == 0 {
+		delete(dag.dependents, dependencyID)
+	}
 }
 
 func newOperationID() (string, error) {
@@ -64,6 +102,7 @@ func (dag *OperationDAG) add(meta *StagingMetadata, dependencies []string, urgen
 		CreatedAt:    time.Now(),
 	}
 	dag.nodes[id] = op
+	dag.linkDependencies(op)
 	return op, nil
 }
 
@@ -75,6 +114,7 @@ func (dag *OperationDAG) restore(op *StagingOperation) {
 		copyOp.State = OperationQueued
 	}
 	dag.nodes[copyOp.ID] = &copyOp
+	dag.linkDependencies(&copyOp)
 }
 
 func (dag *OperationDAG) get(id string) *StagingOperation {
@@ -82,21 +122,29 @@ func (dag *OperationDAG) get(id string) *StagingOperation {
 }
 
 func (dag *OperationDAG) remove(id string) {
+	op := dag.nodes[id]
 	delete(dag.nodes, id)
-	for _, op := range dag.nodes {
-		op.Dependencies = removeOperationID(op.Dependencies, id)
+
+	if op != nil {
+		for _, dependencyID := range op.Dependencies {
+			dag.unlinkDependency(id, dependencyID)
+		}
 	}
+
+	for dependentID := range dag.dependents[id] {
+		if dependent := dag.nodes[dependentID]; dependent != nil {
+			dependent.Dependencies = removeOperationID(dependent.Dependencies, id)
+		}
+	}
+	delete(dag.dependents, id)
 }
 
 // dependentsOf returns the operations that list id as a dependency.
 func (dag *OperationDAG) dependentsOf(id string) []string {
-	dependents := make([]string, 0)
-	for nodeID, op := range dag.nodes {
-		for _, dependencyID := range op.Dependencies {
-			if dependencyID == id {
-				dependents = append(dependents, nodeID)
-				break
-			}
+	dependents := make([]string, 0, len(dag.dependents[id]))
+	for nodeID := range dag.dependents[id] {
+		if _, exists := dag.nodes[nodeID]; exists {
+			dependents = append(dependents, nodeID)
 		}
 	}
 	return dependents
@@ -107,6 +155,7 @@ func (dag *OperationDAG) dependentsOf(id string) []string {
 // exactly as it was.
 func (dag *OperationDAG) reinsert(op *StagingOperation, dependents []string) {
 	dag.nodes[op.ID] = op
+	dag.linkDependencies(op)
 	for _, id := range dependents {
 		dag.addDependency(id, op.ID)
 	}
@@ -118,6 +167,7 @@ func (dag *OperationDAG) addDependency(id string, dependencyID string) {
 	}
 	if op := dag.nodes[id]; op != nil {
 		op.Dependencies = uniqueOperationIDs(append(op.Dependencies, dependencyID))
+		dag.linkDependency(id, dependencyID)
 	}
 }
 

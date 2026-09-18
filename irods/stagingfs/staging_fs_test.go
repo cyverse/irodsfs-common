@@ -1179,7 +1179,7 @@ func TestStagingFSStaleCandidateSkipsTruncatedFile(t *testing.T) {
 		t.Fatalf("TruncateFile failed: %v", err)
 	}
 
-	executed, err := sf.sm.syncCandidate(candidates[0], time.Hour, false)
+	executed, _, err := sf.sm.syncCandidate(candidates[0], time.Hour, false)
 	if err != nil {
 		t.Fatalf("Stale sync candidate failed: %v", err)
 	}
@@ -1226,7 +1226,7 @@ func TestStagingFSStaleCandidateSkipsReopenedFile(t *testing.T) {
 		sf.ReleaseRef(path)
 	}()
 
-	executed, err := sf.sm.syncCandidate(candidates[0], time.Hour, false)
+	executed, _, err := sf.sm.syncCandidate(candidates[0], time.Hour, false)
 	if err != nil {
 		t.Fatalf("Stale sync candidate failed: %v", err)
 	}

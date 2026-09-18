@@ -1243,7 +1243,7 @@ func (sf *StagingFS) syncOldItems(gracePeriod time.Duration) {
 				continue
 			}
 
-			if _, err := sf.sm.syncCandidate(meta, gracePeriod, false); err != nil {
+			if _, _, err := sf.sm.syncCandidate(meta, gracePeriod, false); err != nil {
 				log.WithError(err).Warnf("background sync failed for %s (%s), attempt %d", meta.Path, meta.Action, meta.SyncFailCount)
 
 				sf.notifySyncError(meta, err)
