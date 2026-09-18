@@ -2261,3 +2261,51 @@ func TestReleaseSpaceDoesNotUnderflow(t *testing.T) {
 		t.Fatalf("GetAvailableDataSize() = %d, want %d", got, 1024*1024)
 	}
 }
+
+// TestBackgroundSyncDoesNotRecordSkippedDirectory covers the bookkeeping that
+// follows a background sync: a candidate that was left for a later pass never
+// reached iRODS, so recording it as synced would publish a directory that the
+// backend does not have.
+func TestBackgroundSyncDoesNotRecordSkippedDirectory(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	const dir = "/newdir"
+	if err := sf.Mkdir(dir); err != nil {
+		t.Fatalf("Mkdir(%q): %v", dir, err)
+	}
+
+	// A local writer holding the subtree makes the sync leave the candidate
+	// for a later pass. The lease has to be released on every path out of the
+	// test, because closing the staging filesystem drains the queue and a
+	// leased operation never drains.
+	sf.sm.AcquireWriteLeaseSubtree(dir)
+	leased := true
+	defer func() {
+		if leased {
+			sf.sm.ReleaseWriteLeaseSubtree(dir)
+		}
+	}()
+	sf.syncOldItems(0)
+
+	if cached := sf.GetCachedDirs(); len(cached) != 0 {
+		t.Fatalf("Skipped directory recorded as synced: %v", cached)
+	}
+	if meta := sf.sm.Get(dir); meta == nil || meta.Action != ActionMkdir {
+		t.Fatalf("staging metadata = %+v, want the directory still pending", meta)
+	}
+
+	sf.sm.ReleaseWriteLeaseSubtree(dir)
+	leased = false
+	sf.syncOldItems(0)
+
+	if cached := sf.GetCachedDirs(); len(cached) != 1 {
+		t.Fatalf("Synced directory not recorded, cached %v", cached)
+	}
+}

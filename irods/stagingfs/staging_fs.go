@@ -1243,7 +1243,8 @@ func (sf *StagingFS) syncOldItems(gracePeriod time.Duration) {
 				continue
 			}
 
-			if _, _, err := sf.sm.syncCandidate(meta, gracePeriod, false); err != nil {
+			executed, _, err := sf.sm.syncCandidate(meta, gracePeriod, false)
+			if err != nil {
 				log.WithError(err).Warnf("background sync failed for %s (%s), attempt %d", meta.Path, meta.Action, meta.SyncFailCount)
 
 				sf.notifySyncError(meta, err)
@@ -1255,6 +1256,14 @@ func (sf *StagingFS) syncOldItems(gracePeriod time.Duration) {
 
 					sf.sm.markOperationBlockedPublic(meta.OperationID)
 				}
+				continue
+			}
+			if !executed {
+				// The operation was left for a later pass: another worker took
+				// it, a local writer holds its data, or the candidate no longer
+				// describes the queued operation. Nothing reached iRODS, so the
+				// staged data stays where it is and the path is not recorded as
+				// synced.
 				continue
 			}
 
