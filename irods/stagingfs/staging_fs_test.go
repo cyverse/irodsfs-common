@@ -2309,3 +2309,54 @@ func TestBackgroundSyncDoesNotRecordSkippedDirectory(t *testing.T) {
 		t.Fatalf("Synced directory not recorded, cached %v", cached)
 	}
 }
+
+// Drain is for a staging area that is still in use, so it must not do what
+// SyncAll does: refuse because a writer holds a file, or keep other writers
+// from opening one while it runs.
+func TestDrainUploadsWhatItCanWhileAWriterHoldsAFile(t *testing.T) {
+	sf, err := NewStagingFS(&StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &MockStagingClient{},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create StagingFS: %v", err)
+	}
+	defer sf.Close()
+
+	const (
+		stagedPath = "/drained.txt"
+		heldPath   = "/held.txt"
+	)
+	stagePendingUpload(t, sf, stagedPath, "abcdef")
+	stagePendingUpload(t, sf, heldPath, "ghijkl")
+
+	// A client still writing to one of the files.
+	held, err := sf.OpenForWrite(heldPath, false)
+	if err != nil {
+		t.Fatalf("OpenForWrite(%q): %v", heldPath, err)
+	}
+	defer func() {
+		held.Close()
+		sf.ReleaseRef(heldPath)
+	}()
+
+	// SyncAll refuses outright while that handle is open.
+	if err := sf.SyncAll(); !errors.Is(err, ErrOpenWriteHandles) {
+		t.Fatalf("SyncAll() = %v, want %v", err, ErrOpenWriteHandles)
+	}
+
+	var uploaded []string
+	sf.RegisterActionHandler(func(meta *StagingMetadata) error {
+		uploaded = append(uploaded, meta.Path)
+		return nil
+	})
+
+	sf.Drain()
+
+	if len(uploaded) != 1 || uploaded[0] != stagedPath {
+		t.Fatalf("Drain uploaded %v, want only %q", uploaded, stagedPath)
+	}
+	if meta := sf.sm.Get(heldPath); meta == nil {
+		t.Fatal("Drain uploaded the file a writer was holding")
+	}
+}

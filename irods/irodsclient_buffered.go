@@ -230,21 +230,45 @@ func (c *IRODSFSClientBuffered) Release() error {
 	return releaseErr
 }
 
-func (c *IRODSFSClientBuffered) Sync() error {
+// packDirtyMounts uploads every packed directory that changed since its last
+// pack. It snapshots rather than unmounts, so a tree the session is still using
+// survives the upload.
+func (c *IRODSFSClientBuffered) packDirtyMounts() error {
+	if c.packed == nil {
+		return nil
+	}
+
+	c.logger.Info("packing mounted packed directories to iRODS")
+
 	var packedErr error
-	if c.packed != nil {
-		c.logger.Info("packing mounted packed directories to iRODS")
-		// Snapshot rather than unmount: an explicit sync flushes data without
-		// throwing away trees the session is still using.
-		for _, mount := range c.packed.Mounts() {
-			if !mount.IsDirty() {
-				continue
-			}
-			if err := c.packed.Pack(mount); err != nil {
-				packedErr = errors.CombineErrors(packedErr, err)
-			}
+	for _, mount := range c.packed.Mounts() {
+		if !mount.IsDirty() {
+			continue
+		}
+		if err := c.packed.Pack(mount); err != nil {
+			packedErr = errors.CombineErrors(packedErr, err)
 		}
 	}
+	return packedErr
+}
+
+// Drain uploads what the session has staged without holding off the clients
+// using it, so it suits a session that may yet be handed back. Sync is the
+// strict version, which empties the staging area but stops new write handles
+// from opening while it runs.
+func (c *IRODSFSClientBuffered) Drain() error {
+	packedErr := c.packDirtyMounts()
+
+	if c.staging != nil {
+		c.logger.Info("draining staged data to iRODS")
+		c.staging.Drain()
+	}
+
+	return packedErr
+}
+
+func (c *IRODSFSClientBuffered) Sync() error {
+	packedErr := c.packDirtyMounts()
 
 	if c.staging == nil {
 		return packedErr

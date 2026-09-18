@@ -953,6 +953,21 @@ func localDirHasEntries(localPath string) (bool, error) {
 	return len(entries) > 0, nil
 }
 
+// Drain uploads everything the staging area holds that can go right now,
+// without holding off the clients still using it. It syncs path by path, the
+// way the background worker does, so a file a writer holds is the only one left
+// behind rather than a reason to stop the whole pass, and local files are
+// removed one at a time as their operation completes.
+//
+// SyncAll is the strict counterpart. It guarantees an empty staging area, and
+// pays for that by refusing to run at all while a write handle is open and by
+// keeping new ones from opening until it returns. Drain suits a session that is
+// still serving; SyncAll suits one that is not, such as a staging area being
+// closed.
+func (sf *StagingFS) Drain() {
+	sf.syncOldItems(0)
+}
+
 // SyncAll performs all pending operations
 func (sf *StagingFS) SyncAll() error {
 	// An open write handle may continue modifying its file after an upload.
