@@ -668,8 +668,14 @@ func (c *IRODSFSClientBuffered) Stat(filePath string) (*irodsclient_fs.Entry, er
 			}
 		}
 
-		// Check if this path was renamed away
+		// A later rename may reuse a path that an earlier pending rename
+		// moved away (for example 14 -> 13, then 15 -> 14).
 		if c.staging.IsRenamedFrom(filePath) {
+			if stagedEntry, found, stagedErr := c.getPendingRenameEntry(filePath); stagedErr != nil {
+				return nil, stagedErr
+			} else if found {
+				return stagedEntry, nil
+			}
 			return nil, irodsclient_types.NewFileNotFoundError(filePath)
 		}
 	}
