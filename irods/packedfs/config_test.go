@@ -79,7 +79,7 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name:    "name carrying the suffix",
-			config:  &Config{Enabled: true, Names: []string{".venv.mount.tar"}},
+			config:  &Config{Enabled: true, Names: []string{".venv.packedfs.tar"}},
 			wantErr: "must not end with the archive suffix",
 		},
 		{
@@ -155,15 +155,15 @@ func TestMatchRootDisabled(t *testing.T) {
 func TestArchivePathAndName(t *testing.T) {
 	config := newTestConfig()
 
-	assert.Equal(t, "/z/u/p/.venv.mount.tar", config.ArchivePath("/z/u/p/.venv"))
-	assert.True(t, config.IsArchiveName(".venv.mount.tar"))
-	assert.True(t, config.IsArchiveName(".git.mount.tar"))
+	assert.Equal(t, "/z/u/p/.venv.packedfs.tar", config.ArchivePath("/z/u/p/.venv"))
+	assert.True(t, config.IsArchiveName(".venv.packedfs.tar"))
+	assert.True(t, config.IsArchiveName(".git.packedfs.tar"))
 	// Not a configured directory name, so it is an ordinary user file.
-	assert.False(t, config.IsArchiveName(".cargo.mount.tar"))
+	assert.False(t, config.IsArchiveName(".cargo.packedfs.tar"))
 	assert.False(t, config.IsArchiveName("notes.tar"))
 	assert.False(t, config.IsArchiveName(".venv"))
 
-	root, ok := config.MatchArchiveRoot("/z/u/p/.venv.mount.tar")
+	root, ok := config.MatchArchiveRoot("/z/u/p/.venv.packedfs.tar")
 	require.True(t, ok)
 	assert.Equal(t, "/z/u/p/.venv", root)
 
@@ -175,9 +175,9 @@ func TestArchiveSuffixFollowsCompression(t *testing.T) {
 	config := &Config{Enabled: true, Names: []string{".venv"}, Compression: CompressionGzip}
 	config.ApplyDefaults()
 
-	assert.Equal(t, ".mount.tar.gz", config.ArchiveSuffix())
-	assert.Equal(t, "/p/.venv.mount.tar.gz", config.ArchivePath("/p/.venv"))
-	assert.True(t, config.IsArchiveName(".venv.mount.tar.gz"))
+	assert.Equal(t, ".packedfs.tar.gz", config.ArchiveSuffix())
+	assert.Equal(t, "/p/.venv.packedfs.tar.gz", config.ArchivePath("/p/.venv"))
+	assert.True(t, config.IsArchiveName(".venv.packedfs.tar.gz"))
 	// With gzip configured, a plain tar is not this config's archive.
-	assert.False(t, config.IsArchiveName(".venv.mount.tar"))
+	assert.False(t, config.IsArchiveName(".venv.packedfs.tar"))
 }

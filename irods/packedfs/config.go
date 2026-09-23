@@ -36,7 +36,7 @@ const SnapshotDisabled time.Duration = -1
 
 // Default configuration values.
 const (
-	DefaultSuffix              = ".mount.tar"
+	DefaultSuffix              = ".packedfs.tar"
 	DefaultMaxPackedDirSize    = 5 * 1024 * 1024 * 1024 // 5GB
 	DefaultSnapshotInterval    = 30 * time.Minute
 	DefaultConcurrentPackLimit = 2
@@ -73,7 +73,7 @@ type Config struct {
 	Names []string
 
 	// Suffix is appended to the directory name to form the data object name, so
-	// ".venv" is stored as ".venv.mount.tar". Compression adds its own
+	// ".venv" is stored as ".venv.packedfs.tar". Compression adds its own
 	// extension on top of this.
 	Suffix string
 
@@ -181,7 +181,7 @@ func (c *Config) ArchiveSuffix() string {
 }
 
 // ArchivePath returns the data object path holding the packed form of the
-// directory at root, for example "/z/home/u/p/.venv" -> "/z/home/u/p/.venv.mount.tar".
+// directory at root, for example "/z/home/u/p/.venv" -> "/z/home/u/p/.venv.packedfs.tar".
 func (c *Config) ArchivePath(root string) string {
 	return root + c.ArchiveSuffix()
 }
@@ -200,7 +200,7 @@ func (c *Config) IsArchiveName(name string) bool {
 	}
 
 	// Only an archive of a configured name counts, so an unrelated file that
-	// happens to end in ".mount.tar" stays visible.
+	// happens to end in ".packedfs.tar" stays visible.
 	return c.IsPackedName(strings.TrimSuffix(name, suffix))
 }
 
@@ -241,7 +241,7 @@ func (c *Config) MatchRoot(p string) (string, bool) {
 }
 
 // MatchArchiveRoot maps an archive path back to the directory it holds, so a
-// listing that returns ".venv.mount.tar" can present ".venv".
+// listing that returns ".venv.packedfs.tar" can present ".venv".
 func (c *Config) MatchArchiveRoot(archivePath string) (string, bool) {
 	if !c.Enabled {
 		return "", false

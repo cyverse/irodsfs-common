@@ -339,7 +339,7 @@ func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, e
 			return nil, err
 		}
 		// An archive data object stands in for the directory it holds, so the
-		// caller sees ".venv" rather than ".venv.mount.tar".
+		// caller sees ".venv" rather than ".venv.packedfs.tar".
 		return c.packedRewriteListing(dirPath, entries), nil
 	}
 

@@ -123,7 +123,7 @@ func (c *IRODSFSClientBuffered) packedApplyInodeID(entry *irodsclient_fs.Entry) 
 
 // packedRewriteListing replaces the archive data objects in a listing with the
 // directories they hold, so a caller sees ".venv" where iRODS stores
-// ".venv.mount.tar".
+// ".venv.packedfs.tar".
 func (c *IRODSFSClientBuffered) packedRewriteListing(dirPath string, entries []*irodsclient_fs.Entry) []*irodsclient_fs.Entry {
 	config := c.packedConfig()
 	if config == nil {
