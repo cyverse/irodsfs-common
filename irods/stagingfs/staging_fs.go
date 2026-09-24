@@ -80,6 +80,7 @@ type StagingFSConfig struct {
 	MaxDataSize      int64            // Max total disk usage for staged data (default: 10GB, 0 = use default)
 	MaxCacheFileSize int64            // Files larger than this are not kept as read cache after sync (default: 1GB, 0 = cache all)
 	OnSyncError      SyncErrorHandler // Called when background sync fails for an item (optional)
+	Logger           *log.Entry       // Logger for staging and sync activity (default: the standard logger)
 }
 
 const DefaultMaxDataSize = 10 * 1024 * 1024 * 1024     // 10GB
@@ -91,6 +92,7 @@ const MaxSyncFailCount = 3
 type StagingFS struct {
 	config           *StagingFSConfig
 	sm               *StagingStateManager
+	logger           *log.Entry
 	client           StagingClient
 	stopCh           chan struct{}
 	stopOnce         sync.Once
@@ -146,6 +148,9 @@ func NewStagingFS(config *StagingFSConfig) (*StagingFS, error) {
 	}
 
 	sm := NewStagingStateManager()
+	if config.Logger != nil {
+		sm.logger = config.Logger
+	}
 
 	maxSize := config.MaxDataSize
 	if maxSize == 0 {
@@ -160,6 +165,7 @@ func NewStagingFS(config *StagingFSConfig) (*StagingFS, error) {
 	sf := &StagingFS{
 		config:           config,
 		sm:               sm,
+		logger:           sm.logger,
 		client:           config.Client,
 		stopCh:           make(chan struct{}),
 		maxSize:          maxSize,
@@ -217,6 +223,9 @@ func NewStagingFSWithPersistence(config *StagingFSConfig) (*StagingFS, error) {
 	}
 
 	sm := NewStagingStateManagerWithPersistence(db)
+	if config.Logger != nil {
+		sm.logger = config.Logger
+	}
 	if err := sm.Restore(); err != nil {
 		return nil, errors.Wrap(err, "failed to restore from Badger")
 	}
@@ -234,6 +243,7 @@ func NewStagingFSWithPersistence(config *StagingFSConfig) (*StagingFS, error) {
 	sf := &StagingFS{
 		config:           config,
 		sm:               sm,
+		logger:           sm.logger,
 		client:           config.Client,
 		stopCh:           make(chan struct{}),
 		maxSize:          maxSize,
@@ -1125,7 +1135,7 @@ func (sf *StagingFS) Close() error {
 
 	syncErr := sf.SyncAll()
 	if syncErr != nil {
-		log.WithError(syncErr).Warnf("failed to sync all staged data on close; preserving staging data")
+		sf.logger.WithError(syncErr).Warnf("failed to sync all staged data on close; preserving staging data")
 	}
 
 	var dbCloseErr error
@@ -1260,7 +1270,7 @@ func (sf *StagingFS) syncOldItems(gracePeriod time.Duration) {
 
 			executed, _, err := sf.sm.syncCandidate(meta, gracePeriod, false)
 			if err != nil {
-				log.WithError(err).Warnf("background sync failed for %s (%s), attempt %d", meta.Path, meta.Action, meta.SyncFailCount)
+				sf.logger.WithError(err).Warnf("background sync failed for %s (%s), attempt %d", meta.Path, meta.Action, meta.SyncFailCount)
 
 				sf.notifySyncError(meta, err)
 
@@ -1350,7 +1360,7 @@ func (sf *StagingFS) transitionToCached(meta *StagingMetadata) {
 	remoteEntry, err := statClient.Stat(meta.Path)
 	if err != nil || remoteEntry == nil {
 		if err != nil {
-			log.WithError(err).Warnf("failed to stat synced file %q for staging cache freshness", meta.Path)
+			sf.logger.WithError(err).Warnf("failed to stat synced file %q for staging cache freshness", meta.Path)
 		}
 		sf.removePathSize(meta.Path)
 		_ = os.Remove(localPath)
@@ -1865,7 +1875,7 @@ func (sf *StagingFS) forceSyncOldest(needed int64) int64 {
 		}
 
 		if err := sf.sm.syncOne(item.meta); err != nil {
-			log.WithError(err).Warnf("force-sync failed for %s during quota eviction", item.path)
+			sf.logger.WithError(err).Warnf("force-sync failed for %s during quota eviction", item.path)
 			sf.notifySyncError(item.meta, err)
 			continue
 		}

@@ -94,6 +94,11 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 	}
 	directClient := client.(*IRODSFSClientDirect)
 
+	clientID := xid.New().String()
+	logger := fs.GetLogger().WithFields(log.Fields{
+		"fsclient_buffered_id": clientID,
+	})
+
 	// Create staging filesystem (optional)
 	var staging *stagingfs.StagingFS
 	if config.StagingRootPath != "" {
@@ -105,6 +110,7 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 			SyncInterval:     config.SyncInterval,
 			GracePeriod:      config.GracePeriod,
 			OnSyncError:      config.OnSyncError,
+			Logger:           logger,
 		}
 
 		if config.UsePersistence {
@@ -133,11 +139,6 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 			inodeManager = inode.NewInodeManager()
 		}
 	}
-
-	clientID := xid.New().String()
-	logger := fs.GetLogger().WithFields(log.Fields{
-		"fsclient_buffered_id": clientID,
-	})
 
 	// Packed directories live on the same staging disk and share its quota, so
 	// they need a staging root just as staged writes do. Their trees sit beside

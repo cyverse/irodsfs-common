@@ -114,6 +114,7 @@ type StagingStateManager struct {
 	pathConds      map[string]*sync.Cond // Per-path condition variables
 	progressCond   *sync.Cond            // Signals that pending operations may have become runnable
 	db             *badger.DB
+	logger         *log.Entry
 	mu             sync.RWMutex
 	// ActionHandler is read under mu by every sync. Change it with
 	// RegisterActionHandler; assigning to it directly races with a sync that is
@@ -141,6 +142,7 @@ func newStagingStateManager(db *badger.DB) *StagingStateManager {
 		leasedRoots:    make(map[string]int),
 		pathConds:      make(map[string]*sync.Cond),
 		db:             db,
+		logger:         log.NewEntry(log.StandardLogger()),
 	}
 	sm.progressCond = sync.NewCond(&sm.mu)
 	return sm
@@ -204,9 +206,62 @@ func (sm *StagingStateManager) waitForPathsUnlocked(paths ...string) {
 	}
 }
 
+// slowLockWaitThreshold is how long a directory operation may wait for running
+// syncs before the wait is reported as a warning rather than a debug message.
+const slowLockWaitThreshold = 10 * time.Second
+
+// lockWait counts the waits a caller made on locks held by running syncs.
+type lockWait struct {
+	waits        int
+	firstBlocker string
+	lastBlocker  string
+}
+
+func (w *lockWait) record(blocker string) {
+	if w.waits == 0 {
+		w.firstBlocker = blocker
+	}
+	w.waits++
+	w.lastBlocker = blocker
+}
+
+func (w *lockWait) add(other lockWait) {
+	if other.waits == 0 {
+		return
+	}
+	if w.waits == 0 {
+		w.firstBlocker = other.firstBlocker
+	}
+	w.waits += other.waits
+	w.lastBlocker = other.lastBlocker
+}
+
+// logLockWait reports a directory operation that had to wait for running syncs
+// before it could be queued, which the FUSE caller sees as latency.
+func (sm *StagingStateManager) logLockWait(action ActionType, path string, start time.Time, wait lockWait) {
+	elapsed := time.Since(start)
+	if wait.waits == 0 && elapsed < slowLockWaitThreshold {
+		return
+	}
+	entry := sm.logger.WithFields(log.Fields{
+		"action":       action.String(),
+		"path":         path,
+		"waits":        wait.waits,
+		"firstBlocker": wait.firstBlocker,
+		"lastBlocker":  wait.lastBlocker,
+		"elapsed":      elapsed.String(),
+	})
+	if elapsed >= slowLockWaitThreshold {
+		entry.Warn("staging operation waited long for running syncs")
+		return
+	}
+	entry.Debug("staging operation waited for running syncs")
+}
+
 // waitForSubtreeUnlocked waits until root does not overlap another recursive
 // operation and its exact path is not syncing. The caller must hold sm.mu.
-func (sm *StagingStateManager) waitForSubtreeUnlocked(root string) {
+func (sm *StagingStateManager) waitForSubtreeUnlocked(root string) lockWait {
+	var wait lockWait
 	for {
 		blocker := ""
 		if sm.lockedPaths[root] {
@@ -220,8 +275,9 @@ func (sm *StagingStateManager) waitForSubtreeUnlocked(root string) {
 			}
 		}
 		if blocker == "" {
-			return
+			return wait
 		}
+		wait.record(blocker)
 		if sm.pathConds[blocker] == nil {
 			sm.pathConds[blocker] = sync.NewCond(&sm.mu)
 		}
@@ -231,7 +287,8 @@ func (sm *StagingStateManager) waitForSubtreeUnlocked(root string) {
 
 // waitForLockedDescendants waits for sync handlers already running below root.
 // A subtree lock must be held before calling this so no new descendant sync can start.
-func (sm *StagingStateManager) waitForLockedDescendants(root string) {
+func (sm *StagingStateManager) waitForLockedDescendants(root string) lockWait {
+	var wait lockWait
 	for {
 		blocker := ""
 		for path := range sm.lockedPaths {
@@ -241,8 +298,9 @@ func (sm *StagingStateManager) waitForLockedDescendants(root string) {
 			}
 		}
 		if blocker == "" {
-			return
+			return wait
 		}
+		wait.record(blocker)
 		if sm.pathConds[blocker] == nil {
 			sm.pathConds[blocker] = sync.NewCond(&sm.mu)
 		}
@@ -541,12 +599,14 @@ func (sm *StagingStateManager) Rename(oldPath, newPath string) (bool, error) {
 func (sm *StagingStateManager) RenameDir(oldPath, newPath string) (bool, error) {
 	oldPath = cleanPath(oldPath)
 	newPath = cleanPath(newPath)
+	waitStart := time.Now()
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	// Stop new work from entering either tree while in-flight work drains.
-	sm.waitForSubtreeUnlocked(oldPath)
-	sm.waitForSubtreeUnlocked(newPath)
+	var wait lockWait
+	wait.add(sm.waitForSubtreeUnlocked(oldPath))
+	wait.add(sm.waitForSubtreeUnlocked(newPath))
 	sm.lockedSubtrees[oldPath] = true
 	sm.lockedSubtrees[newPath] = true
 	defer func() {
@@ -559,8 +619,9 @@ func (sm *StagingStateManager) RenameDir(oldPath, newPath string) (bool, error) 
 			sm.pathConds[newPath].Broadcast()
 		}
 	}()
-	sm.waitForLockedDescendants(oldPath)
-	sm.waitForLockedDescendants(newPath)
+	wait.add(sm.waitForLockedDescendants(oldPath))
+	wait.add(sm.waitForLockedDescendants(newPath))
+	sm.logLockWait(ActionRenameDir, oldPath, waitStart, wait)
 
 	meta, exists := sm.metadata[oldPath]
 	now := time.Now()
@@ -687,13 +748,15 @@ func (sm *StagingStateManager) Mkdir(path string) error {
 // sync can process only the operations required to make the collection empty.
 func (sm *StagingStateManager) Rmdir(path string, recurse bool, force bool) (bool, error) {
 	path = cleanPath(path)
+	waitStart := time.Now()
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	// Block new work anywhere below path before waiting for handlers that are
 	// already running. Non-recursive RMDIR also needs this barrier because rm -rf
 	// reaches FUSE as individual unlinks followed by an ordinary rmdir syscall.
-	sm.waitForSubtreeUnlocked(path)
+	var wait lockWait
+	wait.add(sm.waitForSubtreeUnlocked(path))
 	sm.lockedSubtrees[path] = true
 	defer func() {
 		delete(sm.lockedSubtrees, path)
@@ -701,7 +764,8 @@ func (sm *StagingStateManager) Rmdir(path string, recurse bool, force bool) (boo
 			sm.pathConds[path].Broadcast()
 		}
 	}()
-	sm.waitForLockedDescendants(path)
+	wait.add(sm.waitForLockedDescendants(path))
+	sm.logLockWait(ActionRmdir, path, waitStart, wait)
 
 	meta, exists := sm.metadata[path]
 	pendingRenameID := ""
@@ -971,10 +1035,25 @@ func (sm *StagingStateManager) syncCandidate(meta *StagingMetadata, gracePeriod 
 	// Read the handler while the lock is held: a concurrent
 	// RegisterActionHandler writes it under the same lock.
 	handler := sm.ActionHandler
+	pendingOperations := len(sm.dag.nodes)
+	urgent := op.Urgent
 	sm.mu.Unlock()
 
 	if handler != nil {
-		if err := handler(meta); err != nil {
+		syncLogger := sm.logger.WithFields(log.Fields{
+			"action":            meta.Action.String(),
+			"path":              meta.Path,
+			"oldPath":           meta.OldPath,
+			"operationID":       meta.OperationID,
+			"urgent":            urgent,
+			"pendingOperations": pendingOperations,
+		})
+		syncLogger.Debug("staging sync started")
+		syncStart := time.Now()
+		err := handler(meta)
+		syncLogger = syncLogger.WithField("elapsed", time.Since(syncStart).String())
+		if err != nil {
+			syncLogger.WithError(err).Debug("staging sync failed")
 			sm.mu.Lock()
 			if live := sm.dag.get(meta.OperationID); live != nil {
 				live.State = OperationFailed
@@ -989,6 +1068,7 @@ func (sm *StagingStateManager) syncCandidate(meta *StagingMetadata, gracePeriod 
 			sm.mu.Unlock()
 			return true, false, errors.Wrapf(err, "handler failed for %q action on %q", meta.Action, meta.Path)
 		}
+		syncLogger.Debug("staging sync finished")
 	}
 
 	sm.mu.Lock()
@@ -1554,7 +1634,7 @@ func (sm *StagingStateManager) persistOperationStateUnlocked(operationID string)
 	if err := sm.db.Update(func(txn *badger.Txn) error {
 		return sm.persistOperationTxn(txn, operationID)
 	}); err != nil {
-		log.WithError(err).Warnf("failed to persist staging operation %s", operationID)
+		sm.logger.WithError(err).Warnf("failed to persist staging operation %s", operationID)
 	}
 }
 
