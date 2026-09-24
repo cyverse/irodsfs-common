@@ -111,6 +111,7 @@ type StagingStateManager struct {
 	lockedSubtrees map[string]bool       // Directory trees locked during recursive operations
 	writeLeases    map[string]int        // Paths reserved by a local writer; sync defers while held
 	leasedRoots    map[string]int        // Subtrees reserved by a local recursive operation
+	pendingRoots   map[string]int        // Subtrees a local directory operation is waiting to lock; overlapping syncs wait
 	pathConds      map[string]*sync.Cond // Per-path condition variables
 	progressCond   *sync.Cond            // Signals that pending operations may have become runnable
 	db             *badger.DB
@@ -140,6 +141,7 @@ func newStagingStateManager(db *badger.DB) *StagingStateManager {
 		lockedSubtrees: make(map[string]bool),
 		writeLeases:    make(map[string]int),
 		leasedRoots:    make(map[string]int),
+		pendingRoots:   make(map[string]int),
 		pathConds:      make(map[string]*sync.Cond),
 		db:             db,
 		logger:         log.NewEntry(log.StandardLogger()),
@@ -258,6 +260,50 @@ func (sm *StagingStateManager) logLockWait(action ActionType, path string, start
 	entry.Debug("staging operation waited for running syncs")
 }
 
+// reserveSubtreeUnlocked keeps syncs overlapping root from starting while the
+// caller waits for the ones already running. Without it the background worker
+// retakes sm.mu and starts the next overlapping sync before the woken caller
+// runs, so the caller waits for the whole backlog below root instead of the
+// syncs that were running when it arrived. Release the reservation with
+// releaseSubtreeReservationUnlocked once root is locked. The caller must hold
+// sm.mu.
+func (sm *StagingStateManager) reserveSubtreeUnlocked(root string) {
+	sm.pendingRoots[root]++
+}
+
+// releaseSubtreeReservationUnlocked drops a reservation taken by
+// reserveSubtreeUnlocked and wakes the syncs it held back. The caller must hold
+// sm.mu.
+func (sm *StagingStateManager) releaseSubtreeReservationUnlocked(root string) {
+	sm.pendingRoots[root]--
+	if sm.pendingRoots[root] <= 0 {
+		delete(sm.pendingRoots, root)
+	}
+	if cond := sm.pathConds[root]; cond != nil {
+		cond.Broadcast()
+	}
+	sm.notifyProgressUnlocked()
+}
+
+// reservedRootUnlocked returns a reserved subtree that must keep the operation
+// described by meta from starting, or "" when none does. Directory operations
+// overlap a reservation in either direction, other operations only when they
+// fall inside it. The caller must hold sm.mu.
+func (sm *StagingStateManager) reservedRootUnlocked(meta *StagingMetadata) string {
+	directoryOperation := meta.Action == ActionRmdir || meta.Action == ActionRenameDir
+	for root := range sm.pendingRoots {
+		for _, path := range []string{meta.Path, meta.OldPath} {
+			if path == "" {
+				continue
+			}
+			if pathInSubtree(path, root) || (directoryOperation && pathInSubtree(root, path)) {
+				return root
+			}
+		}
+	}
+	return ""
+}
+
 // waitForSubtreeUnlocked waits until root does not overlap another recursive
 // operation and its exact path is not syncing. The caller must hold sm.mu.
 func (sm *StagingStateManager) waitForSubtreeUnlocked(root string) lockWait {
@@ -351,10 +397,12 @@ func (sm *StagingStateManager) AcquireWriteLeaseSubtree(root string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	sm.reserveSubtreeUnlocked(root)
 	sm.waitForSubtreeUnlocked(root)
 	// Registering the lease first stops any new descendant sync, so the drain
 	// below cannot be outrun by a sync that starts while it waits.
 	sm.leasedRoots[root]++
+	sm.releaseSubtreeReservationUnlocked(root)
 	sm.waitForLockedDescendants(root)
 }
 
@@ -604,11 +652,15 @@ func (sm *StagingStateManager) RenameDir(oldPath, newPath string) (bool, error) 
 	defer sm.mu.Unlock()
 
 	// Stop new work from entering either tree while in-flight work drains.
+	sm.reserveSubtreeUnlocked(oldPath)
+	sm.reserveSubtreeUnlocked(newPath)
 	var wait lockWait
 	wait.add(sm.waitForSubtreeUnlocked(oldPath))
 	wait.add(sm.waitForSubtreeUnlocked(newPath))
 	sm.lockedSubtrees[oldPath] = true
 	sm.lockedSubtrees[newPath] = true
+	sm.releaseSubtreeReservationUnlocked(oldPath)
+	sm.releaseSubtreeReservationUnlocked(newPath)
 	defer func() {
 		delete(sm.lockedSubtrees, oldPath)
 		delete(sm.lockedSubtrees, newPath)
@@ -755,9 +807,11 @@ func (sm *StagingStateManager) Rmdir(path string, recurse bool, force bool) (boo
 	// Block new work anywhere below path before waiting for handlers that are
 	// already running. Non-recursive RMDIR also needs this barrier because rm -rf
 	// reaches FUSE as individual unlinks followed by an ordinary rmdir syscall.
+	sm.reserveSubtreeUnlocked(path)
 	var wait lockWait
 	wait.add(sm.waitForSubtreeUnlocked(path))
 	sm.lockedSubtrees[path] = true
+	sm.releaseSubtreeReservationUnlocked(path)
 	defer func() {
 		delete(sm.lockedSubtrees, path)
 		if sm.pathConds[path] != nil {
@@ -981,13 +1035,26 @@ func (sm *StagingStateManager) syncOne(meta *StagingMetadata) error {
 func (sm *StagingStateManager) syncCandidate(meta *StagingMetadata, gracePeriod time.Duration, includeAll bool) (executed bool, stale bool, err error) {
 	sm.mu.Lock()
 	directoryOperation := meta.Action == ActionRmdir || meta.Action == ActionRenameDir
-	if directoryOperation {
-		sm.waitForSubtreeUnlocked(meta.Path)
-		if meta.OldPath != "" {
-			sm.waitForSubtreeUnlocked(meta.OldPath)
+	for {
+		if directoryOperation {
+			sm.waitForSubtreeUnlocked(meta.Path)
+			if meta.OldPath != "" {
+				sm.waitForSubtreeUnlocked(meta.OldPath)
+			}
+		} else {
+			sm.waitForPathsUnlocked(meta.Path, meta.OldPath)
 		}
-	} else {
-		sm.waitForPathsUnlocked(meta.Path, meta.OldPath)
+		// A reservation is held only while its owner waits for syncs that are
+		// already running, so waiting here is brief and cannot deadlock: this
+		// sync holds no path lock yet.
+		reserved := sm.reservedRootUnlocked(meta)
+		if reserved == "" {
+			break
+		}
+		if sm.pathConds[reserved] == nil {
+			sm.pathConds[reserved] = sync.NewCond(&sm.mu)
+		}
+		sm.pathConds[reserved].Wait()
 	}
 	op := sm.dag.get(meta.OperationID)
 	if op == nil || len(op.Dependencies) != 0 || op.State == OperationRunning {
