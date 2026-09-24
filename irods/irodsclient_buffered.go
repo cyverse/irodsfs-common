@@ -45,6 +45,10 @@ type IRODSFSClientBufferedConfig struct {
 	// archive data object rather than as a collection of many small files. Nil
 	// or disabled leaves every directory handled normally.
 	PackedDirectories *packedfs.Config
+
+	// Logger receives the buffered client's, staging's, and packed directories'
+	// logs. Nil uses the iRODS filesystem's logger.
+	Logger *log.Entry
 }
 
 // IRODSFSClientBuffered wraps IRODSFSClient with block-level read-through caching
@@ -95,7 +99,11 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 	directClient := client.(*IRODSFSClientDirect)
 
 	clientID := xid.New().String()
-	logger := fs.GetLogger().WithFields(log.Fields{
+	baseLogger := fs.GetLogger()
+	if config.Logger != nil {
+		baseLogger = config.Logger
+	}
+	logger := baseLogger.WithFields(log.Fields{
 		"fsclient_buffered_id": clientID,
 	})
 
