@@ -237,6 +237,34 @@ func TestBufferedClientPendingRenameEntrySurvivesImmediateOverwrite(t *testing.T
 	require.Positive(t, entry.ID)
 }
 
+func TestBufferedClientStatSeesReusedRenameDestination(t *testing.T) {
+	staging, err := stagingfs.NewStagingFS(&stagingfs.StagingFSConfig{
+		LocalRootPath: t.TempDir(),
+		Client:        &releaseErrorStagingClient{},
+		SyncInterval:  time.Hour,
+		GracePeriod:   time.Hour,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = staging.Close() })
+
+	require.NoError(t, staging.RenameDir("/test/14", "/test/13"))
+	require.NoError(t, staging.RenameDir("/test/15", "/test/14"))
+	require.True(t, staging.IsRenamedFrom("/test/14"))
+
+	client := &IRODSFSClientBuffered{
+		staging:      staging,
+		inodeManager: inode.NewInodeManager(),
+	}
+	entry, err := client.Stat("/test/14")
+	require.NoError(t, err)
+	require.Equal(t, irodsclient_fs.DirectoryEntry, entry.Type)
+	require.Equal(t, "/test/14", entry.Path)
+
+	_, err = client.Stat("/test/15")
+	require.Error(t, err)
+	require.True(t, irodsclient_types.IsFileNotFoundError(err))
+}
+
 func TestBufferedClientExistsUsesPendingStagingNamespace(t *testing.T) {
 	staging, err := stagingfs.NewStagingFS(&stagingfs.StagingFSConfig{
 		LocalRootPath: t.TempDir(),

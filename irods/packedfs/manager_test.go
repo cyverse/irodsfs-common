@@ -91,7 +91,7 @@ func TestMountFreshDirectoryCreatesArchiveOnUnmount(t *testing.T) {
 
 	require.NoError(t, h.manager.Unmount(mount))
 
-	assert.True(t, h.backend.exists(testRoot+".mount.tar"), "the archive is in place")
+	assert.True(t, h.backend.exists(testRoot+".packedfs.tar"), "the archive is in place")
 	assert.False(t, h.backend.exists(testRoot), "no collection is created for a packed directory")
 
 	// The local tree and its quota charge are gone.
@@ -154,7 +154,7 @@ func TestMountMigratesLegacyCollection(t *testing.T) {
 
 	require.NoError(t, h.manager.Unmount(mount))
 
-	assert.True(t, h.backend.exists(testRoot+".mount.tar"), "the archive replaces the collection")
+	assert.True(t, h.backend.exists(testRoot+".packedfs.tar"), "the archive replaces the collection")
 	assert.False(t, h.backend.exists(testRoot), "the migrated collection is removed")
 }
 
@@ -166,7 +166,7 @@ func TestArchiveTakesPrecedenceOverStaleCollection(t *testing.T) {
 	// deferred per-file uploads, recreating the directory as a collection.
 	source := t.TempDir()
 	writeFile(t, filepath.Join(source, "from_archive.txt"), "authoritative\n", 0644)
-	h.backend.seedArchive(t, testRoot+".mount.tar", source, CompressionNone)
+	h.backend.seedArchive(t, testRoot+".packedfs.tar", source, CompressionNone)
 
 	h.backend.seedDir(t, testRoot)
 	h.backend.seedFile(t, testRoot+"/from_collection.txt", "stale\n")
@@ -209,7 +209,7 @@ func TestSnapshotUploadsWithoutUnmounting(t *testing.T) {
 
 	require.NoError(t, h.manager.Pack(mount))
 
-	assert.True(t, h.backend.exists(testRoot+".mount.tar"))
+	assert.True(t, h.backend.exists(testRoot+".packedfs.tar"))
 	assert.Equal(t, MountStateMounted, mount.State(), "the tree stays mounted after a snapshot")
 	assert.False(t, mount.IsDirty())
 
@@ -223,7 +223,7 @@ func TestSnapshotUploadsWithoutUnmounting(t *testing.T) {
 
 	// The second snapshot replaced the first archive rather than accumulating.
 	names := h.backend.names(t, "/z/home/u/proj")
-	assert.Equal(t, []string{".venv.mount.tar"}, names, "no temporary objects are left behind")
+	assert.Equal(t, []string{".venv.packedfs.tar"}, names, "no temporary objects are left behind")
 }
 
 func TestPackKeepsTreeDirtyWhenAWriteRacesIt(t *testing.T) {
@@ -261,7 +261,7 @@ func TestUnmountRefusesToLoseDataWhenUploadFails(t *testing.T) {
 	// The tree must survive a failed upload, otherwise the data is gone.
 	assert.True(t, h.manager.ExistsFile(mount, testRoot+"/important.txt"))
 	assert.Equal(t, MountStateMounted, mount.State())
-	assert.False(t, h.backend.exists(testRoot+".mount.tar"))
+	assert.False(t, h.backend.exists(testRoot+".packedfs.tar"))
 
 	// No half-uploaded object is left in the collection.
 	for _, name := range h.backend.names(t, "/z/home/u/proj") {
@@ -270,7 +270,7 @@ func TestUnmountRefusesToLoseDataWhenUploadFails(t *testing.T) {
 
 	// A retry succeeds and the data reaches iRODS.
 	require.NoError(t, h.manager.Unmount(mount))
-	assert.True(t, h.backend.exists(testRoot+".mount.tar"))
+	assert.True(t, h.backend.exists(testRoot+".packedfs.tar"))
 }
 
 func TestPreviousArchiveSurvivesAFailedUpload(t *testing.T) {
@@ -289,7 +289,7 @@ func TestPreviousArchiveSurvivesAFailedUpload(t *testing.T) {
 	require.Error(t, h.manager.Pack(mount))
 
 	// Uploading under a temporary name is what keeps the good archive intact.
-	require.True(t, h.backend.exists(testRoot+".mount.tar"))
+	require.True(t, h.backend.exists(testRoot+".packedfs.tar"))
 
 	next, err := NewManager(&ManagerConfig{
 		Config:        h.config,
@@ -311,7 +311,7 @@ func TestMountRefusedWhenStagingQuotaIsFull(t *testing.T) {
 		quota.max = 64
 	})
 
-	h.backend.seedFile(t, testRoot+".mount.tar", string(make([]byte, 4096)))
+	h.backend.seedFile(t, testRoot+".packedfs.tar", string(make([]byte, 4096)))
 
 	_, err := h.manager.EnsureMounted(testRoot, true)
 	require.Error(t, err)
@@ -326,7 +326,7 @@ func TestMountRefusedWhenArchiveExceedsSizeLimit(t *testing.T) {
 		config.MaxPackedDirSize = 1024
 	})
 
-	h.backend.seedFile(t, testRoot+".mount.tar", string(make([]byte, 4096)))
+	h.backend.seedFile(t, testRoot+".packedfs.tar", string(make([]byte, 4096)))
 
 	_, err := h.manager.EnsureMounted(testRoot, true)
 	require.Error(t, err)
@@ -382,7 +382,7 @@ func TestConcurrentFirstAccessMountsOnce(t *testing.T) {
 
 	source := t.TempDir()
 	writeFile(t, filepath.Join(source, "pyvenv.cfg"), "home = /usr/bin\n", 0644)
-	h.backend.seedArchive(t, testRoot+".mount.tar", source, CompressionNone)
+	h.backend.seedArchive(t, testRoot+".packedfs.tar", source, CompressionNone)
 
 	const callers = 8
 	mounts := make(chan *Mount, callers)
@@ -486,8 +486,8 @@ func TestCloseFlushesEveryMount(t *testing.T) {
 
 	require.NoError(t, h.manager.Close())
 
-	assert.True(t, h.backend.exists(testRoot+".mount.tar"))
-	assert.True(t, h.backend.exists(gitRoot+".mount.tar"))
+	assert.True(t, h.backend.exists(testRoot+".packedfs.tar"))
+	assert.True(t, h.backend.exists(gitRoot+".packedfs.tar"))
 	assert.Zero(t, h.quota.current())
 	assert.Empty(t, h.manager.Statuses())
 }
@@ -506,7 +506,7 @@ func TestLookupOfMissingDirectoryDoesNotCreateIt(t *testing.T) {
 
 	// Nothing was written to iRODS either.
 	assert.False(t, h.backend.exists(testRoot))
-	assert.False(t, h.backend.exists(testRoot+".mount.tar"))
+	assert.False(t, h.backend.exists(testRoot+".packedfs.tar"))
 
 	// The same path with create intent does bring it into existence.
 	mount, err := h.manager.EnsureMounted(testRoot, true)
@@ -520,7 +520,7 @@ func TestRemoveDeletesBothRepresentations(t *testing.T) {
 	// A crash can leave an archive and a recovered collection side by side.
 	source := t.TempDir()
 	writeFile(t, filepath.Join(source, "lib.py"), "content\n", 0644)
-	h.backend.seedArchive(t, testRoot+".mount.tar", source, CompressionNone)
+	h.backend.seedArchive(t, testRoot+".packedfs.tar", source, CompressionNone)
 	h.backend.seedDir(t, testRoot)
 	h.backend.seedFile(t, testRoot+"/leftover.py", "recovered\n")
 
@@ -529,7 +529,7 @@ func TestRemoveDeletesBothRepresentations(t *testing.T) {
 
 	require.NoError(t, h.manager.Remove(mount))
 
-	assert.False(t, h.backend.exists(testRoot+".mount.tar"), "the archive is gone")
+	assert.False(t, h.backend.exists(testRoot+".packedfs.tar"), "the archive is gone")
 	assert.False(t, h.backend.exists(testRoot), "the stale collection is gone too")
 	assert.Zero(t, h.quota.current())
 	assert.Empty(t, h.manager.Statuses())
@@ -573,8 +573,8 @@ func TestRenameRootMovesTheArchive(t *testing.T) {
 
 	require.NoError(t, h.manager.RenameRoot(mount, destRoot))
 
-	assert.False(t, h.backend.exists(testRoot+".mount.tar"))
-	assert.True(t, h.backend.exists(destRoot+".mount.tar"))
+	assert.False(t, h.backend.exists(testRoot+".packedfs.tar"))
+	assert.True(t, h.backend.exists(destRoot+".packedfs.tar"))
 	assert.Zero(t, h.quota.current())
 
 	// The content follows the rename.
@@ -629,7 +629,7 @@ func TestManagerWorksWithoutQuotaAccounting(t *testing.T) {
 	manager.ReleaseGrowth(mount, 4096)
 
 	require.NoError(t, manager.Unmount(mount))
-	assert.True(t, backend.exists(testRoot+".mount.tar"))
+	assert.True(t, backend.exists(testRoot+".packedfs.tar"))
 }
 
 // git appends to its reflogs, so it opens .git/logs/HEAD with O_APPEND and then
@@ -886,7 +886,7 @@ func TestFirstUploadSucceedsWhenDeletingAMissingArchiveErrors(t *testing.T) {
 
 	require.NoError(t, h.manager.Unmount(mount), "the first upload must not depend on a previous archive")
 
-	assert.True(t, h.backend.exists(testRoot+".mount.tar"))
+	assert.True(t, h.backend.exists(testRoot+".packedfs.tar"))
 
 	// No temporary object was abandoned along the way.
 	for _, name := range h.backend.names(t, "/z/home/u/proj") {
@@ -929,7 +929,7 @@ func TestUnmountDoesNotRepackAnUnchangedTree(t *testing.T) {
 
 	assert.Equal(t, uploadsAfterFlush, uploadsAfterUnmount,
 		"a tree unchanged since its last pack is not uploaded again")
-	assert.True(t, h.backend.exists(testRoot+".mount.tar"))
+	assert.True(t, h.backend.exists(testRoot+".packedfs.tar"))
 	assert.Empty(t, h.manager.Statuses(), "the mount is still released")
 }
 
@@ -959,7 +959,7 @@ func TestUnmountDoesNotUploadAReadOnlyTree(t *testing.T) {
 
 	source := t.TempDir()
 	writeFile(t, filepath.Join(source, "pyvenv.cfg"), "home = /usr/bin\n", 0644)
-	h.backend.seedArchive(t, testRoot+".mount.tar", source, CompressionNone)
+	h.backend.seedArchive(t, testRoot+".packedfs.tar", source, CompressionNone)
 
 	mount, err := h.manager.EnsureMounted(testRoot, false)
 	require.NoError(t, err)
@@ -980,7 +980,7 @@ func TestUnmountDoesNotUploadAReadOnlyTree(t *testing.T) {
 	h.backend.mu.Unlock()
 
 	assert.Equal(t, uploadsBefore, uploadsAfter, "an untouched tree is not re-uploaded on release")
-	assert.True(t, h.backend.exists(testRoot+".mount.tar"), "its archive is left in place")
+	assert.True(t, h.backend.exists(testRoot+".packedfs.tar"), "its archive is left in place")
 }
 
 // A tree whose archive failed to upload is the only copy of that data. Close
@@ -1014,7 +1014,7 @@ func TestCloseClearsTheRootWhenEverythingReachedIRODS(t *testing.T) {
 
 	require.NoError(t, h.manager.Close())
 
-	assert.True(t, h.backend.exists(testRoot+".mount.tar"))
+	assert.True(t, h.backend.exists(testRoot+".packedfs.tar"))
 	_, statErr := os.Stat(h.manager.localRootPath)
 	assert.True(t, os.IsNotExist(statErr), "nothing is left behind once every archive is uploaded")
 	_ = mount
@@ -1140,7 +1140,7 @@ func TestUnmountKeepsATreeThatChangedWhileItWasPacked(t *testing.T) {
 	// A retry with nothing further arriving completes normally.
 	h.backend.beforeUpload = nil
 	require.NoError(t, h.manager.Unmount(mount))
-	assert.True(t, h.backend.exists(testRoot+".mount.tar"))
+	assert.True(t, h.backend.exists(testRoot+".packedfs.tar"))
 	_, statErr := os.Stat(mount.LocalPath)
 	assert.True(t, os.IsNotExist(statErr))
 }

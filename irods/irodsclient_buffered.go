@@ -45,6 +45,10 @@ type IRODSFSClientBufferedConfig struct {
 	// archive data object rather than as a collection of many small files. Nil
 	// or disabled leaves every directory handled normally.
 	PackedDirectories *packedfs.Config
+
+	// Logger receives the buffered client's, staging's, and packed directories'
+	// logs. Nil uses the iRODS filesystem's logger.
+	Logger *log.Entry
 }
 
 // IRODSFSClientBuffered wraps IRODSFSClient with block-level read-through caching
@@ -94,6 +98,15 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 	}
 	directClient := client.(*IRODSFSClientDirect)
 
+	clientID := xid.New().String()
+	baseLogger := fs.GetLogger()
+	if config.Logger != nil {
+		baseLogger = config.Logger
+	}
+	logger := baseLogger.WithFields(log.Fields{
+		"fsclient_buffered_id": clientID,
+	})
+
 	// Create staging filesystem (optional)
 	var staging *stagingfs.StagingFS
 	if config.StagingRootPath != "" {
@@ -105,6 +118,7 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 			SyncInterval:     config.SyncInterval,
 			GracePeriod:      config.GracePeriod,
 			OnSyncError:      config.OnSyncError,
+			Logger:           logger,
 		}
 
 		if config.UsePersistence {
@@ -133,11 +147,6 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 			inodeManager = inode.NewInodeManager()
 		}
 	}
-
-	clientID := xid.New().String()
-	logger := fs.GetLogger().WithFields(log.Fields{
-		"fsclient_buffered_id": clientID,
-	})
 
 	// Packed directories live on the same staging disk and share its quota, so
 	// they need a staging root just as staged writes do. Their trees sit beside
@@ -339,7 +348,7 @@ func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, e
 			return nil, err
 		}
 		// An archive data object stands in for the directory it holds, so the
-		// caller sees ".venv" rather than ".venv.mount.tar".
+		// caller sees ".venv" rather than ".venv.packedfs.tar".
 		return c.packedRewriteListing(dirPath, entries), nil
 	}
 
@@ -668,8 +677,14 @@ func (c *IRODSFSClientBuffered) Stat(filePath string) (*irodsclient_fs.Entry, er
 			}
 		}
 
-		// Check if this path was renamed away
+		// A later rename may reuse a path that an earlier pending rename
+		// moved away (for example 14 -> 13, then 15 -> 14).
 		if c.staging.IsRenamedFrom(filePath) {
+			if stagedEntry, found, stagedErr := c.getPendingRenameEntry(filePath); stagedErr != nil {
+				return nil, stagedErr
+			} else if found {
+				return stagedEntry, nil
+			}
 			return nil, irodsclient_types.NewFileNotFoundError(filePath)
 		}
 	}

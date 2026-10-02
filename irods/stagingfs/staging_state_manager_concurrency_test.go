@@ -634,3 +634,124 @@ func TestSyncDoesNotRaceWithHandlerRegistration(t *testing.T) {
 		t.Fatalf("backend handler calls = %d, want %d", got, count)
 	}
 }
+
+// startRenameDirBacklog queues count independent directory renames below /t and
+// syncs them one after another the way the background worker does. Each rename
+// reports its old path on started and then blocks until release yields or is
+// closed.
+func startRenameDirBacklog(t *testing.T, sm *StagingStateManager, count int) (started chan string, release chan struct{}, workerDone chan error) {
+	t.Helper()
+	metas := make([]StagingMetadata, 0, count)
+	for i := 0; i < count; i++ {
+		newPath := fmt.Sprintf("/t/b%d", i)
+		if _, err := sm.RenameDir(fmt.Sprintf("/t/a%d", i), newPath); err != nil {
+			t.Fatalf("Failed to queue directory rename: %v", err)
+		}
+		metas = append(metas, *sm.Get(newPath))
+	}
+
+	started = make(chan string, count+4)
+	release = make(chan struct{})
+	sm.RegisterActionHandler(func(meta *StagingMetadata) error {
+		started <- meta.OldPath
+		<-release
+		return nil
+	})
+
+	workerDone = make(chan error, 1)
+	go func() {
+		for i := range metas {
+			if err := sm.syncOne(&metas[i]); err != nil {
+				workerDone <- err
+				return
+			}
+		}
+		workerDone <- nil
+	}()
+
+	select {
+	case path := <-started:
+		if path != "/t/a0" {
+			t.Fatalf("Expected the first rename to start first, got %s", path)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("First directory rename did not start")
+	}
+	return started, release, workerDone
+}
+
+func TestRmdirWaitsOnlyForRunningSyncsNotBacklog(t *testing.T) {
+	sm := NewStagingStateManager()
+	started, release, workerDone := startRenameDirBacklog(t, sm, 3)
+
+	rmdirDone := make(chan error, 1)
+	go func() {
+		_, err := sm.Rmdir("/t", false, false)
+		rmdirDone <- err
+	}()
+	select {
+	case err := <-rmdirDone:
+		t.Fatalf("Rmdir returned while a descendant rename was running: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	release <- struct{}{}
+	select {
+	case err := <-rmdirDone:
+		if err != nil {
+			t.Fatalf("Rmdir failed: %v", err)
+		}
+	case path := <-started:
+		t.Fatalf("Rename of %s started before the waiting Rmdir returned", path)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Rmdir did not return after the running rename completed")
+	}
+
+	close(release)
+	if err := <-workerDone; err != nil {
+		t.Fatalf("Backlog sync failed: %v", err)
+	}
+	if err := sm.SyncAll(); err != nil {
+		t.Fatalf("Failed to sync queued RMDIR: %v", err)
+	}
+	if len(sm.dag.nodes) != 0 || len(sm.pendingRoots) != 0 {
+		t.Fatalf("Expected no pending work, got %d operations and reservations %v", len(sm.dag.nodes), sm.pendingRoots)
+	}
+}
+
+func TestSubtreeWriteLeaseWaitsOnlyForRunningSyncsNotBacklog(t *testing.T) {
+	sm := NewStagingStateManager()
+	started, release, workerDone := startRenameDirBacklog(t, sm, 3)
+
+	leaseAcquired := make(chan struct{})
+	go func() {
+		sm.AcquireWriteLeaseSubtree("/t")
+		close(leaseAcquired)
+	}()
+	select {
+	case <-leaseAcquired:
+		t.Fatal("Subtree lease was granted while a descendant rename was running")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	release <- struct{}{}
+	select {
+	case <-leaseAcquired:
+	case path := <-started:
+		t.Fatalf("Rename of %s started before the waiting subtree lease was granted", path)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Subtree lease was not granted after the running rename completed")
+	}
+
+	close(release)
+	if err := <-workerDone; err != nil {
+		t.Fatalf("Backlog sync failed: %v", err)
+	}
+	sm.ReleaseWriteLeaseSubtree("/t")
+	if err := sm.SyncAll(); err != nil {
+		t.Fatalf("Failed to sync renames deferred by the lease: %v", err)
+	}
+	if len(sm.dag.nodes) != 0 || len(sm.pendingRoots) != 0 {
+		t.Fatalf("Expected no pending work, got %d operations and reservations %v", len(sm.dag.nodes), sm.pendingRoots)
+	}
+}

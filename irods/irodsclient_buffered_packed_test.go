@@ -92,7 +92,7 @@ func TestPackedDispatchIsInertWhenDisabled(t *testing.T) {
 	assert.False(t, handled)
 
 	// The listing passes through untouched, archive names and all.
-	entries := []*irodsclient_fs.Entry{{Name: ".venv.mount.tar", Path: "/z/home/u/proj/.venv.mount.tar"}}
+	entries := []*irodsclient_fs.Entry{{Name: ".venv.packedfs.tar", Path: "/z/home/u/proj/.venv.packedfs.tar"}}
 	assert.Equal(t, entries, client.packedRewriteListing("/z/home/u/proj", entries))
 }
 
@@ -113,11 +113,11 @@ func TestPackedRewriteListingShowsDirectoriesNotArchives(t *testing.T) {
 
 	entries := []*irodsclient_fs.Entry{
 		{Name: "main.go", Path: "/z/home/u/proj/main.go", Type: irodsclient_fs.FileEntry, Size: 120},
-		{Name: ".venv.mount.tar", Path: "/z/home/u/proj/.venv.mount.tar", Type: irodsclient_fs.FileEntry, Size: 900000},
+		{Name: ".venv.packedfs.tar", Path: "/z/home/u/proj/.venv.packedfs.tar", Type: irodsclient_fs.FileEntry, Size: 900000},
 		// Another archive-looking name that is not a configured directory.
-		{Name: ".cargo.mount.tar", Path: "/z/home/u/proj/.cargo.mount.tar", Type: irodsclient_fs.FileEntry, Size: 42},
+		{Name: ".cargo.packedfs.tar", Path: "/z/home/u/proj/.cargo.packedfs.tar", Type: irodsclient_fs.FileEntry, Size: 42},
 		// A half-uploaded archive must never be visible.
-		{Name: ".git.mount.tar.uploading.abc123", Path: "/z/home/u/proj/.git.mount.tar.uploading.abc123", Type: irodsclient_fs.FileEntry},
+		{Name: ".git.packedfs.tar.uploading.abc123", Path: "/z/home/u/proj/.git.packedfs.tar.uploading.abc123", Type: irodsclient_fs.FileEntry},
 	}
 
 	rewritten := client.packedRewriteListing("/z/home/u/proj", entries)
@@ -132,8 +132,8 @@ func TestPackedRewriteListingShowsDirectoriesNotArchives(t *testing.T) {
 	assert.Equal(t, "/z/home/u/proj/.venv", byName[".venv"].Path)
 	assert.Zero(t, byName[".venv"].Size, "a directory reports no size of its own")
 
-	assert.NotContains(t, byName, ".venv.mount.tar", "the archive itself is hidden")
-	assert.Contains(t, byName, ".cargo.mount.tar", "an archive of an unconfigured name stays an ordinary file")
+	assert.NotContains(t, byName, ".venv.packedfs.tar", "the archive itself is hidden")
+	assert.Contains(t, byName, ".cargo.packedfs.tar", "an archive of an unconfigured name stays an ordinary file")
 	assert.Contains(t, byName, "main.go")
 
 	for name := range byName {
