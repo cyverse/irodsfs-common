@@ -41,6 +41,11 @@ type IRODSFSClientBufferedConfig struct {
 	UsePersistence     bool                       // Use BadgerDB for crash recovery
 	OnSyncError        stagingfs.SyncErrorHandler // Optional error callback
 
+	// GlobalQuota enforces a shared staging disk limit across all buffered
+	// clients. When set, every StagingFS instance checks this quota in addition
+	// to its own per-session limit. Nil disables the cross-session check.
+	GlobalQuota stagingfs.GlobalQuota
+
 	// PackedDirectories configures directories that are stored in iRODS as one
 	// archive data object rather than as a collection of many small files. Nil
 	// or disabled leaves every directory handled normally.
@@ -119,6 +124,7 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 			GracePeriod:      config.GracePeriod,
 			OnSyncError:      config.OnSyncError,
 			Logger:           logger,
+			GlobalQuota:      config.GlobalQuota,
 		}
 
 		if config.UsePersistence {

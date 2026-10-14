@@ -21,6 +21,15 @@ import (
 // Callers may use errors.Is to detect this and fall back to a non-staging path.
 var ErrQuotaExceeded = errors.New("staging quota exceeded")
 
+// GlobalQuota enforces a shared staging disk limit across multiple StagingFS
+// instances. StagingFS calls ReserveSpace after its local quota passes and
+// ReleaseSpace when bytes leave the local staging area. A nil GlobalQuota
+// disables the cross-instance check.
+type GlobalQuota interface {
+	ReserveSpace(size int64) error
+	ReleaseSpace(size int64)
+}
+
 // ErrOpenWriteHandles is returned by SyncAll when staged files are still open
 // for writing. Syncing those files could upload a partial snapshot and the
 // subsequent cleanup would unlink data that is still being written.
@@ -81,6 +90,7 @@ type StagingFSConfig struct {
 	MaxCacheFileSize int64            // Files larger than this are not kept as read cache after sync (default: 1GB, 0 = cache all)
 	OnSyncError      SyncErrorHandler // Called when background sync fails for an item (optional)
 	Logger           *log.Entry       // Logger for staging and sync activity (default: the standard logger)
+	GlobalQuota      GlobalQuota      // Shared quota across all StagingFS instances (optional, nil = no global limit)
 }
 
 const DefaultMaxDataSize = 10 * 1024 * 1024 * 1024     // 10GB
@@ -103,6 +113,7 @@ type StagingFS struct {
 	reservedSize     int64 // space promised to in-flight requests but not yet counted in currentSize
 	maxSize          int64 // max allowed data size
 	maxCacheFileSize int64 // files larger than this skip the read cache after sync
+	globalQuota      GlobalQuota
 	failedMutex      sync.Mutex
 	failedItems      map[string]*StagingMetadata // items that exceeded max retry count
 	cacheMutex       sync.Mutex
@@ -170,6 +181,7 @@ func NewStagingFS(config *StagingFSConfig) (*StagingFS, error) {
 		stopCh:           make(chan struct{}),
 		maxSize:          maxSize,
 		maxCacheFileSize: maxCacheFileSize,
+		globalQuota:      config.GlobalQuota,
 		failedItems:      make(map[string]*StagingMetadata),
 		cachedItems:      make(map[string]*StagingMetadata),
 		cachedDirs:       make(map[string]*StagingMetadata),
@@ -180,6 +192,11 @@ func NewStagingFS(config *StagingFSConfig) (*StagingFS, error) {
 	}
 
 	sf.currentSize = sf.computeDataDirSize()
+	if sf.globalQuota != nil && sf.currentSize > 0 {
+		if err := sf.globalQuota.ReserveSpace(sf.currentSize); err != nil {
+			return nil, errors.Wrap(err, "global staging quota exceeded at startup")
+		}
+	}
 	sf.cleanOrphanFiles()
 	sf.registerDefaultHandler()
 	sf.startSyncErrorNotifier()
@@ -248,6 +265,7 @@ func NewStagingFSWithPersistence(config *StagingFSConfig) (*StagingFS, error) {
 		stopCh:           make(chan struct{}),
 		maxSize:          maxSize,
 		maxCacheFileSize: maxCacheFileSize,
+		globalQuota:      config.GlobalQuota,
 		failedItems:      make(map[string]*StagingMetadata),
 		cachedItems:      make(map[string]*StagingMetadata),
 		cachedDirs:       make(map[string]*StagingMetadata),
@@ -258,6 +276,11 @@ func NewStagingFSWithPersistence(config *StagingFSConfig) (*StagingFS, error) {
 	}
 
 	sf.currentSize = sf.computeDataDirSize()
+	if sf.globalQuota != nil && sf.currentSize > 0 {
+		if err := sf.globalQuota.ReserveSpace(sf.currentSize); err != nil {
+			return nil, errors.Wrap(err, "global staging quota exceeded at startup")
+		}
+	}
 	sf.cleanOrphanFiles()
 	sf.registerDefaultHandler()
 	sf.startSyncErrorNotifier()
@@ -1020,8 +1043,10 @@ func (sf *StagingFS) SyncAll() error {
 	// packed directory tree are still on disk under its own root, so clearing
 	// them here would let the quota admit writes the disk cannot hold.
 	sf.sizeMutex.Lock()
+	oldSize := sf.currentSize
 	sf.currentSize = 0
 	sf.sizeMutex.Unlock()
+	sf.releaseGlobalQuota(oldSize)
 
 	sf.pathSizesMu.Lock()
 	sf.pathSizes = make(map[string]int64)
@@ -1461,7 +1486,13 @@ func (sf *StagingFS) StageForBulkUpload(localPath, irodsPath string) error {
 	if err := sf.reserveQuota(info.Size()); err != nil {
 		return err
 	}
-	defer sf.releaseQuota(info.Size())
+	consumed := false
+	defer func() {
+		sf.releaseQuota(info.Size())
+		if !consumed {
+			sf.releaseGlobalQuota(info.Size())
+		}
+	}()
 
 	// Wait for a sync of this path to finish and keep the next one from
 	// starting, so the replacement is never uploaded or cleaned up half-staged.
@@ -1499,6 +1530,7 @@ func (sf *StagingFS) StageForBulkUpload(localPath, irodsPath string) error {
 	}
 
 	sf.setPathSize(irodsPath, info.Size())
+	consumed = true
 
 	return nil
 }
@@ -1616,8 +1648,10 @@ func (sf *StagingFS) Clear() error {
 	// packed directory tree are still on disk under its own root, so clearing
 	// them here would let the quota admit writes the disk cannot hold.
 	sf.sizeMutex.Lock()
+	oldSize := sf.currentSize
 	sf.currentSize = 0
 	sf.sizeMutex.Unlock()
+	sf.releaseGlobalQuota(oldSize)
 
 	sf.pathSizesMu.Lock()
 	sf.pathSizes = make(map[string]int64)
@@ -1662,6 +1696,7 @@ func (sf *StagingFS) ensureQuota(size int64) error {
 		return err
 	}
 	sf.releaseQuota(size)
+	sf.releaseGlobalQuota(size)
 	return nil
 }
 
@@ -1680,6 +1715,15 @@ func (sf *StagingFS) reserveQuota(size int64) error {
 		if overflow <= 0 {
 			sf.reservedSize += size
 			sf.sizeMutex.Unlock()
+
+			if sf.globalQuota != nil {
+				if err := sf.globalQuota.ReserveSpace(size); err != nil {
+					sf.sizeMutex.Lock()
+					sf.reservedSize -= size
+					sf.sizeMutex.Unlock()
+					return errors.Mark(err, ErrQuotaExceeded)
+				}
+			}
 			return nil
 		}
 		current := sf.usedSizeUnlocked()
@@ -1743,9 +1787,14 @@ func (sf *StagingFS) ReleaseSpace(size int64) {
 		sf.externalSize = 0
 	}
 	sf.sizeMutex.Unlock()
+	sf.releaseGlobalQuota(size)
 }
 
-// releaseQuota gives back a reservation taken by reserveQuota.
+// releaseQuota gives back a local reservation taken by reserveQuota.
+// The global quota is NOT released here: the bytes are assumed to have moved
+// from the reservation into currentSize or externalSize (still on disk).
+// Callers whose reservation is abandoned without writing must call
+// releaseGlobalQuota separately.
 func (sf *StagingFS) releaseQuota(size int64) {
 	if size == 0 {
 		return
@@ -1757,6 +1806,14 @@ func (sf *StagingFS) releaseQuota(size int64) {
 		sf.reservedSize = 0
 	}
 	sf.sizeMutex.Unlock()
+}
+
+// releaseGlobalQuota releases size bytes from the global quota when a
+// reservation made by reserveQuota is abandoned without writing the bytes.
+func (sf *StagingFS) releaseGlobalQuota(size int64) {
+	if sf.globalQuota != nil && size > 0 {
+		sf.globalQuota.ReleaseSpace(size)
+	}
 }
 
 // ReserveFileGrowth accounts for a staged file growing to newSize before the
@@ -1971,11 +2028,12 @@ func (sf *StagingFS) addDataSize(size int64) {
 // subtractDataSize subtracts from the tracked data size
 func (sf *StagingFS) subtractDataSize(size int64) {
 	sf.sizeMutex.Lock()
-	defer sf.sizeMutex.Unlock()
 	sf.currentSize -= size
 	if sf.currentSize < 0 {
 		sf.currentSize = 0
 	}
+	sf.sizeMutex.Unlock()
+	sf.releaseGlobalQuota(size)
 }
 
 // computeDataDirSize walks the data directory and sums file sizes
