@@ -301,6 +301,8 @@ func (c *IRODSFSClientBuffered) Sync() error {
 
 	c.logger.Info("syncing all staged data to iRODS")
 
+	stagedPaths := c.staging.GetAll()
+
 	if err := c.staging.SyncAll(); err != nil {
 		return errors.CombineErrors(packedErr, errors.Wrap(err, "failed to sync staged data"))
 	}
@@ -308,7 +310,9 @@ func (c *IRODSFSClientBuffered) Sync() error {
 		return packedErr
 	}
 
-	c.cache.Clear(true)
+	for path := range stagedPaths {
+		_ = c.invalidateFileCacheBlocksHint(path, 0)
+	}
 
 	return nil
 }
