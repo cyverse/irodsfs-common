@@ -265,6 +265,68 @@ func (dag *OperationDAG) validate() error {
 	return nil
 }
 
+// repair removes dangling dependency references and breaks cycles so the DAG
+// can be used even when persistence was corrupted (e.g. disk-full crash).
+// It returns the number of edges removed.
+func (dag *OperationDAG) repair() int {
+	removed := 0
+
+	// Pass 1: remove references to missing nodes.
+	for _, op := range dag.nodes {
+		cleaned := op.Dependencies[:0]
+		for _, depID := range op.Dependencies {
+			if dag.nodes[depID] != nil {
+				cleaned = append(cleaned, depID)
+			} else {
+				removed++
+			}
+		}
+		op.Dependencies = cleaned
+	}
+
+	// Pass 2: break cycles by removing the back-edge.
+	const (
+		unvisited = iota
+		visiting
+		visited
+	)
+	states := make(map[string]int, len(dag.nodes))
+	var visit func(string)
+	visit = func(id string) {
+		if states[id] == visited {
+			return
+		}
+		states[id] = visiting
+		op := dag.nodes[id]
+		cleaned := op.Dependencies[:0]
+		for _, depID := range op.Dependencies {
+			if states[depID] == visiting {
+				removed++
+				continue
+			}
+			cleaned = append(cleaned, depID)
+			visit(depID)
+		}
+		op.Dependencies = cleaned
+		states[id] = visited
+	}
+	for id := range dag.nodes {
+		if states[id] == unvisited {
+			visit(id)
+		}
+	}
+
+	// Rebuild the reverse index from scratch.
+	if removed > 0 {
+		dag.dependents = make(map[string]map[string]struct{})
+		for _, op := range dag.nodes {
+			dag.linkDependencies(op)
+		}
+	}
+
+	return removed
+}
+
 func operationPriority(op *StagingOperation) int {
 	if op.Urgent {
 		switch op.Metadata.Action {

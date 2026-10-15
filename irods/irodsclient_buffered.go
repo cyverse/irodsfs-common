@@ -46,6 +46,12 @@ type IRODSFSClientBufferedConfig struct {
 	// to its own per-session limit. Nil disables the cross-session check.
 	GlobalQuota stagingfs.GlobalQuota
 
+	// ForceRepair repairs a corrupted staging DAG instead of failing during
+	// restore. Use this for force-recovery after a crash. When set, Repaired
+	// is filled with the number of edges that were fixed.
+	ForceRepair bool
+	Repaired    int
+
 	// PackedDirectories configures directories that are stored in iRODS as one
 	// archive data object rather than as a collection of many small files. Nil
 	// or disabled leaves every directory handled normally.
@@ -127,7 +133,11 @@ func NewIRODSFSClientBuffered(fs *irodsclient_fs.FileSystem, cache *cache.Memory
 			GlobalQuota:      config.GlobalQuota,
 		}
 
-		if config.UsePersistence {
+		if config.ForceRepair && config.UsePersistence {
+			var repaired int
+			staging, repaired, err = stagingfs.NewStagingFSWithRepair(stagingConfig)
+			config.Repaired = repaired
+		} else if config.UsePersistence {
 			staging, err = stagingfs.NewStagingFSWithPersistence(stagingConfig)
 		} else {
 			staging, err = stagingfs.NewStagingFS(stagingConfig)

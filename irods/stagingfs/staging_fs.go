@@ -289,6 +289,94 @@ func NewStagingFSWithPersistence(config *StagingFSConfig) (*StagingFS, error) {
 	return sf, nil
 }
 
+// NewStagingFSWithRepair is like NewStagingFSWithPersistence but repairs a
+// corrupted DAG instead of failing. Use this for force-recovery after a crash
+// that left the metadata inconsistent. It returns the StagingFS and the number
+// of DAG edges that were repaired.
+func NewStagingFSWithRepair(config *StagingFSConfig) (*StagingFS, int, error) {
+	if config == nil {
+		return nil, 0, errors.New("config is required")
+	}
+	if config.LocalRootPath == "" {
+		return nil, 0, errors.New("LocalRootPath is required")
+	}
+	if config.Client == nil {
+		return nil, 0, errors.New("Client is required")
+	}
+
+	if err := os.MkdirAll(config.LocalRootPath, 0755); err != nil {
+		return nil, 0, errors.Wrap(err, "failed to create root directory")
+	}
+
+	metaPath := filepath.Join(config.LocalRootPath, "meta")
+	if err := os.MkdirAll(metaPath, 0755); err != nil {
+		return nil, 0, errors.Wrap(err, "failed to create meta directory")
+	}
+
+	dataPath := filepath.Join(config.LocalRootPath, "data")
+	if err := os.MkdirAll(dataPath, 0755); err != nil {
+		return nil, 0, errors.Wrap(err, "failed to create data directory")
+	}
+
+	opts := badger.DefaultOptions(metaPath)
+	opts.Logger = nil
+	db, err := badger.Open(opts)
+	if err != nil {
+		return nil, 0, errors.Wrap(err, "failed to open Badger database")
+	}
+
+	sm := NewStagingStateManagerWithPersistence(db)
+	if config.Logger != nil {
+		sm.logger = config.Logger
+	}
+	repaired, err := sm.RestoreWithRepair()
+	if err != nil {
+		db.Close()
+		return nil, 0, errors.Wrap(err, "failed to restore/repair from Badger")
+	}
+
+	maxSize := config.MaxDataSize
+	if maxSize == 0 {
+		maxSize = DefaultMaxDataSize
+	}
+
+	maxCacheFileSize := config.MaxCacheFileSize
+	if maxCacheFileSize == 0 {
+		maxCacheFileSize = DefaultMaxCacheFileSize
+	}
+
+	sf := &StagingFS{
+		config:           config,
+		sm:               sm,
+		logger:           sm.logger,
+		client:           config.Client,
+		stopCh:           make(chan struct{}),
+		maxSize:          maxSize,
+		maxCacheFileSize: maxCacheFileSize,
+		globalQuota:      config.GlobalQuota,
+		failedItems:      make(map[string]*StagingMetadata),
+		cachedItems:      make(map[string]*StagingMetadata),
+		cachedDirs:       make(map[string]*StagingMetadata),
+		openRefs:         make(map[string]int),
+		handles:          make(map[string][]PathHolder),
+		handleRegs:       make(map[PathHolder]*handleRegistration),
+		pathSizes:        make(map[string]int64),
+	}
+
+	sf.currentSize = sf.computeDataDirSize()
+	if sf.globalQuota != nil && sf.currentSize > 0 {
+		if err := sf.globalQuota.ReserveSpace(sf.currentSize); err != nil {
+			return nil, 0, errors.Wrap(err, "global staging quota exceeded at startup")
+		}
+	}
+	sf.cleanOrphanFiles()
+	sf.registerDefaultHandler()
+	sf.startSyncErrorNotifier()
+	sf.startBackgroundWorker()
+
+	return sf, repaired, nil
+}
+
 // getLocalDataPath returns the local file path for an iRODS path
 // Converts /iplant/home/user/test.txt to /staging/data/iplant/home/user/test.txt
 func (sf *StagingFS) getLocalDataPath(path string) string {

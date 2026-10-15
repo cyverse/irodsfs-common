@@ -1407,6 +1407,89 @@ func (sm *StagingStateManager) Clear() error {
 }
 
 // Restore restores metadata from Badger (crash recovery)
+// RestoreWithRepair is like Restore but repairs a corrupted DAG instead of
+// failing. It removes dangling dependency references and breaks cycles, then
+// persists the repaired state. It returns the number of edges that were
+// removed, or an error if the database itself is unreadable.
+func (sm *StagingStateManager) RestoreWithRepair() (int, error) {
+	if sm.db == nil {
+		return 0, nil
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.metadata = make(map[string]*StagingMetadata)
+	sm.dag = newOperationDAG()
+	if err := sm.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte("operation:")
+		it := txn.NewIterator(opts)
+		for it.Rewind(); it.ValidForPrefix(opts.Prefix); it.Next() {
+			item := it.Item()
+			var op StagingOperation
+			if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &op) }); err != nil {
+				it.Close()
+				return errors.Wrap(err, "failed to unmarshal staging operation")
+			}
+			sm.dag.restore(&op)
+		}
+		it.Close()
+
+		opts = badger.DefaultIteratorOptions
+		opts.Prefix = []byte("staging:")
+		it = txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.ValidForPrefix(opts.Prefix); it.Next() {
+			item := it.Item()
+			var meta StagingMetadata
+			if err := item.Value(func(val []byte) error { return json.Unmarshal(val, &meta) }); err != nil {
+				return errors.Wrap(err, "failed to unmarshal staging metadata")
+			}
+			if meta.OperationID != "" && sm.dag.get(meta.OperationID) != nil {
+				sm.metadata[meta.Path] = &meta
+			} else {
+				op, err := sm.dag.add(&meta, nil, false)
+				if err != nil {
+					return err
+				}
+				copyMeta := *op.Metadata
+				sm.metadata[copyMeta.Path] = &copyMeta
+			}
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+
+	repaired := sm.dag.repair()
+
+	// Also unblock any BLOCKED operations so they are retried.
+	for _, op := range sm.dag.nodes {
+		if op.State == OperationBlocked {
+			op.State = OperationQueued
+			if op.Metadata != nil {
+				op.Metadata.SyncFailCount = 0
+			}
+			repaired++
+		}
+	}
+
+	if repaired > 0 {
+		if err := sm.db.Update(func(txn *badger.Txn) error {
+			for id := range sm.dag.nodes {
+				if err := sm.persistOperationTxn(txn, id); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return repaired, errors.Wrap(err, "failed to persist repaired DAG")
+		}
+	}
+	return repaired, nil
+}
+
 func (sm *StagingStateManager) Restore() error {
 	if sm.db == nil {
 		return nil
