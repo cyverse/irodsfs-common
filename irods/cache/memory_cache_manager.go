@@ -119,17 +119,15 @@ func NewMemoryCacheManager(config *MemoryCacheConfig) (*MemoryCacheManager, erro
 		mgr.totalSize -= int64(entry.size)
 	}
 
+	// OnExit fires exactly once for every value leaving the cache, including
+	// rejected ones (ristretto calls OnExit after OnReject/OnEvict), so do not
+	// also hook OnReject or rejected entries are subtracted twice.
 	cacheConfig := &ristretto.Config{
 		NumCounters: config.NumCounters,
 		MaxCost:     config.MaxCost,
 		BufferItems: config.BufferItems,
 		OnExit: func(val interface{}) {
 			if entry, ok := val.(*MemoryCacheEntry); ok {
-				onRemove(entry)
-			}
-		},
-		OnReject: func(item *ristretto.Item) {
-			if entry, ok := item.Value.(*MemoryCacheEntry); ok {
 				onRemove(entry)
 			}
 		},

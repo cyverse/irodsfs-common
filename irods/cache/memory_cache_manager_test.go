@@ -2,6 +2,8 @@ package cache
 
 import (
 	"bytes"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -263,4 +265,57 @@ func TestMemoryCacheManagerClear(t *testing.T) {
 	mgr.Clear(true)
 	assert.Equal(t, 0, mgr.GetCount())
 	assert.False(t, mgr.Has("key1"))
+}
+
+func TestMemoryCacheManagerRejectedEntryStats(t *testing.T) {
+	config := &MemoryCacheConfig{
+		NumCounters: 1000,
+		MaxCost:     1024,
+		BufferItems: 64,
+		TTL:         1 * time.Hour,
+	}
+
+	mgr, err := NewMemoryCacheManager(config)
+	assert.NoError(t, err)
+	defer mgr.Release()
+
+	// Larger than MaxCost, so the policy rejects it.
+	mgr.PutCopy("key1", make([]byte, 4096), true)
+
+	assert.False(t, mgr.Has("key1"))
+	assert.Equal(t, 0, mgr.GetCount())
+	assert.Equal(t, int64(0), mgr.GetTotalSize())
+}
+
+func TestMemoryCacheManagerConcurrentDuplicatePutStats(t *testing.T) {
+	config := &MemoryCacheConfig{
+		NumCounters: 100000,
+		MaxCost:     1024 * 1024 * 1024,
+		BufferItems: 64,
+		TTL:         1 * time.Hour,
+	}
+
+	mgr, err := NewMemoryCacheManager(config)
+	assert.NoError(t, err)
+	defer mgr.Release()
+
+	data := make([]byte, 4096)
+
+	// Concurrent puts of the same keys queue duplicate new items; all but the
+	// first are rejected by the policy and must be subtracted only once.
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				mgr.PutCopy(fmt.Sprintf("key%d", i%20), data, false)
+			}
+		}()
+	}
+	wg.Wait()
+
+	mgr.Clear(true)
+	assert.Equal(t, 0, mgr.GetCount())
+	assert.Equal(t, int64(0), mgr.GetTotalSize())
 }
