@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/cockroachdb/errors v1.12.0
-	github.com/cyverse/go-irodsclient v0.21.4
+	github.com/cyverse/go-irodsclient v0.21.6
 	github.com/dgraph-io/badger/v3 v3.2103.5
 	github.com/dgraph-io/ristretto v0.2.0
 	github.com/klauspost/compress v1.18.0
