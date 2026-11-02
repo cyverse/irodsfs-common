@@ -79,6 +79,7 @@ type IRODSFSClientBuffered struct {
 	cacheMiss        uint64
 	cacheHitBytes    uint64
 	cacheMissBytes   uint64
+	prefetchBytes    uint64
 }
 
 // NewIRODSFSClientBuffered creates a new IRODSFSClientBuffered with the given config.
@@ -364,6 +365,13 @@ func (c *IRODSFSClientBuffered) GetCacheHitBytes() uint64 {
 // fetched to fill the cache.
 func (c *IRODSFSClientBuffered) GetCacheMissBytes() uint64 {
 	return atomic.LoadUint64(&c.cacheMissBytes)
+}
+
+// GetPrefetchBytes returns the number of bytes CacheFile fetched from iRODS
+// into the block cache. Prefetching serves no read, so it counts toward
+// neither cache hits nor misses.
+func (c *IRODSFSClientBuffered) GetPrefetchBytes() uint64 {
+	return atomic.LoadUint64(&c.prefetchBytes)
 }
 
 func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, error) {
@@ -1447,9 +1455,10 @@ func (c *IRODSFSClientBuffered) checkAllBlocksCached(irodsPath string, fileSize 
 }
 
 // serveFileFromCache feeds an entire file to blockReadyCallback block by block using only
-// the memory cache. Each block increments cacheHit. Returns an error if any block has been
-// evicted since checkAllBlocksCached was called (rare TTL race).
-func (c *IRODSFSClientBuffered) serveFileFromCache(irodsPath string, fileSize int64, blockReadyCallback irodsclient_common.DataObjectBlockCallback, transferCallback irodsclient_common.TransferTrackerCallback) error {
+// the memory cache. With countHits, each block increments cacheHit; a prefetch passes false
+// because it serves no read. Returns an error if any block has been evicted since
+// checkAllBlocksCached was called (rare TTL race).
+func (c *IRODSFSClientBuffered) serveFileFromCache(irodsPath string, fileSize int64, countHits bool, blockReadyCallback irodsclient_common.DataObjectBlockCallback, transferCallback irodsclient_common.TransferTrackerCallback) error {
 	cacheBlockSize := int64(c.helper.GetBlockSize())
 	lastBlock := c.helper.GetLastBlockID(fileSize)
 
@@ -1468,8 +1477,10 @@ func (c *IRODSFSClientBuffered) serveFileFromCache(irodsPath string, fileSize in
 		blockEnd := min(offset+cacheBlockSize, fileSize)
 		blockData := data[:blockEnd-offset]
 
-		atomic.AddUint64(&c.cacheHit, 1)
-		atomic.AddUint64(&c.cacheHitBytes, uint64(len(blockData)))
+		if countHits {
+			atomic.AddUint64(&c.cacheHit, 1)
+			atomic.AddUint64(&c.cacheHitBytes, uint64(len(blockData)))
+		}
 		if callbackErr := blockReadyCallback(blockData, offset); callbackErr != nil {
 			return callbackErr
 		}
@@ -1508,7 +1519,7 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 
 	if c.checkAllBlocksCached(irodsPath, entry.Size) {
 		if c.isCacheFileFresh(irodsPath, entry) {
-			return c.serveFileFromCache(irodsPath, entry.Size, func(_ []byte, _ int64) error { return nil }, transferCallback)
+			return c.serveFileFromCache(irodsPath, entry.Size, false, func(_ []byte, _ int64) error { return nil }, transferCallback)
 		}
 		// File changed on iRODS — drop stale blocks
 		c.invalidateFileCacheBlocks(irodsPath)
@@ -1518,8 +1529,7 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 		if len(data) > 0 {
 			blockNum := c.helper.GetBlockID(offset)
 			cacheKey := c.makeCacheKey(irodsPath, blockNum)
-			atomic.AddUint64(&c.cacheMiss, 1)
-			atomic.AddUint64(&c.cacheMissBytes, uint64(len(data)))
+			atomic.AddUint64(&c.prefetchBytes, uint64(len(data)))
 			if _, err := c.cache.PutCopy(cacheKey, data, false); err != nil {
 				logger.WithError(err).Warnf("failed to cache block %d", blockNum)
 			}
@@ -1580,7 +1590,7 @@ func (c *IRODSFSClientBuffered) DownloadFile(irodsPath string, localPath string,
 
 	if c.checkAllBlocksCached(irodsPath, entry.Size) {
 		if c.isCacheFileFresh(irodsPath, entry) {
-			return c.serveFileFromCache(irodsPath, entry.Size, writeCallback, transferCallback)
+			return c.serveFileFromCache(irodsPath, entry.Size, true, writeCallback, transferCallback)
 		}
 		c.invalidateFileCacheBlocks(irodsPath)
 	}
@@ -1653,7 +1663,7 @@ func (c *IRODSFSClientBuffered) DownloadFileParallel(irodsPath string, localPath
 
 	if c.checkAllBlocksCached(irodsPath, entry.Size) {
 		if c.isCacheFileFresh(irodsPath, entry) {
-			return c.serveFileFromCache(irodsPath, entry.Size, writeCallback, transferCallback)
+			return c.serveFileFromCache(irodsPath, entry.Size, true, writeCallback, transferCallback)
 		}
 		c.invalidateFileCacheBlocks(irodsPath)
 	}
@@ -1712,7 +1722,7 @@ func (c *IRODSFSClientBuffered) DownloadFileWithCallback(irodsPath string, block
 
 		if c.checkAllBlocksCached(irodsPath, entry.Size) {
 			if c.isCacheFileFresh(irodsPath, entry) {
-				return c.serveFileFromCache(irodsPath, entry.Size, blockReadyCallback, transferCallback)
+				return c.serveFileFromCache(irodsPath, entry.Size, true, blockReadyCallback, transferCallback)
 			}
 			c.invalidateFileCacheBlocks(irodsPath)
 		}
@@ -1861,7 +1871,7 @@ func (c *IRODSFSClientBuffered) DownloadFileParallelWithCallback(irodsPath strin
 
 		if c.checkAllBlocksCached(irodsPath, entry.Size) {
 			if c.isCacheFileFresh(irodsPath, entry) {
-				return c.serveFileFromCache(irodsPath, entry.Size, blockReadyCallback, transferCallback)
+				return c.serveFileFromCache(irodsPath, entry.Size, true, blockReadyCallback, transferCallback)
 			}
 			c.invalidateFileCacheBlocks(irodsPath)
 		}

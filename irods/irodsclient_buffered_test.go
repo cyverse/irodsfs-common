@@ -519,6 +519,27 @@ func TestBufferedFileHandleReadAtCountsRequestedCacheBytes(t *testing.T) {
 	assert.Equal(t, uint64(4), handle.client.GetCacheMissBytes())
 }
 
+func TestServeFileFromCacheCountsHitsOnlyForReads(t *testing.T) {
+	cacheMgr := newTestCacheManager(t)
+	defer cacheMgr.Release()
+
+	helper := util.NewFileBlockHelper(8)
+	client := &IRODSFSClientBuffered{cache: cacheMgr, helper: helper, logger: newTestLogger()}
+	data := []byte("AAAAAAAABBBB") // 2 blocks, the last one partial
+	cacheMgr.PutCopy(client.makeCacheKey("/test/served.dat", 0), data[:8], true)
+	cacheMgr.PutCopy(client.makeCacheKey("/test/served.dat", 1), data[8:], true)
+	noop := func(_ []byte, _ int64) error { return nil }
+
+	// A prefetch of a fully cached file serves no read
+	require.NoError(t, client.serveFileFromCache("/test/served.dat", int64(len(data)), false, noop, nil))
+	assert.Equal(t, uint64(0), client.cacheHit)
+	assert.Equal(t, uint64(0), client.GetCacheHitBytes())
+
+	require.NoError(t, client.serveFileFromCache("/test/served.dat", int64(len(data)), true, noop, nil))
+	assert.Equal(t, uint64(2), client.cacheHit)
+	assert.Equal(t, uint64(12), client.GetCacheHitBytes())
+}
+
 func TestBufferedFileHandleReadAtPartialLastBlock(t *testing.T) {
 	cacheMgr := newTestCacheManager(t)
 	defer cacheMgr.Release()
