@@ -1517,12 +1517,18 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 		return nil
 	}
 
-	if c.checkAllBlocksCached(irodsPath, entry.Size) {
-		if c.isCacheFileFresh(irodsPath, entry) {
-			return c.serveFileFromCache(irodsPath, entry.Size, false, func(_ []byte, _ int64) error { return nil }, transferCallback)
-		}
-		// File changed on iRODS — drop stale blocks
-		c.invalidateFileCacheBlocks(irodsPath)
+	if !c.isCacheFileFresh(irodsPath, entry) {
+		// File changed on iRODS — drop stale blocks, which must be neither
+		// served nor skipped below
+		_ = c.invalidateFileCacheBlocksHint(irodsPath, entry.Size)
+	} else if c.checkAllBlocksCached(irodsPath, entry.Size) {
+		return c.serveFileFromCache(irodsPath, entry.Size, false, func(_ []byte, _ int64) error { return nil }, transferCallback)
+	}
+
+	// A block already cached, or cached by a read while the download runs, is
+	// not transferred again
+	skipBlockCallback := func(blockID int64) bool {
+		return c.cache.Has(c.makeCacheKey(irodsPath, blockID))
 	}
 
 	blockReadyCallback := func(data []byte, offset int64) error {
@@ -1538,7 +1544,7 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 	}
 
 	_, err = c.executeWithRenameFallback(irodsPath, func(backendPath string) error {
-		_, downloadErr := c.client.fs.DownloadFileParallelWithCallback(backendPath, "", c.helper.GetBlockSize(), 3, blockReadyCallback, 4, transferCallback)
+		_, downloadErr := c.client.fs.DownloadFileBlocksParallelWithCallback(backendPath, "", c.helper.GetBlockSize(), 0, 0, skipBlockCallback, blockReadyCallback, 4, transferCallback)
 		return downloadErr
 	})
 	if err == nil {
