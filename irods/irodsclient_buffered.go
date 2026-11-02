@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -1525,10 +1526,44 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 		return c.serveFileFromCache(irodsPath, entry.Size, false, func(_ []byte, _ int64) error { return nil }, transferCallback)
 	}
 
-	// A block already cached, or cached by a read while the download runs, is
-	// not transferred again
+	// A block already cached, cached by a read while the download runs, or
+	// being fetched by a read, is not transferred again. A block it does
+	// transfer is registered as being fetched, so a read needing it waits for
+	// it instead of fetching it too.
+	var fillsMutex sync.Mutex
+	fills := map[int64]*cache.BlockFill{}
+	defer func() {
+		// Blocks the download stopped before delivering
+		fillsMutex.Lock()
+		defer fillsMutex.Unlock()
+		for _, fill := range fills {
+			fill.Abort()
+		}
+	}()
+
 	skipBlockCallback := func(blockID int64) bool {
-		return c.cache.Has(c.makeCacheKey(irodsPath, blockID))
+		cacheKey := c.makeCacheKey(irodsPath, blockID)
+		if c.cache.Has(cacheKey) {
+			return true
+		}
+
+		fill, fillOwner := c.cache.BeginFill(cacheKey)
+		if !fillOwner {
+			return true
+		}
+
+		// A read may have cached it between the check and the registration
+		if cacheEntry := c.cache.Get(cacheKey); cacheEntry != nil {
+			if data, err := cacheEntry.GetData(0); err == nil {
+				fill.Complete(data)
+				return true
+			}
+		}
+
+		fillsMutex.Lock()
+		fills[blockID] = fill
+		fillsMutex.Unlock()
+		return false
 	}
 
 	blockReadyCallback := func(data []byte, offset int64) error {
@@ -1536,8 +1571,26 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 			blockNum := c.helper.GetBlockID(offset)
 			cacheKey := c.makeCacheKey(irodsPath, blockNum)
 			atomic.AddUint64(&c.prefetchBytes, uint64(len(data)))
-			if _, err := c.cache.PutCopy(cacheKey, data, false); err != nil {
+			cacheEntry, err := c.cache.PutCopy(cacheKey, data, false)
+			if err != nil {
 				logger.WithError(err).Warnf("failed to cache block %d", blockNum)
+			}
+
+			fillsMutex.Lock()
+			fill := fills[blockNum]
+			delete(fills, blockNum)
+			fillsMutex.Unlock()
+
+			if fill != nil {
+				// data is a pooled buffer that the download reuses
+				var fillData []byte
+				if cacheEntry != nil {
+					fillData, _ = cacheEntry.GetData(0)
+				}
+				if fillData == nil {
+					fillData = append([]byte(nil), data...)
+				}
+				fill.Complete(fillData)
 			}
 		}
 		return nil
@@ -2056,6 +2109,10 @@ func (c *IRODSFSClientBuffered) invalidateFileCacheBlocksHint(irodsPath string, 
 }
 
 // IRODSFSClientBufferedFileHandle wraps IRODSFSFileHandle with block-level caching
+// blockFillWaitTimeout bounds how long a read waits for a block that another
+// read or a prefetch is fetching, before fetching the block itself.
+const blockFillWaitTimeout = 10 * time.Second
+
 type IRODSFSClientBufferedFileHandle struct {
 	id        string // handle id used as the file lock owner
 	client    *IRODSFSClientBuffered
@@ -2186,10 +2243,36 @@ func (h *IRODSFSClientBufferedFileHandle) ReadAt(buffer []byte, offset int64) (i
 			}
 		}
 
+		// Not cached yet — wait for the block when another read or a prefetch
+		// is already fetching it. It comes over once, so it counts as a hit.
+		fill, fillOwner := h.cache.BeginFill(cacheKey)
+		if !fillOwner {
+			if data, ok := fill.Wait(blockFillWaitTimeout); ok && int(blockOffset) < len(data) {
+				n := copy(buffer[totalCopied:totalCopied+int(toCopy)], data[blockOffset:])
+				totalCopied += n
+				atomic.AddUint64(&h.client.cacheHit, 1)
+				atomic.AddUint64(&h.client.cacheHitBytes, uint64(n))
+
+				// Short read from underlying — done
+				if len(data) < int(blockDataLen) {
+					break
+				}
+				continue
+			}
+			// The fetch failed or is taking too long; fetch the block here
+		}
+
 		// Cache miss — read the full block from underlying handle
 		atomic.AddUint64(&h.client.cacheMiss, 1)
 		blockBuf := make([]byte, blockDataLen)
 		n, err := h.handle.ReadAt(blockBuf, blockStart)
+		if fillOwner {
+			if n > 0 && (err == nil || err == io.EOF) {
+				fill.Complete(blockBuf[:n])
+			} else {
+				fill.Abort()
+			}
+		}
 		if err != nil && err != io.EOF {
 			if totalCopied > 0 {
 				return totalCopied, nil

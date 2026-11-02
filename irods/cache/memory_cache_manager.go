@@ -98,6 +98,9 @@ type MemoryCacheManager struct {
 	totalCount int
 	totalSize  int64
 	stopOnce   sync.Once
+
+	fillMu sync.Mutex
+	fills  map[string]*BlockFill // entries being fetched, by key
 }
 
 // NewMemoryCacheManager creates a new MemoryCacheManager with Ristretto backend
@@ -110,6 +113,7 @@ func NewMemoryCacheManager(config *MemoryCacheConfig) (*MemoryCacheManager, erro
 		config:     config,
 		totalCount: 0,
 		totalSize:  0,
+		fills:      map[string]*BlockFill{},
 	}
 
 	onRemove := func(entry *MemoryCacheEntry) {

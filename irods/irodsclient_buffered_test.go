@@ -519,6 +519,98 @@ func TestBufferedFileHandleReadAtCountsRequestedCacheBytes(t *testing.T) {
 	assert.Equal(t, uint64(4), handle.client.GetCacheMissBytes())
 }
 
+func TestBufferedFileHandleReadAtWaitsForBlockBeingFetched(t *testing.T) {
+	cacheMgr := newTestCacheManager(t)
+	defer cacheMgr.Release()
+
+	helper := util.NewFileBlockHelper(8)
+	mock := newMockFileHandle("/test/fill.dat", []byte("XXXXXXXX"), irodsclient_types.FileOpenModeReadOnly)
+
+	handle := &IRODSFSClientBufferedFileHandle{
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, helper: helper, logger: newTestLogger()},
+		handle:    mock,
+		cache:     cacheMgr,
+		irodsPath: "/test/fill.dat",
+		helper:    helper,
+		logger:    newTestLogger(),
+	}
+	handle.client.storeCacheFileMeta(handle.irodsPath, mock.entry)
+
+	// A prefetch is fetching block 0, and delivers it after the read starts
+	fill, owner := cacheMgr.BeginFill(handle.makeCacheKey(0))
+	require.True(t, owner)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		fill.Complete([]byte("AAAAAAAA"))
+	}()
+
+	buf := make([]byte, 4)
+	n, err := handle.ReadAt(buf, 2)
+	assert.Equal(t, 4, n)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("AAAA"), buf) // from the fill, not the underlying file
+
+	assert.Equal(t, uint64(1), handle.client.cacheHit)
+	assert.Equal(t, uint64(0), handle.client.cacheMiss)
+	assert.Equal(t, uint64(4), handle.client.GetCacheHitBytes())
+}
+
+func TestBufferedFileHandleReadAtFetchesBlockWhenFillAborts(t *testing.T) {
+	cacheMgr := newTestCacheManager(t)
+	defer cacheMgr.Release()
+
+	helper := util.NewFileBlockHelper(8)
+	mock := newMockFileHandle("/test/abort.dat", []byte("BBBBBBBB"), irodsclient_types.FileOpenModeReadOnly)
+
+	handle := &IRODSFSClientBufferedFileHandle{
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, helper: helper, logger: newTestLogger()},
+		handle:    mock,
+		cache:     cacheMgr,
+		irodsPath: "/test/abort.dat",
+		helper:    helper,
+		logger:    newTestLogger(),
+	}
+	handle.client.storeCacheFileMeta(handle.irodsPath, mock.entry)
+
+	fill, owner := cacheMgr.BeginFill(handle.makeCacheKey(0))
+	require.True(t, owner)
+	fill.Abort()
+
+	buf := make([]byte, 4)
+	n, err := handle.ReadAt(buf, 0)
+	assert.Equal(t, 4, n)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("BBBB"), buf)
+	assert.Equal(t, uint64(1), handle.client.cacheMiss)
+}
+
+func TestBufferedFileHandleReadAtCompletesItsFillForWaiters(t *testing.T) {
+	cacheMgr := newTestCacheManager(t)
+	defer cacheMgr.Release()
+
+	helper := util.NewFileBlockHelper(8)
+	mock := newMockFileHandle("/test/owner.dat", []byte("CCCCCCCC"), irodsclient_types.FileOpenModeReadOnly)
+
+	handle := &IRODSFSClientBufferedFileHandle{
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, helper: helper, logger: newTestLogger()},
+		handle:    mock,
+		cache:     cacheMgr,
+		irodsPath: "/test/owner.dat",
+		helper:    helper,
+		logger:    newTestLogger(),
+	}
+	handle.client.storeCacheFileMeta(handle.irodsPath, mock.entry)
+
+	buf := make([]byte, 4)
+	_, err := handle.ReadAt(buf, 0)
+	assert.NoError(t, err)
+
+	// The read ended its fill, so the block is no longer in flight
+	fill, owner := cacheMgr.BeginFill(handle.makeCacheKey(0))
+	assert.True(t, owner)
+	fill.Abort()
+}
+
 func TestServeFileFromCacheCountsHitsOnlyForReads(t *testing.T) {
 	cacheMgr := newTestCacheManager(t)
 	defer cacheMgr.Release()
