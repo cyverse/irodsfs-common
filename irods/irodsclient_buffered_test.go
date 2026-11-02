@@ -605,6 +605,10 @@ func TestBufferedFileHandleReadAtCompletesItsFillForWaiters(t *testing.T) {
 	_, err := handle.ReadAt(buf, 0)
 	assert.NoError(t, err)
 
+	// The block is cached by the time the read ends its fill, so there is no
+	// moment a prefetch would find it neither cached nor in flight
+	assert.True(t, cacheMgr.Has(handle.makeCacheKey(0)))
+
 	// The read ended its fill, so the block is no longer in flight
 	fill, owner := cacheMgr.BeginFill(handle.makeCacheKey(0))
 	assert.True(t, owner)

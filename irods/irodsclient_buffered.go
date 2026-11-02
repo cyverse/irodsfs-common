@@ -1571,7 +1571,9 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 			blockNum := c.helper.GetBlockID(offset)
 			cacheKey := c.makeCacheKey(irodsPath, blockNum)
 			atomic.AddUint64(&c.prefetchBytes, uint64(len(data)))
-			cacheEntry, err := c.cache.PutCopy(cacheKey, data, false)
+			// Wait for the cache to hold the block before ending its fill, so a
+			// read never finds it neither cached nor in flight
+			cacheEntry, err := c.cache.PutCopy(cacheKey, data, true)
 			if err != nil {
 				logger.WithError(err).Warnf("failed to cache block %d", blockNum)
 			}
@@ -2266,24 +2268,25 @@ func (h *IRODSFSClientBufferedFileHandle) ReadAt(buffer []byte, offset int64) (i
 		atomic.AddUint64(&h.client.cacheMiss, 1)
 		blockBuf := make([]byte, blockDataLen)
 		n, err := h.handle.ReadAt(blockBuf, blockStart)
-		if fillOwner {
-			if n > 0 && (err == nil || err == io.EOF) {
-				fill.Complete(blockBuf[:n])
-			} else {
+		if err != nil && err != io.EOF {
+			if fillOwner {
 				fill.Abort()
 			}
-		}
-		if err != nil && err != io.EOF {
 			if totalCopied > 0 {
 				return totalCopied, nil
 			}
 			return 0, err
 		}
 
-		// Cache the full block
+		// Cache the full block. Wait for the cache to hold it before ending the
+		// fill: in between, the block is neither cached nor in flight, and a
+		// prefetch reaching it would fetch it again.
 		if n > 0 {
-			if _, cacheErr := h.cache.PutCopy(cacheKey, blockBuf[:n], false); cacheErr != nil {
+			if _, cacheErr := h.cache.PutCopy(cacheKey, blockBuf[:n], true); cacheErr != nil {
 				h.logger.WithError(cacheErr).Warnf("failed to cache block %d", blockNum)
+			}
+			if fillOwner {
+				fill.Complete(blockBuf[:n])
 			}
 			// Store freshness stamp on first cache miss so download paths can validate staleness.
 			if !h.cache.Has(h.client.makeCacheKey(h.irodsPath, -1)) {
@@ -2298,6 +2301,8 @@ func (h *IRODSFSClientBufferedFileHandle) ReadAt(buffer []byte, offset int64) (i
 				totalCopied += copied
 				atomic.AddUint64(&h.client.cacheMissBytes, uint64(copied))
 			}
+		} else if fillOwner {
+			fill.Abort()
 		}
 
 		// Short read from underlying — done
