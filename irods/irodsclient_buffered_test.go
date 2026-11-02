@@ -483,6 +483,42 @@ func TestBufferedFileHandleReadAtCrossBock(t *testing.T) {
 	assert.Equal(t, []byte("AAAABBBB"), buf)
 }
 
+func TestBufferedFileHandleReadAtCountsRequestedCacheBytes(t *testing.T) {
+	cacheMgr := newTestCacheManager(t)
+	defer cacheMgr.Release()
+
+	blockSize := 8
+	helper := util.NewFileBlockHelper(blockSize)
+	data := []byte("AAAAAAAABBBBBBBBCCCCCCCC") // 3 blocks of 8 bytes
+	mock := newMockFileHandle("/test/bytes.dat", data, irodsclient_types.FileOpenModeReadOnly)
+
+	handle := &IRODSFSClientBufferedFileHandle{
+		client:    &IRODSFSClientBuffered{cache: cacheMgr, helper: helper, logger: newTestLogger()},
+		handle:    mock,
+		cache:     cacheMgr,
+		irodsPath: "/test/bytes.dat",
+		helper:    helper,
+		logger:    newTestLogger(),
+	}
+
+	// Block 0 is cached, block 1 is not
+	cacheMgr.PutCopy(handle.makeCacheKey(0), data[:8], true)
+	handle.client.storeCacheFileMeta(handle.irodsPath, mock.entry)
+
+	// Read offset 4, len 8: 4 bytes hit block 0, 4 bytes miss block 1
+	buf := make([]byte, 8)
+	n, err := handle.ReadAt(buf, 4)
+	assert.Equal(t, 8, n)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("AAAABBBB"), buf)
+
+	// Bytes follow the requested size, not the whole block fetched for block 1
+	assert.Equal(t, uint64(1), handle.client.cacheHit)
+	assert.Equal(t, uint64(1), handle.client.cacheMiss)
+	assert.Equal(t, uint64(4), handle.client.GetCacheHitBytes())
+	assert.Equal(t, uint64(4), handle.client.GetCacheMissBytes())
+}
+
 func TestBufferedFileHandleReadAtPartialLastBlock(t *testing.T) {
 	cacheMgr := newTestCacheManager(t)
 	defer cacheMgr.Release()

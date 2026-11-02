@@ -77,6 +77,8 @@ type IRODSFSClientBuffered struct {
 	logger           *log.Entry
 	cacheHit         uint64
 	cacheMiss        uint64
+	cacheHitBytes    uint64
+	cacheMissBytes   uint64
 }
 
 // NewIRODSFSClientBuffered creates a new IRODSFSClientBuffered with the given config.
@@ -349,6 +351,19 @@ func (c *IRODSFSClientBuffered) GetMetrics() *irodsclient_metrics.IRODSMetrics {
 	metrics.IncreaseCounterForCacheHit(atomic.LoadUint64(&c.cacheHit))
 	metrics.IncreaseCounterForCacheMiss(atomic.LoadUint64(&c.cacheMiss))
 	return metrics
+}
+
+// GetCacheHitBytes returns the number of bytes served from the block cache.
+// File handle reads count only the requested bytes, not the whole block.
+func (c *IRODSFSClientBuffered) GetCacheHitBytes() uint64 {
+	return atomic.LoadUint64(&c.cacheHitBytes)
+}
+
+// GetCacheMissBytes returns the number of bytes that missed the block cache.
+// File handle reads count only the requested bytes, not the whole block
+// fetched to fill the cache.
+func (c *IRODSFSClientBuffered) GetCacheMissBytes() uint64 {
+	return atomic.LoadUint64(&c.cacheMissBytes)
 }
 
 func (c *IRODSFSClientBuffered) List(dirPath string) ([]*irodsclient_fs.Entry, error) {
@@ -1454,6 +1469,7 @@ func (c *IRODSFSClientBuffered) serveFileFromCache(irodsPath string, fileSize in
 		blockData := data[:blockEnd-offset]
 
 		atomic.AddUint64(&c.cacheHit, 1)
+		atomic.AddUint64(&c.cacheHitBytes, uint64(len(blockData)))
 		if callbackErr := blockReadyCallback(blockData, offset); callbackErr != nil {
 			return callbackErr
 		}
@@ -1503,6 +1519,7 @@ func (c *IRODSFSClientBuffered) CacheFile(irodsPath string, transferCallback iro
 			blockNum := c.helper.GetBlockID(offset)
 			cacheKey := c.makeCacheKey(irodsPath, blockNum)
 			atomic.AddUint64(&c.cacheMiss, 1)
+			atomic.AddUint64(&c.cacheMissBytes, uint64(len(data)))
 			if _, err := c.cache.PutCopy(cacheKey, data, false); err != nil {
 				logger.WithError(err).Warnf("failed to cache block %d", blockNum)
 			}
@@ -1574,6 +1591,7 @@ func (c *IRODSFSClientBuffered) DownloadFile(irodsPath string, localPath string,
 			blockNum := offset / int64(cacheBlockSize)
 			cacheKey := c.makeCacheKey(irodsPath, blockNum)
 			atomic.AddUint64(&c.cacheMiss, 1)
+			atomic.AddUint64(&c.cacheMissBytes, uint64(len(data)))
 			if _, cacheErr := c.cache.PutCopy(cacheKey, data, false); cacheErr != nil {
 				logger.WithError(cacheErr).Warnf("failed to cache block %d", blockNum)
 			}
@@ -1646,6 +1664,7 @@ func (c *IRODSFSClientBuffered) DownloadFileParallel(irodsPath string, localPath
 			blockNum := offset / int64(cacheBlockSize)
 			cacheKey := c.makeCacheKey(irodsPath, blockNum)
 			atomic.AddUint64(&c.cacheMiss, 1)
+			atomic.AddUint64(&c.cacheMissBytes, uint64(len(data)))
 			if _, cacheErr := c.cache.PutCopy(cacheKey, data, false); cacheErr != nil {
 				logger.WithError(cacheErr).Warnf("failed to cache block %d", blockNum)
 			}
@@ -1703,6 +1722,7 @@ func (c *IRODSFSClientBuffered) DownloadFileWithCallback(irodsPath string, block
 				blockNum := offset / int64(cacheBlockSize)
 				cacheKey := c.makeCacheKey(irodsPath, blockNum)
 				atomic.AddUint64(&c.cacheMiss, 1)
+				atomic.AddUint64(&c.cacheMissBytes, uint64(len(data)))
 				if _, cacheErr := c.cache.PutCopy(cacheKey, data, false); cacheErr != nil {
 					logger.WithError(cacheErr).Warnf("failed to cache block %d", blockNum)
 				}
@@ -1851,6 +1871,7 @@ func (c *IRODSFSClientBuffered) DownloadFileParallelWithCallback(irodsPath strin
 				blockNum := offset / int64(cacheBlockSize)
 				cacheKey := c.makeCacheKey(irodsPath, blockNum)
 				atomic.AddUint64(&c.cacheMiss, 1)
+				atomic.AddUint64(&c.cacheMissBytes, uint64(len(data)))
 				if _, cacheErr := c.cache.PutCopy(cacheKey, data, false); cacheErr != nil {
 					logger.WithError(cacheErr).Warnf("failed to cache block %d", blockNum)
 				}
@@ -2144,6 +2165,7 @@ func (h *IRODSFSClientBufferedFileHandle) ReadAt(buffer []byte, offset int64) (i
 				n := copy(buffer[totalCopied:totalCopied+int(toCopy)], data)
 				totalCopied += n
 				atomic.AddUint64(&h.client.cacheHit, 1)
+				atomic.AddUint64(&h.client.cacheHitBytes, uint64(n))
 				continue
 			}
 		}
@@ -2175,6 +2197,7 @@ func (h *IRODSFSClientBufferedFileHandle) ReadAt(buffer []byte, offset int64) (i
 				copyEnd := min(copyStart+int(toCopy), n)
 				copied := copy(buffer[totalCopied:], blockBuf[copyStart:copyEnd])
 				totalCopied += copied
+				atomic.AddUint64(&h.client.cacheMissBytes, uint64(copied))
 			}
 		}
 
