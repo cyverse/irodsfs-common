@@ -123,3 +123,49 @@ func TestSyncAllStillUploadsRegularFile(t *testing.T) {
 		t.Fatalf("uploaded = %v, want /real.txt", client.uploaded)
 	}
 }
+
+// A directory cannot be created where a staged file still is: queueing it
+// behind the file's upload would leave an upload that can never run.
+func TestMkdirRefusesPathHoldingAStagedFile(t *testing.T) {
+	sf, _ := newObsoleteUploadTestFS(t)
+
+	if err := sf.Create("/X"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := sf.Mkdir("/X"); err == nil {
+		t.Fatal("Mkdir over a staged file succeeded")
+	}
+
+	// Nothing was queued for the directory, and the file's upload is intact.
+	operations := sf.sm.GetAll()
+	if meta := operations["/X"]; meta == nil || meta.Action != ActionUpload {
+		t.Fatalf("metadata at /X = %#v, want the upload", meta)
+	}
+	if len(sf.sm.dag.nodes) != 1 {
+		t.Fatalf("%d operations queued, want 1", len(sf.sm.dag.nodes))
+	}
+	if info, err := os.Stat(sf.getLocalDataPath("/X")); err != nil || info.IsDir() {
+		t.Fatalf("the staged file was disturbed: %v", err)
+	}
+}
+
+// Removing a file and creating a directory of the same name is ordinary, and
+// must keep working while the removal is still queued.
+func TestMkdirAfterPendingDeleteOfFileIsAllowed(t *testing.T) {
+	sf, _ := newObsoleteUploadTestFS(t)
+
+	// A file that exists in iRODS is removed: DELETE is queued, not cancelled.
+	sf.sm.mu.Lock()
+	if err := sf.sm.enqueueOperation("/X", &StagingMetadata{Path: "/X", Action: ActionDelete}, nil, false); err != nil {
+		sf.sm.mu.Unlock()
+		t.Fatal(err)
+	}
+	sf.sm.mu.Unlock()
+
+	if err := sf.Mkdir("/X"); err != nil {
+		t.Fatalf("Mkdir after a queued DELETE = %v, want it allowed", err)
+	}
+	if meta := sf.sm.GetAll()["/X"]; meta == nil || meta.Action != ActionMkdir {
+		t.Fatalf("metadata at /X = %#v, want MKDIR", meta)
+	}
+}

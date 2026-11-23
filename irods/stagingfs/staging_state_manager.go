@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/errors"
+	irodsclient_types "github.com/cyverse/go-irodsclient/irods/types"
 	"github.com/dgraph-io/badger/v3"
 	log "github.com/sirupsen/logrus"
 )
@@ -783,6 +784,18 @@ func (sm *StagingStateManager) Mkdir(path string) error {
 
 	// Wait for exact-path sync or a recursive operation on an ancestor.
 	sm.waitForPathsUnlocked(path)
+
+	// A file staged at this path is still there: its upload, or the rename that
+	// moved it here, is pending. A directory cannot take its place, and queueing
+	// one behind the file's operation leaves an upload whose local path is a
+	// directory, which can never run. A pending DELETE or RMDIR is different:
+	// the path is free again and the directory may be created.
+	if pending := sm.metadata[path]; pending != nil {
+		switch pending.Action {
+		case ActionUpload, ActionBulkUpload, ActionRename:
+			return irodsclient_types.NewFileAlreadyExistError(path)
+		}
+	}
 
 	now := time.Now()
 	meta := &StagingMetadata{
