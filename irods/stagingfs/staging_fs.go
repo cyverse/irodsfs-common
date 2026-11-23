@@ -1172,6 +1172,11 @@ func (sf *StagingFS) SyncOld(gracePeriod time.Duration) error {
 			continue
 		}
 		localPath := sf.getLocalDataPath(path)
+		// A directory staged at the path of a dropped upload belongs to the
+		// namespace, not to the upload, so it stays.
+		if info, err := os.Lstat(localPath); err == nil && info.IsDir() {
+			continue
+		}
 		sf.removePathSize(path)
 		if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
 			return errors.Wrapf(err, "failed to delete local file %q", path)
@@ -1181,6 +1186,23 @@ func (sf *StagingFS) SyncOld(gracePeriod time.Duration) error {
 	return nil
 }
 
+// obsoleteUploadReason says why a queued upload has nothing to send, or returns
+// an empty string when localPath is a regular file that can be uploaded. Any
+// other failure to inspect the path is left to the upload to report.
+func obsoleteUploadReason(localPath string) string {
+	info, err := os.Stat(localPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "the staged file does not exist"
+		}
+		return ""
+	}
+	if info.IsDir() {
+		return "the staged path is a directory"
+	}
+	return ""
+}
+
 // registerDefaultHandler registers the default iRODS operation handler
 func (sf *StagingFS) registerDefaultHandler() {
 	handler := func(meta *StagingMetadata) error {
@@ -1188,6 +1210,20 @@ func (sf *StagingFS) registerDefaultHandler() {
 		case ActionUpload, ActionBulkUpload:
 			// Upload file to iRODS in parallel
 			localPath := sf.getLocalDataPath(meta.Path)
+
+			// An upload needs a regular file to read from. When the path holds a
+			// directory, or nothing, the file was replaced or removed after the
+			// upload was queued, and there is no data left to send. Retrying
+			// fails the same way every time and keeps the whole staging area
+			// from ever being flushed, so the upload is dropped instead.
+			if reason := obsoleteUploadReason(localPath); reason != "" {
+				sf.logger.WithFields(log.Fields{
+					"action":      meta.Action.String(),
+					"path":        meta.Path,
+					"operationID": meta.OperationID,
+				}).Warnf("dropping a staged upload that has nothing to upload: %s", reason)
+				return nil
+			}
 
 			if err := sf.client.UploadFileParallel(localPath, meta.Path, 4, nil); err != nil {
 				return errors.Wrapf(err, "failed to upload file in iRODS %q", meta.Path)
