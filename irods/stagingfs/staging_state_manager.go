@@ -1146,7 +1146,7 @@ func (sm *StagingStateManager) syncCandidate(meta *StagingMetadata, gracePeriod 
 			}
 			sm.unlockOperationUnlocked(meta)
 			sm.mu.Unlock()
-			return true, false, errors.Wrapf(err, "handler failed for %q action on %q", meta.Action, meta.Path)
+			return true, false, errors.Mark(errors.Wrapf(err, "handler failed for %q action on %q", meta.Action, meta.Path), errOperationHandlerFailed)
 		}
 		syncLogger.Debug("staging sync finished")
 	}
@@ -1266,8 +1266,68 @@ func (sm *StagingStateManager) completeOperationUnlocked(operationID string, pat
 	return nil
 }
 
-// SyncAll performs all pending iRODS operations and clears metadata one by one (exclusive lock)
+// errOperationHandlerFailed marks the error of an operation whose backend handler
+// failed, as opposed to a failure to record the outcome of one that ran.
+var errOperationHandlerFailed = errors.New("operation handler failed")
+
+// OperationSyncFailure is an operation whose backend handler failed during a
+// SyncAll.
+type OperationSyncFailure struct {
+	OperationID string
+	Action      ActionType
+	Path        string
+	OldPath     string
+	Err         error
+}
+
+// PartialSyncError reports a SyncAll that could not empty the queue. Everything
+// that could run did: Failures lists the operations that failed, and Remaining
+// counts all that are left, including those that wait on a failed one. The
+// failed operations are kept with their staged data.
+type PartialSyncError struct {
+	Remaining int
+	Failures  []OperationSyncFailure
+}
+
+const partialSyncErrorDetailLimit = 5
+
+func (e *PartialSyncError) Error() string {
+	var detail strings.Builder
+	for i, failure := range e.Failures {
+		if i == partialSyncErrorDetailLimit {
+			fmt.Fprintf(&detail, "; and %d more", len(e.Failures)-i)
+			break
+		}
+		if i > 0 {
+			detail.WriteString("; ")
+		}
+		fmt.Fprintf(&detail, "%s %s: %v", failure.Action, failure.Path, failure.Err)
+	}
+	return fmt.Sprintf("operation DAG has %d blocked or cyclic nodes (%d failed: %s)", e.Remaining, len(e.Failures), detail.String())
+}
+
+// Unwrap lets errors.Is and errors.As reach the error of every failed operation.
+func (e *PartialSyncError) Unwrap() []error {
+	errs := make([]error, 0, len(e.Failures))
+	for _, failure := range e.Failures {
+		errs = append(errs, failure.Err)
+	}
+	return errs
+}
+
+// SyncAll performs all pending iRODS operations and clears metadata one by one (exclusive lock).
+//
+// An operation that fails does not stop the others: it is left out of the rest
+// of this call and kept, failed, with its staged data, so a later sync retries
+// it. The operations that do not depend on it still run, so one bad operation
+// cannot keep the rest of a staging area from reaching iRODS. The
+// operations that wait on a failed one stay queued behind it, since running them
+// out of order could do the wrong thing. When nothing more can run and
+// something is left, a *PartialSyncError says what.
 func (sm *StagingStateManager) SyncAll() error {
+	var failures []OperationSyncFailure
+	failed := make(map[string]struct{})
+
 	for {
 		// A candidate may be skipped because another worker took it or a local
 		// writer holds a lease, so a pass can execute nothing at all.
@@ -1281,9 +1341,26 @@ func (sm *StagingStateManager) SyncAll() error {
 		// queued during the pass is picked up by the next one.
 		progressed := false
 		for _, meta := range sm.getSyncCandidates(0, true) {
+			if _, skip := failed[meta.OperationID]; skip {
+				continue
+			}
 			executed, stale, err := sm.syncCandidate(meta, 0, true)
 			if err != nil {
-				return err
+				// A failure to record an operation that ran is not the
+				// operation's own, and is not retried around.
+				if !errors.Is(err, errOperationHandlerFailed) {
+					return err
+				}
+				failed[meta.OperationID] = struct{}{}
+				failures = append(failures, OperationSyncFailure{
+					OperationID: meta.OperationID,
+					Action:      meta.Action,
+					Path:        meta.Path,
+					OldPath:     meta.OldPath,
+					Err:         err,
+				})
+				progressed = true
+				continue
 			}
 			if executed || stale {
 				progressed = true
@@ -1299,7 +1376,7 @@ func (sm *StagingStateManager) SyncAll() error {
 			sm.mu.Unlock()
 			return nil
 		}
-		if sm.runnableCandidateExistsUnlocked() {
+		if sm.runnableCandidateExistsUnlocked(failed) {
 			// Work queued or edited while the pass ran is not in the snapshot
 			// the pass consumed. Take a fresh one instead of waiting for a
 			// completion that nothing is going to signal, or reporting a DAG
@@ -1307,8 +1384,11 @@ func (sm *StagingStateManager) SyncAll() error {
 			sm.mu.Unlock()
 			continue
 		}
-		if !sm.progressPossibleUnlocked() {
+		if !sm.progressPossibleUnlocked(failed) {
 			sm.mu.Unlock()
+			if len(failures) > 0 {
+				return &PartialSyncError{Remaining: remaining, Failures: failures}
+			}
 			return errors.Newf("operation DAG has %d blocked or cyclic nodes", remaining)
 		}
 		// Work owned by someone else is still in flight. Wait for it rather than
@@ -1322,8 +1402,11 @@ func (sm *StagingStateManager) SyncAll() error {
 // become runnable once work owned by someone else finishes: an operation that
 // another worker is running, or one held back by a local writer's lease. The
 // caller must hold sm.mu.
-func (sm *StagingStateManager) progressPossibleUnlocked() bool {
-	for _, op := range sm.dag.nodes {
+func (sm *StagingStateManager) progressPossibleUnlocked(skip map[string]struct{}) bool {
+	for id, op := range sm.dag.nodes {
+		if _, skipped := skip[id]; skipped {
+			continue
+		}
 		if op.State == OperationRunning {
 			return true
 		}
@@ -1339,9 +1422,14 @@ func (sm *StagingStateManager) progressPossibleUnlocked() bool {
 
 // runnableCandidateExistsUnlocked reports whether an operation could run right
 // now: nothing blocks it, it waits on nothing, it is not already running, and
-// no local writer holds its data. The caller must hold sm.mu.
-func (sm *StagingStateManager) runnableCandidateExistsUnlocked() bool {
-	for _, op := range sm.dag.nodes {
+// no local writer holds its data. Operations in skip are not considered, which
+// is how a sync leaves out the ones that failed during it. The caller must hold
+// sm.mu.
+func (sm *StagingStateManager) runnableCandidateExistsUnlocked(skip map[string]struct{}) bool {
+	for id, op := range sm.dag.nodes {
+		if _, skipped := skip[id]; skipped {
+			continue
+		}
 		if op.State == OperationRunning || op.State == OperationBlocked || len(op.Dependencies) != 0 {
 			continue
 		}
