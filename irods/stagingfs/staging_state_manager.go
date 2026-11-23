@@ -96,6 +96,7 @@ type StagingMetadata struct {
 	CreatedAt            time.Time        // Creation time
 	LastModifiedAt       time.Time        // Last modification time
 	SyncFailCount        int              // Number of consecutive sync failures
+	LastSyncError        string           // Why the latest sync of this operation failed, empty until it fails
 	BackendMayExist      bool             // A completed descendant operation may have created this directory remotely
 	FileState            StagingFileState // Whether local file is dirty or cached
 	LastAccessedAt       time.Time        // Last time the cached file was accessed (for eviction)
@@ -1138,9 +1139,12 @@ func (sm *StagingStateManager) syncCandidate(meta *StagingMetadata, gracePeriod 
 			if live := sm.dag.get(meta.OperationID); live != nil {
 				live.State = OperationFailed
 				live.Metadata.SyncFailCount++
+				live.Metadata.LastSyncError = truncateSyncError(err)
 				meta.SyncFailCount = live.Metadata.SyncFailCount
+				meta.LastSyncError = live.Metadata.LastSyncError
 				if latest := sm.metadata[live.Metadata.Path]; latest != nil && latest.OperationID == live.ID {
 					latest.SyncFailCount = live.Metadata.SyncFailCount
+					latest.LastSyncError = live.Metadata.LastSyncError
 				}
 				sm.persistOperationStateUnlocked(live.ID)
 			}
@@ -1264,6 +1268,19 @@ func (sm *StagingStateManager) completeOperationUnlocked(operationID string, pat
 	}
 
 	return nil
+}
+
+// maxSyncErrorLength bounds the error text kept with an operation. It is stored
+// with the operation and shown to operators, and an error can carry a long path
+// or a long chain of causes.
+const maxSyncErrorLength = 1000
+
+func truncateSyncError(err error) string {
+	message := err.Error()
+	if len(message) > maxSyncErrorLength {
+		return message[:maxSyncErrorLength] + "..."
+	}
+	return message
 }
 
 // errOperationHandlerFailed marks the error of an operation whose backend handler

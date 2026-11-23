@@ -2,6 +2,7 @@ package stagingfs
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -71,6 +72,14 @@ func TestSyncAllRunsIndependentOperationsPastAFailure(t *testing.T) {
 	}
 	if op := sm.dag.get(meta.OperationID); op == nil || op.State == OperationBlocked {
 		t.Fatalf("the failed operation is %+v, want it retryable", op)
+	}
+
+	// Why it failed is kept with it, for whoever has to look at it.
+	if !strings.Contains(meta.LastSyncError, "permission denied") {
+		t.Fatalf("LastSyncError = %q, want the failure's cause", meta.LastSyncError)
+	}
+	if op := sm.dag.get(meta.OperationID); op == nil || !strings.Contains(op.Metadata.LastSyncError, "permission denied") {
+		t.Fatalf("the operation does not carry the failure: %+v", op)
 	}
 
 	// Once the cause is gone, the next sync finishes it.
